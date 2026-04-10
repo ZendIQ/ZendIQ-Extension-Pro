@@ -2,19 +2,17 @@
   "manifest_version": 3,
   "name": "ZendIQ \u2013 Smart Trade Routing",
   "version": "0.7.2",
-  "description": "Real-time swap protection for Solana. ZendIQ monitors your Jupiter trades, detects bot attack risk (front-running \u0026 sandwich attacks), and re-routes through optimised paths \u2014 before you sign.",
+  "description": "Solana swap optimiser. Real-time token score, MEV bot detection, and route optimisation on Jupiter \u0026 Raydium \u2014 before you sign.",
+  "homepage_url": "https://zendiq.ai",
   "permissions": [
     "storage",
     "activeTab",
     "tabs",
-    "scripting",
-    "webRequest"
+    "scripting"
   ],
   "host_permissions": [
-    "https://*.helius-rpc.com/*",
     "https://*.jup.ag/*",
     "https://*.raydium.io/*",
-    "https://api.devnet.solana.com/*",
     "https://api.jup.ag/*",
     "https://api.mainnet-beta.solana.com/*",
     "https://solana.publicnode.com/*",
@@ -24,16 +22,7 @@
     "https://ultra-api.jup.ag/*",
     "https://api.rugcheck.xyz/*",
     "https://api.dexscreener.com/*",
-    "https://api.geckoterminal.com/*",
-    "https://mainnet.block-engine.jito.wtf/*",
-    "https://amsterdam.mainnet.block-engine.jito.wtf/*",
-    "https://frankfurt.mainnet.block-engine.jito.wtf/*",
-    "https://ny.mainnet.block-engine.jito.wtf/*",
-    "https://tokyo.mainnet.block-engine.jito.wtf/*",
-    "https://dublin.mainnet.block-engine.jito.wtf/*",
-    "https://london.mainnet.block-engine.jito.wtf/*",
-    "https://slc.mainnet.block-engine.jito.wtf/*",
-    "https://singapore.mainnet.block-engine.jito.wtf/*"
+    "https://api.geckoterminal.com/*"
   ],
   "content_scripts": [
     {
@@ -89,7 +78,7 @@
   "action": {
     "default_popup": "popup/popup.html",
     "default_title": "ZendIQ",
-    "default_icons": {
+    "default_icon": {
       "16": "assets/icon-16.png",
       "48": "assets/icon-48.png",
       "128": "assets/icon-128.png"
@@ -101,11 +90,15 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "assets/*"
+        "assets/icon-48.png"
       ],
       "matches": [
         "https://jup.ag/*",
-        "https://raydium.io/*"
+        "https://*.jup.ag/*",
+        "https://raydium.io/*",
+        "https://*.raydium.io/*",
+        "https://pump.fun/*",
+        "https://*.pump.fun/*"
       ]
     }
   ]
