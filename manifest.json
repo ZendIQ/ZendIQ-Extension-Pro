@@ -1,0 +1,112 @@
+{
+  "manifest_version": 3,
+  "name": "ZendIQ \u2013 Smart Trade Routing",
+  "version": "0.7.2",
+  "description": "Real-time swap protection for Solana. ZendIQ monitors your Jupiter trades, detects bot attack risk (front-running \u0026 sandwich attacks), and re-routes through optimised paths \u2014 before you sign.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "scripting",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "https://*.helius-rpc.com/*",
+    "https://*.jup.ag/*",
+    "https://*.raydium.io/*",
+    "https://api.devnet.solana.com/*",
+    "https://api.jup.ag/*",
+    "https://api.mainnet-beta.solana.com/*",
+    "https://solana.publicnode.com/*",
+    "https://jup.ag/*",
+    "https://lite-api.jup.ag/*",
+    "https://raydium.io/*",
+    "https://ultra-api.jup.ag/*",
+    "https://api.rugcheck.xyz/*",
+    "https://api.dexscreener.com/*",
+    "https://api.geckoterminal.com/*",
+    "https://mainnet.block-engine.jito.wtf/*",
+    "https://amsterdam.mainnet.block-engine.jito.wtf/*",
+    "https://frankfurt.mainnet.block-engine.jito.wtf/*",
+    "https://ny.mainnet.block-engine.jito.wtf/*",
+    "https://tokyo.mainnet.block-engine.jito.wtf/*",
+    "https://dublin.mainnet.block-engine.jito.wtf/*",
+    "https://london.mainnet.block-engine.jito.wtf/*",
+    "https://slc.mainnet.block-engine.jito.wtf/*",
+    "https://singapore.mainnet.block-engine.jito.wtf/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://jup.ag/*",
+        "https://*.jup.ag/*",
+        "https://raydium.io/*",
+        "https://*.raydium.io/*",
+        "https://pump.fun/*",
+        "https://*.pump.fun/*"
+      ],
+      "js": [
+        "scripts/bridge.js"
+      ],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": [
+        "https://jup.ag/*",
+        "https://*.jup.ag/*",
+        "https://raydium.io/*",
+        "https://*.raydium.io/*",
+        "https://pump.fun/*",
+        "https://*.pump.fun/*"
+      ],
+      "js": [
+        "scripts/page-config.js",
+        "scripts/page-utils.js",
+        "scripts/page-decoders.js",
+        "scripts/page-risk.js",
+        "scripts/page-token-score.js",
+        "scripts/page-wallet.js",
+        "scripts/page-approval.js",
+        "scripts/page-widget.js",
+        "scripts/page-trade.js",
+        "scripts/page-network.js",
+        "scripts/page-jupiter.js",
+        "scripts/page-pump.js",
+        "scripts/page-raydium.js",
+        "scripts/page-interceptor.js",
+        "scripts/page-badge.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "icons": {
+    "16": "assets/icon-16.png",
+    "48": "assets/icon-48.png",
+    "128": "assets/icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "ZendIQ",
+    "default_icons": {
+      "16": "assets/icon-16.png",
+      "48": "assets/icon-48.png",
+      "128": "assets/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "scripts/background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/*"
+      ],
+      "matches": [
+        "https://jup.ag/*",
+        "https://raydium.io/*"
+      ]
+    }
+  ]
+}

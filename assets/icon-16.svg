@@ -1,0 +1,68 @@
+<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="ring" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%"   stop-color="#00e5ff"/>
+      <stop offset="35%"  stop-color="#5566ff"/>
+      <stop offset="65%"  stop-color="#9922ff"/>
+      <stop offset="100%" stop-color="#cc44ff"/>
+    </linearGradient>
+    <linearGradient id="iq" x1="0%" y1="0%" x2="40%" y2="100%">
+      <stop offset="0%"   stop-color="#aa44ff"/>
+      <stop offset="100%" stop-color="#cc22ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Dark background -->
+  <rect width="128" height="128" rx="22" fill="#060608"/>
+
+  <!-- Ensō brushstroke ring — outer glow -->
+  <path
+    d="M 64 14
+       C 92 13, 114 34, 115 62
+       C 116 91, 95 113, 66 114
+       C 37 115, 14 93, 13 64
+       C 12 38, 30 17, 55 14"
+    fill="none" stroke="#7722ff" stroke-width="14"
+    stroke-linecap="round" opacity="0.2"/>
+
+  <!-- Main ring body -->
+  <path
+    d="M 64 15
+       C 91 14, 113 35, 113 63
+       C 113 90, 93 112, 65 113
+       C 37 114, 15 93, 15 65
+       C 15 39, 33 18, 57 15"
+    fill="none" stroke="url(#ring)" stroke-width="9"
+    stroke-linecap="round"/>
+
+  <!-- Thick brush entry at top -->
+  <path
+    d="M 64 15 C 72 14, 80 15, 87 18"
+    fill="none" stroke="url(#ring)" stroke-width="12"
+    stroke-linecap="round" opacity="0.9"/>
+
+  <!-- Thin tail — brush lifting -->
+  <path
+    d="M 44 23 C 49 19, 53 16, 58 15"
+    fill="none" stroke="#00e5ff" stroke-width="4"
+    stroke-linecap="round" opacity="0.55"/>
+
+  <!-- Wisp -->
+  <path
+    d="M 38 30 C 41 26, 43 23, 46 21"
+    fill="none" stroke="#00e5ff" stroke-width="2"
+    stroke-linecap="round" opacity="0.2"/>
+
+  <!-- IQ — gradient purple, bold -->
+  <text
+    x="65" y="70"
+    font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif"
+    font-weight="900"
+    font-size="48"
+    fill="url(#iq)"
+    text-anchor="middle"
+    dominant-baseline="middle"
+    letter-spacing="-2"
+  >IQ</text>
+
+</svg>
