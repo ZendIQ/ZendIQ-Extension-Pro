@@ -4,13 +4,13 @@
 >
 > 🌐 [zendiq.ai](https://zendiq.ai)
 
-> **Status:** Live in development — Chrome Web Store release pending Pro beta (June 2026). Lite edition already live: [Chrome Web Store](https://chromewebstore.google.com/detail/piacdmhfdpnddopdojdfkjbbbcpgpblf)
+> **Status:** Live in development — Chrome Web Store release pending Pro beta (June 2026). **ZendIQ Lite** (the free edition) is already live on the Chrome Web Store: [Install ZendIQ Lite →](https://chromewebstore.google.com/detail/piacdmhfdpnddopdojdfkjbbbcpgpblf)
 
 ---
 
 ## What it does
 
-ZendIQ Pro sits silently in your browser and activates the moment you click **Swap**. An in-page widget and popup give you:
+ZendIQ Pro runs alongside your favourite Solana DEX and springs into action the moment you click **Swap**. An in-page widget and popup give you:
 
 - A **real-time risk score** for the token you are buying (0–100, 16 on-chain signals)
 - A **Bot Attack Risk** rating — detects MEV exposure on the public mempool
