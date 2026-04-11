@@ -20,11 +20,11 @@ function bgMsg(payload) {
   });
 }
 
-// ── Find a jup.ag / raydium tab ────────────────────────────────────────────
+// ── Find a jup.ag / raydium / pump.fun tab ───────────────────────────────
 async function findDexTab() {
   const byUrl = await new Promise(resolve => {
     chrome.tabs.query(
-      { url: ['*://jup.ag/*', '*://*.jup.ag/*', '*://raydium.io/*', '*://*.raydium.io/*'] },
+      { url: ['*://jup.ag/*', '*://*.jup.ag/*', '*://raydium.io/*', '*://*.raydium.io/*', '*://pump.fun/*'] },
       tabs => resolve(tabs ?? [])
     );
   });
@@ -35,9 +35,17 @@ async function findDexTab() {
   });
   for (const tab of allTabs) {
     const url = tab.url ?? '';
-    if (url.includes('jup.ag') || url.includes('raydium.io')) return tab;
+    if (url.includes('jup.ag') || url.includes('raydium.io') || url.includes('pump.fun')) return tab;
   }
   return null;
+}
+
+// ── Determine which DEX a tab belongs to ──────────────────────────────────
+function _dexSiteFromTab(tab) {
+  const url = tab?.url ?? '';
+  if (url.includes('raydium.io')) return { name: 'Raydium', host: 'raydium.io', href: 'https://raydium.io/swap/', color: 'var(--purple)' };
+  if (url.includes('pump.fun'))   return { name: 'pump.fun', host: 'pump.fun', href: 'https://pump.fun', color: 'var(--purple)' };
+  return { name: 'jup.ag', host: 'jup.ag', href: 'https://jup.ag', color: 'var(--purple)' };
 }
 
 // ── Helper injected into page to extract the connected wallet pubkey ───────

@@ -76,8 +76,9 @@
             }
             // If the output mint changed mid-session, clear stale trade context
             if (_prev && _prev !== outM) {
-              ns.widgetCapturedTrade = null;
-              ns.widgetLastOrder     = null;
+              ns.widgetCapturedTrade  = null;
+              ns.widgetLastOrder      = null;
+              ns._rdmSwapAttempted    = false; // reset so Token Risk hides until next Swap click
             }
           }
         } catch (_) {}
@@ -128,6 +129,7 @@
     // ── Wallet hook: extract swap amounts from the serialised tx ────────────
     onWalletArgs(args) {
       try {
+        ns._rdmSwapAttempted = true; // user clicked Swap — enable Token Risk display
         const vtx = _toVTx(args?.[0]);
         if (!vtx) return;
         const txInfo = ns.extractTxInfo?.(vtx);
@@ -277,7 +279,6 @@
     },
     // ── Monitor tab idle content when on raydium.io ──────────────────────────
     renderMonitor() {
-      const lq    = ns.jupiterLiveQuote;
       const score = ns.tokenScoreResult;
       const risk  = ns.lastRiskResult;
 
@@ -294,14 +295,13 @@
 
       return `
         <div style="padding:14px 16px">
-          <div style="font-size:13px;font-weight:700;color:#14F195;letter-spacing:.06em;margin-bottom:10px">
-            RAYDIUM MONITORING
+          <div style="font-size:12px;color:#9B9BAD;text-align:center;padding:12px 0;line-height:1.6">
+            Monitoring active.<br>
+            <a href="https://raydium.io/swap/" target="_blank" rel="noopener"
+               style="color:#14F195;font-weight:600;text-decoration:none">Swap on Raydium</a>
+            to see risk analysis here.
           </div>
-          <div style="font-size:13px;color:#C2C2D4;line-height:1.6;margin-bottom:10px">
-            ZendIQ is watching this swap. When you click <strong style="color:#E0E0FF">Swap</strong>,
-            it will compare Raydium's route with Jupiter's live quote and show you the better deal.
-          </div>
-          ${tsLoaded ? `
+          ${ns._rdmSwapAttempted ? (tsLoaded ? `
           <div style="display:flex;justify-content:space-between;align-items:center;
                       background:rgba(255,255,255,0.04);border-radius:8px;padding:8px 10px">
             <span style="font-size:13px;color:#C2C2D4">Token Risk</span>
@@ -309,8 +309,8 @@
           </div>` : outM ? `
           <div style="font-size:12px;color:#9B9BAD;text-align:center;padding:4px 0">
             Scanning token risk&hellip;
-          </div>` : ''}
-          ${risk ? `
+          </div>` : '') : ''}
+          ${ns._rdmSwapAttempted && risk ? `
           <div style="display:flex;justify-content:space-between;align-items:center;
                       background:rgba(255,255,255,0.04);border-radius:8px;padding:8px 10px;margin-top:6px">
             <span style="font-size:13px;color:#C2C2D4">Bot Risk</span>
