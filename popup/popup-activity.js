@@ -212,7 +212,7 @@ function _buildTooltipHtml(h) {
 
   // Est. Bot Attack Exposure — always shown
   html += row(
-    `<span title="Estimated dollar value bots could extract from this swap via front-running or sandwich attacks (MEV = Maximal Extractable Value). ZendIQ's Jito tip routes your transaction to validators who block these attacks." style="cursor:help">Est. Bot Attack Exposure</span>`,
+    `<span title="Estimated dollar value bots could have extracted from this swap via front-running or sandwich attacks on the original AMM route. ZendIQ eliminated this exposure${_isRFQFill ? ' by routing to a direct RFQ market-maker fill (zero mempool exposure).' : ' via Jito validator tips.'}" style="cursor:help">Est. Bot Attack Exposure</span>`,
     mevUsd != null ? fmt(mevUsd) : '—',
     mevUsd != null ? (mevUsd > 0.0001 ? '#FFB547' : '#14F195') : 'var(--muted)'
   );
@@ -245,15 +245,19 @@ function _buildTooltipHtml(h) {
   }
 
   // Savings & Costs — always shown
-  const _mevMult = (h.routeSource === 'raydium' && h.jitoBundle) ? 0.95 : 0.70;
+  const _isRFQFill  = h.swapType === 'rfq' || h.swapType === 'gasless';
+  const _mevMult = (h.routeSource === 'raydium' && h.jitoBundle) ? 0.95 : _isRFQFill ? 1.0 : 0.70;
   // Prefer the frozen snap value (set at Review & Sign time when jitoUsd was non-zero).
   // Falls back to re-computing from stored risk data when the snap value was added later.
   const _mevProtection = h.snapMevProtectionUsd != null && h.snapMevProtectionUsd >= 0.0001
     ? h.snapMevProtectionUsd
-    : (mevUsd != null && (jitoTipUsd ?? 0) > 0 && mevUsd * _mevMult >= 0.0001) ? mevUsd * _mevMult : null;
+    : (mevUsd != null && (_isRFQFill || (jitoTipUsd ?? 0) > 0) && mevUsd * _mevMult >= 0.0001) ? mevUsd * _mevMult : null;
+  const _mevLabel = _isRFQFill
+    ? `<span title="RFQ direct fill bypasses the public mempool entirely \u2014 zero sandwich/front-run exposure. ZendIQ routed you to a market maker instead of an AMM pool, eliminating bot attack risk completely (100% coverage vs ~70% with Jito)." style="cursor:help">Bot protection (RFQ \u00b7 100%)</span>`
+    : `<span title="Statistical MEV protection value: estimated bot-attack exposure \xd7 ${Math.round(_mevMult * 100)}% coverage rate from Jito routing. Covers most sandwich attacks before they execute." style="cursor:help">Bot protection (\xd7${Math.round(_mevMult * 100)}%)</span>`;
   html += `<div style="margin:8px 0 4px;color:var(--muted);font-size:var(--fs-base);font-weight:700;text-transform:uppercase;letter-spacing:0.4px;cursor:help" title="Routing improvement achieved by ZendIQ\u2019s route vs Jupiter\u2019s concurrent quote, plus statistical MEV protection value, minus all associated costs.">Savings &amp; Costs</div>`;
   if (savingsUsd != null) { const _absS = Math.abs(savingsUsd), _tiny = _absS < 0.0001; html += sub(`<span title="Extra USD value ZendIQ\u2019s route obtained vs Jupiter\u2019s concurrent live quote at sign time (gross, before costs)." style="cursor:help">Est. Routing improvement</span>`, _tiny ? '\u2248\u00a0none' : (savingsUsd >= 0 ? '+' : '\u2212') + fmt(_absS), _tiny ? 'var(--muted)' : (savingsUsd >= 0 ? '#14F195' : '#FF4D4D')); }
-  if (_mevProtection != null) html += sub(`<span title="Statistical MEV protection value: estimated bot-attack exposure \xd7 ${Math.round(_mevMult * 100)}% coverage rate from Jito routing. Covers most sandwich attacks before they execute." style="cursor:help">Bot protection (\xd7${Math.round(_mevMult * 100)}%)</span>`, '+' + fmt(_mevProtection), '#9945FF');
+  if (_mevProtection != null) html += sub(_mevLabel, '+' + fmt(_mevProtection), '#9945FF');
   if (savingsUsd != null || _mevProtection != null) html += `<div style="border-top:1px solid rgba(255,255,255,0.06);margin:4px 0 4px 10px"></div>`;
   html += sub('ZendIQ Fee (0.05%)', '<span style="color:#14F195;font-weight:600">FREE · Beta</span>');
   html += sub(

@@ -2449,13 +2449,17 @@
               }
 
               // ZendIQ Costs — always shown
-              const _mevMult3 = (h.routeSource === 'raydium' && h.jitoBundle) ? 0.95 : 0.70;
+              const _isRFQFill3 = h.swapType === 'rfq' || h.swapType === 'gasless';
+              const _mevMult3 = (h.routeSource === 'raydium' && h.jitoBundle) ? 0.95 : _isRFQFill3 ? 1.0 : 0.70;
               const _mevProt3 = h.snapMevProtectionUsd != null && h.snapMevProtectionUsd >= 0.0001
                 ? h.snapMevProtectionUsd
-                : (mevUsd != null && (jitoFee ?? 0) > 0 && mevUsd * _mevMult3 >= 0.0001) ? mevUsd * _mevMult3 : null;
+                : (mevUsd != null && (_isRFQFill3 || (jitoFee ?? 0) > 0) && mevUsd * _mevMult3 >= 0.0001) ? mevUsd * _mevMult3 : null;
+              const _mevLabel3 = _isRFQFill3
+                ? `<span title="RFQ direct fill bypasses the public mempool entirely \u2014 zero sandwich/front-run exposure. ZendIQ routed you to a market maker instead of an AMM pool, eliminating bot attack risk completely (100% coverage vs ~70% with Jito)." style="cursor:help">Bot protection (RFQ \u00b7 100%)</span>`
+                : `<span title="Statistical MEV protection value: estimated bot-attack exposure \xd7 ${Math.round(_mevMult3 * 100)}% coverage rate from Jito routing." style="cursor:help">Bot protection (\xd7${Math.round(_mevMult3 * 100)}%)</span>`;
               t += `<div style="margin:8px 0 4px;color:#C2C2D4;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;cursor:help" title="Routing improvement achieved by ZendIQ\u2019s route vs Jupiter\u2019s concurrent quote, plus statistical MEV protection value, minus all associated costs.">Savings &amp; Costs</div>`;
               if (savingsUsd != null) { const _absS3 = Math.abs(savingsUsd), _tiny3 = _absS3 < 0.0001; t += sub(`<span title="Extra USD value ZendIQ\u2019s route obtained vs Jupiter\u2019s concurrent live quote at sign time (gross, before costs)." style="cursor:help">Est. Routing improvement</span>`, _tiny3 ? '\u2248\u00a0none' : (savingsUsd >= 0 ? '+' : '\u2212') + fmt(_absS3), _tiny3 ? '#C2C2D4' : (savingsUsd >= 0 ? '#14F195' : '#FF4D4D')); }
-              if (_mevProt3 != null) t += sub(`<span title="Statistical MEV protection value: estimated bot-attack exposure \xd7 ${Math.round(_mevMult3 * 100)}% coverage rate from Jito routing." style="cursor:help">Bot protection (\xd7${Math.round(_mevMult3 * 100)}%)</span>`, '+' + fmt(_mevProt3), '#9945FF');
+              if (_mevProt3 != null) t += sub(_mevLabel3, '+' + fmt(_mevProt3), '#9945FF');
               if (savingsUsd != null || _mevProt3 != null) t += `<div style="border-top:1px solid rgba(255,255,255,0.06);margin:4px 0 4px 10px"></div>`;
               t += sub('ZendIQ Fee (0.05%)', '<span style="color:#14F195;font-weight:600">FREE · Beta</span>');
               t += sub(`<span title="Compute unit price paid to Solana validators to prioritise your transaction. Baked into the transaction at quote time." style="cursor:help">Priority Fee (via ${h.routeSource === 'raydium' ? 'Raydium' : 'Jupiter'})</span>`, priFee != null ? fmt(priFee) : '—', priFee != null && priFee > 0 ? '#FFB547' : undefined);
