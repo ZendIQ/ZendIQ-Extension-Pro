@@ -52,6 +52,7 @@
       "js": [
         "scripts/page-config.js",
         "scripts/page-utils.js",
+        "scripts/page-sandwich.js",
         "scripts/page-decoders.js",
         "scripts/page-risk.js",
         "scripts/page-token-score.js",

@@ -84,6 +84,10 @@
     tokenScoreCache:   new Map(),  // Map<mint, {result, fetchedAt}> for 5-minute TTL caching
     _tokenScoreMint:   null,  // mint currently being / last scored (dedup guard)
 
+    // Sandwich detection — post-trade block scan (page-sandwich.js initialises these to Map/Set)
+    sandwichCache:    null,  // Map<txSig, result> — results cached indefinitely per session
+    _sandwichPending: null,  // Set<txSig>  — dedup guard for concurrent calls
+
     // Onboarding — false until user dismisses welcome card (shared with popup via sendiq_onboarded)
     onboarded: null,  // null = not yet loaded from storage; false = not seen; true = seen
 

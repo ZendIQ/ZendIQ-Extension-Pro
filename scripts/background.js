@@ -148,7 +148,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const _body = JSON.stringify({ jsonrpc:'2.0', id:1, method: msg.method, params: msg.params ?? [] });
     const _fetchOne = (url) => {
       const ac = new AbortController();
-      const timer = setTimeout(() => ac.abort(), 10_000); // 10 s per endpoint
+      const timer = setTimeout(() => ac.abort(), 12_000); // 12 s per endpoint
       return fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: _body, signal: ac.signal })
         .then(r => { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
         .then(data => { if (data?.error) throw new Error(data.error.message ?? 'RPC error'); clearTimeout(timer); return data; })

@@ -592,6 +592,32 @@
                   accRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Waiting for on-chain confirmation to compare against the DEX's quoted amount. Updates automatically a few seconds after the swap confirms.">ZendIQ Quote Accuracy</span><span style="color:#C2C2D4">pending…</span></div>`;
                 }
               }
+              // Sandwich detection row — only shown when sandwichResult field has been set.
+              // null = check in progress (arrives via HISTORY_UPDATE ~5–15s after confirm).
+              // Omitted entirely for RFQ/gasless (no AMM mempool exposure).
+              const _isRFQType = h.swapType === 'rfq' || h.swapType === 'gasless';
+              let sandwichRow = '';
+              if ('sandwichResult' in h && !_isRFQType) {
+                const _sr = h.sandwichResult;
+                if (_sr === null) {
+                  sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Scanning surrounding block transactions for sandwich attacks. Updates automatically.">Sandwich check</span><span style="color:#C2C2D4">pending…</span></div>`;
+                } else if (_sr?.error) {
+                  sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Block data was unavailable \u2014 sandwich check could not complete.">Sandwich check</span><span style="color:#9B9BAD">unknown</span></div>`;
+                } else if (_sr?.detected) {
+                  const _extStr = _sr.extractedUsd != null && _sr.extractedUsd > 0.001
+                    ? '\u26a0 ~$' + _sr.extractedUsd.toFixed(2) + ' extracted'
+                    : '\u26a0 detected';
+                  const _attackTip = _sr.attackerWallet
+                    ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr.attackerWallet)}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : 'unknown'}.`
+                    : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : 'unknown'}.`;
+                  sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#FFB547;cursor:help" title="${escapeHtml(_attackTip)}">Sandwiched</span><span style="color:#FFB547;font-weight:700">${escapeHtml(_extStr)}</span></div>`;
+                } else if (_sr && !_sr.detected) {
+                  const _scanTip = _sr.scanned > 0
+                    ? `Scanned ${_sr.scanned} transaction${_sr.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.`
+                    : 'No sandwich activity detected.';
+                  sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#14F195;cursor:help" title="${escapeHtml(_scanTip)}">Sandwich check</span><span style="color:#14F195;font-weight:700">\u2713 Clean</span></div>`;
+                }
+              }
               // ── Unoptimized trade card ───────────────────────────────────
               if (!h.optimized) {
                 // On-chain vs Quote row: actualOutAmount (confirmed) vs quotedOut (Jupiter's quote)
@@ -626,6 +652,7 @@
                     </div>
                     ${_execRow}
                     ${_jupAccRow}
+                    ${sandwichRow}
                     <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#9B9BAD">
                       <div style="color:#14F195;">${solscanLink}</div>
                       <div style="color:#9B9BAD;font-size:12px">${ago}</div>
@@ -644,6 +671,7 @@
                   </div>
                   ${savRow}
                   ${accRow}
+                  ${sandwichRow}
                   <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#9B9BAD">
                     <div style="color:#14F195;">${solscanLink}</div>
                     <div style="color:#9B9BAD;font-size:12px">${ago}</div>
@@ -2299,6 +2327,32 @@
                   }
                 });
               }
+              // Retroactively run sandwich detection for old entries that pre-date this
+              // feature (they have no sandwichResult key at all). Same pattern as the
+              // fetchActualOut retry above — fires once per signature, persists via
+              // HISTORY_UPDATE so the result survives future page loads.
+              // NOTE: do NOT manually manage ns._sandwichPending here — detectSandwich
+              // handles its own dedup internally via that same Set.
+              if (ns.detectSandwich) {
+                ns.recentSwaps.forEach(p => {
+                  if (!p.signature || !p.inputMint || !p.outputMint) return;
+                  if ('sandwichResult' in p && p.sandwichResult !== null && !p.sandwichResult?.error) return; // already has a real result
+                  if (p.swapType === 'rfq' || p.swapType === 'gasless') return; // no mempool
+                  (async () => {
+                    try {
+                      const result = await ns.detectSandwich(
+                        p.signature, p.inputMint, p.outputMint,
+                        { inUsdValue: p.inUsdValue ?? null }
+                      );
+                      if (!result) return;
+                      window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
+                        signature:      p.signature,
+                        sandwichResult: result,
+                      }}}, '*');
+                    } catch (_) {}
+                  })();
+                });
+              }
             }
             // If a single-history update arrives for an optimized entry that has no
             // on-chain quoteAccuracy yet, fetch it from the RPC here (page context
@@ -2326,6 +2380,19 @@
                   })();
                 }
               } catch (_) {}
+            }
+            // Merge incoming payload into ns.recentSwaps so renderWidgetPanel() sees fresh data
+            // without requiring a full GET_HISTORY round-trip.
+            if (m.type === 'HISTORY_UPDATE' && m.payload?.signature) {
+              const _sig = m.payload.signature;
+              const _idx = ns.recentSwaps.findIndex(s => s.signature === _sig);
+              if (_idx >= 0) {
+                ns.recentSwaps[_idx] = Object.assign({}, ns.recentSwaps[_idx], m.payload);
+              } else {
+                ns.recentSwaps.unshift(m.payload);
+                if (ns.recentSwaps.length > (ns.MAX_SWAP_HISTORY ?? 20))
+                  ns.recentSwaps = ns.recentSwaps.slice(0, ns.MAX_SWAP_HISTORY ?? 20);
+              }
             }
             // Trigger re-render only when Activity tab is visible.
             if (ns.widgetActiveTab === 'activity') { renderWidgetPanel(); return; }
@@ -2427,6 +2494,25 @@
                 mevUsd != null ? fmt(mevUsd) : '—',
                 mevUsd != null ? (mevUsd > 0.0001 ? '#FFB547' : '#14F195') : '#C2C2D4'
               );
+
+              // Sandwich detection result — shown for all AMM trades (not RFQ/gasless)
+              if ('sandwichResult' in h && h.swapType !== 'rfq' && h.swapType !== 'gasless') {
+                const _sr2 = h.sandwichResult;
+                if (_sr2 === null) {
+                  t += row(`<span title="Scanning surrounding block transactions for sandwich attacks." style="cursor:help">Sandwich check</span>`, 'pending\u2026', '#C2C2D4');
+                } else if (_sr2?.error) {
+                  t += row(`<span title="Block data unavailable \u2014 sandwich check could not complete." style="cursor:help">Sandwich check</span>`, 'unknown', '#9B9BAD');
+                } else if (_sr2?.detected) {
+                  const _tip2 = _sr2.attackerWallet
+                    ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr2.attackerWallet)}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`
+                    : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr2.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`;
+                  const _extV = _sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '\u2248\u00a0$' + _sr2.extractedUsd.toFixed(2) + ' extracted' : 'detected';
+                  t += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV, '#FFB547');
+                } else if (_sr2 && !_sr2.detected) {
+                  const _scan2 = _sr2.scanned > 0 ? `Scanned ${_sr2.scanned} transaction${_sr2.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.` : 'No sandwich activity detected.';
+                  t += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, '\u2713 Clean', '#14F195');
+                }
+              }
 
               // Risk Factors + Bot Attack Risk — always shown in advanced mode
               if (ns.widgetMode !== 'simple') {
@@ -2758,6 +2844,23 @@
           t += `<div style="font-size:13px;font-weight:700;color:#E8E8F0;margin-bottom:8px">Performance Analysis</div>`;
           t += row(`<span title="ZendIQ's composite risk score (0–100)." style="cursor:help">Risk Score</span>`, h.riskScore != null ? `${escapeHtml(String(h.riskScore))}/100 ${escapeHtml(h.riskLevel??'')}` : '—', h.riskScore != null ? rlc : '#C2C2D4');
           t += row(`<span title="Estimated dollar value extractable by bots." style="cursor:help">Est. Bot Attack Exposure</span>`, mevUsd != null ? fmt(mevUsd) : '—', mevUsd != null ? (mevUsd > 0.0001 ? '#FFB547' : '#14F195') : '#C2C2D4');
+          if ('sandwichResult' in h && h.swapType !== 'rfq' && h.swapType !== 'gasless') {
+            const _sr2 = h.sandwichResult;
+            if (_sr2 === null) {
+              t += row(`<span title="Scanning surrounding block transactions for sandwich attacks." style="cursor:help">Sandwich check</span>`, 'pending\u2026', '#C2C2D4');
+            } else if (_sr2?.error) {
+              t += row(`<span title="Block data unavailable \u2014 sandwich check could not complete." style="cursor:help">Sandwich check</span>`, 'unknown', '#9B9BAD');
+            } else if (_sr2?.detected) {
+              const _tip2 = _sr2.attackerWallet
+                ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr2.attackerWallet)}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`
+                : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr2.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`;
+              const _extV = _sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '\u2248\u00a0$' + _sr2.extractedUsd.toFixed(2) + ' extracted' : 'detected';
+              t += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV, '#FFB547');
+            } else if (_sr2 && !_sr2.detected) {
+              const _scan2 = _sr2.scanned > 0 ? `Scanned ${_sr2.scanned} transaction${_sr2.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.` : 'No sandwich activity detected.';
+              t += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, '\u2713 Clean', '#14F195');
+            }
+          }
           if (ns.widgetMode !== 'simple') {
             const sfc = {CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'};
             t += `<div style="margin:8px 0 4px;font-size:9px;font-weight:700;color:#C2C2D4;text-transform:uppercase;letter-spacing:0.4px">Risk Factors</div>`;

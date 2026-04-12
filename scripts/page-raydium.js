@@ -238,6 +238,7 @@
             mevRiskLevel: _risk?.mev?.riskLevel ?? null,
             mevRiskScore: _risk?.mev?.riskScore ?? null,
             mevEstimatedLossPercent: _risk?.mev?.estimatedLossPercentage ?? null,
+            sandwichResult: null,  // populated via async HISTORY_UPDATE below
           };
           try {
             window.postMessage({ sr_bridge_to_ext: true,
@@ -294,6 +295,24 @@
                 }}}, '*');
               } catch (_) {}
             });
+          }
+          // Sandwich detection — fire-and-forget for Raydium AMM trades
+          if (ns.detectSandwich && _inMint && _outMint) {
+            const _inUsd = _ct?.inUsdValue ?? null;
+            const _inDec2 = _inDec;
+            (async () => {
+              try {
+                const result = await ns.detectSandwich(_sig, _inMint, _outMint, {
+                  inputDecimals: _inDec2,
+                  amountIn: _ct?.amountUI ?? null,
+                  amountInUsd: _inUsd,
+                });
+                if (!result) return;
+                window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
+                  signature: _sig, sandwichResult: result,
+                }}}, '*');
+              } catch (_) {}
+            })();
           }
         }
         return res;

@@ -157,6 +157,7 @@
           mevEstimatedLossPercent:   risk?.mev?.estimatedLossPercentage ?? null,
           inUsdValue:     _lq?.inUsdValue  ?? null,
           outUsdValue:    _lq?.outUsdValue ?? null,
+          ...(_lq?.swapType !== 'rfq' && _lq?.swapType !== 'gasless' ? { sandwichResult: null } : {}),
         };
         // Update widget: done-original on success, error on failure
         if (_wasSigningOrig) {
@@ -185,6 +186,24 @@
                 actualOutAmount: String(result.actualOut),
                 quoteAccuracy:   result.quoteAccuracy,
                 amountOut:       String(result.actualOut),
+              }}}, '*');
+            } catch (_) {}
+          })();
+        }
+        // Sandwich detection — fire-and-forget for AMM trades only
+        if (sig && inMint && outMint && ns.detectSandwich
+            && _lq?.swapType !== 'rfq' && _lq?.swapType !== 'gasless') {
+          const _inUsd = _lq?.inUsdValue ?? null;
+          (async () => {
+            try {
+              const result = await ns.detectSandwich(sig, inMint, outMint, {
+                inputDecimals: inDec,
+                amountIn: inAmt,
+                amountInUsd: _inUsd,
+              });
+              if (!result) return;
+              window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
+                signature: sig, sandwichResult: result,
               }}}, '*');
             } catch (_) {}
           })();
@@ -427,6 +446,7 @@
                   rawOutAmount:   _rdmRawOut != null ? String(_rdmRawOut) : null,
                   swapType:       'amm',
                   routeSource:    'raydium',
+                  sandwichResult: null,  // populated via async HISTORY_UPDATE below
                   riskScore:      _rdmRisk?.score  ?? null,
                   riskLevel:      _rdmRisk?.level  ?? null,
                   riskFactors:    _rdmRisk?.factors ?? [],
@@ -460,6 +480,22 @@
                       window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
                         signature: sig, actualOutAmount: String(result.actualOut),
                         quoteAccuracy: result.quoteAccuracy, amountOut: String(result.actualOut),
+                      }}}, '*');
+                    } catch (_) {}
+                  })();
+                }
+                // Sandwich detection — deduped by ns._sandwichPending so safe to call even if
+                // page-raydium.js already fired it for the same signature.
+                if (ns.detectSandwich && _rdmInMint && _rdmOutMint) {
+                  (async () => {
+                    try {
+                      const result = await ns.detectSandwich(sig, _rdmInMint, _rdmOutMint, {
+                        inputDecimals: _rdmInDec,
+                        amountInUsd: _rdmLq?.inUsdValue ?? null,
+                      });
+                      if (!result) return;
+                      window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
+                        signature: sig, sandwichResult: result,
                       }}}, '*');
                     } catch (_) {}
                   })();

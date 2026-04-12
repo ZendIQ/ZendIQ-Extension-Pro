@@ -2183,6 +2183,9 @@
           // estSavingsTokens: removed ? price-impact formula was producing phantom savings
           // that never matched Activity. Savings are either from baseline comparison or null.
           estSavingsTokens: null,
+          // Sandwich detection result — null = check in progress (resolved async via HISTORY_UPDATE).
+          // Field is omitted entirely for RFQ/gasless routes (no AMM pool, no sandwich possible).
+          ...(lastOrder.swapType !== 'rfq' && lastOrder.swapType !== 'gasless' ? { sandwichResult: null } : {}),
           // USD price data for savings breakdown tooltip
           ...(ns.widgetLastPriceData ?? {}),
         };
@@ -2210,6 +2213,27 @@
                 quoteAccuracy:    result.quoteAccuracy,
                 // Update displayed amountOut to actual received
                 amountOut:        String(result.actualOut),
+              }}}, '*');
+            } catch (_) {}
+          })();
+        }
+
+        // Sandwich detection — fire-and-forget, AMM trades only (RFQ/gasless have no mempool)
+        if (sig && ns.detectSandwich && captured?.inputMint && captured?.outputMint
+            && lastOrder.swapType !== 'rfq' && lastOrder.swapType !== 'gasless') {
+          // Capture ns state synchronously before any await (ns vars get nulled after this try block)
+          const _inUsdVal = ns.widgetLastPriceData?.inUsdValue ?? null;
+          (async () => {
+            try {
+              const result = await ns.detectSandwich(sig, captured.inputMint, captured.outputMint, {
+                inputDecimals: captured.inputDecimals ?? 9,
+                amountIn:    inAmt,
+                amountInUsd: _inUsdVal,
+              });
+              if (!result) return;
+              window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
+                signature: sig,
+                sandwichResult: result,
               }}}, '*');
             } catch (_) {}
           })();
