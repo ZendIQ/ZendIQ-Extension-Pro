@@ -90,6 +90,7 @@
               routePlan:    ns.jupiterLiveQuote?.routePlan ?? null,
               slippage:     slippagePct / 100,
               poolLiquidity: null,
+              routeType:    ns.mevRouteType?.(ns.jupiterLiveQuote),
             });
             if (mevRisk) {
               risk.mev = mevRisk;

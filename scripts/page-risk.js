@@ -201,6 +201,35 @@
     return 'LOW';
   }
 
+  // ── Route-type resolver ───────────────────────────────────────────────────
+  // mevRouteTypeFromLabel: pure string mapper — same rules as the Monitor tab route label.
+  function mevRouteTypeFromLabel(str) {
+    if (!str) return 'unknown';
+    const s = str.toLowerCase();
+    if (/rfq|direct fill/.test(s))  return 'rfq';
+    if (/clmm|dlmm/.test(s))        return 'clmm';
+    if (/cpmm|amm|v4/.test(s))      return 'cpmm';
+    if (/pump|bonding/.test(s))      return 'bonding_curve';
+    return 'unknown';
+  }
+
+  // mevRouteType: derives routeType from live context.
+  // Priority: Raydium-native order → RFQ/gasless swapType → routePlan labels.
+  function mevRouteType(liveQuote) {
+    // Raydium-native route: pool type is stored on the ZendIQ order, not the Jupiter tick
+    const order = ns.widgetLastOrder;
+    if (order?._source === 'raydium') {
+      return mevRouteTypeFromLabel('Raydium ' + (order._rdmPoolType ?? 'AMM'));
+    }
+    if (!liveQuote) return 'unknown';
+    const st = liveQuote.swapType;
+    if (st === 'rfq' || st === 'gasless') return 'rfq';
+    // Build a label string from routePlan — mirrors the Monitor tab `route` variable
+    const combined = (liveQuote.routePlan ?? [])
+      .map(r => r?.swapInfo?.label ?? '').join(' ');
+    return mevRouteTypeFromLabel(combined);
+  }
+
   function calculateMEVRisk(trade) {
     const {
       inputMint     = null,
@@ -209,7 +238,20 @@
       routePlan     = null,    // Jupiter Ultra array: [{ swapInfo, percent }, ...]
       slippage      = 0,       // decimal, e.g. 0.015 = 1.5%
       poolLiquidity = null,    // optional USD liquidity
+      routeType     = 'unknown', // 'rfq' | 'clmm' | 'cpmm' | 'bonding_curve' | 'unknown'
     } = trade ?? {};
+
+    // ── RFQ / direct fill — sandwich is impossible ────────────────────────────
+    if (routeType === 'rfq') {
+      return {
+        riskScore: 0,
+        riskLevel: 'None',
+        estimatedLossUSD: 0,
+        estimatedLossPercentage: 0,
+        factors: [{ factor: 'Direct fill (RFQ)', impact: 'Market maker fill — no pool to sandwich', score: 0 }],
+        confidence: 'high',
+      };
+    }
 
     const factors = [];
     let score = 0;
@@ -217,17 +259,23 @@
     // ── 1. Route complexity (30% weight) ─────────────────────────────────────
     // Jupiter Ultra uses routePlan[] (not marketInfos[]). Each element is one hop.
     const hops = Array.isArray(routePlan) ? routePlan.length : 1;
+    const clmmNote = routeType === 'clmm' ? ' (concentrated liquidity — harder to sandwich)' : '';
     let routeScore, routeImpact;
-    if (hops >= 3) { routeScore = 30; routeImpact = 'High – 3+ hop route'; }
-    else if (hops === 2) { routeScore = 15; routeImpact = 'Medium – 2 hop route'; }
-    else                  { routeScore = 5;  routeImpact = 'Low – single hop'; }
+    if (hops >= 3) { routeScore = 30; routeImpact = `High – 3+ hop route${clmmNote}`; }
+    else if (hops === 2) { routeScore = 15; routeImpact = `Medium – 2 hop route${clmmNote}`; }
+    else                  { routeScore = 5;  routeImpact = `Low – single hop${clmmNote}`; }
     score += routeScore;
     factors.push({ factor: 'Route complexity', impact: routeImpact, score: routeScore });
 
     // ── 2. Trade size vs pool liquidity (25% weight) ──────────────────────────
     let liqScore, liqImpact;
     if (poolLiquidity == null || poolLiquidity <= 0) {
-      liqScore = 2; liqImpact = 'Unknown liquidity (assumed minimal)';
+      // Memecoins almost always have low liquidity — use a higher unknown floor
+      if (isMemecoinPair(inputMint, outputMint)) {
+        liqScore = 15; liqImpact = 'Unknown liquidity — likely low (memecoin)';
+      } else {
+        liqScore = 2; liqImpact = 'Unknown liquidity (assumed minimal)';
+      }
     } else {
       const pct = (amountUSD / poolLiquidity) * 100;
       if (pct > 10)      { liqScore = 25; liqImpact = `>${pct.toFixed(1)}% of pool (very high impact)`; }
@@ -269,16 +317,32 @@
     score += pairScore;
     factors.push({ factor: 'Token pair type', impact: pairImpact, score: pairScore });
 
+    // ── Route-type multiplier ─────────────────────────────────────────────────
+    // Applied to raw score before cap. 'unknown' = 1.0 (backward-compatible).
+    const ROUTE_MULTIPLIER = { clmm: 0.5, cpmm: 1.0, bonding_curve: 1.3, unknown: 1.0 };
+    const routeMult = ROUTE_MULTIPLIER[routeType] ?? 1.0;
+    score = Math.round(score * routeMult);
+
+    // ── Minimum trade size floor ──────────────────────────────────────────────
+    // Sandwich bots require a minimum profit threshold; small trades are rarely targeted.
+    let sizeCap = null;
+    if      (amountUSD < 10) sizeCap = 5;
+    else if (amountUSD < 50) sizeCap = 15;
+    if (sizeCap !== null && score > sizeCap) {
+      score = sizeCap;
+      factors.push({ factor: 'Trade size floor', impact: 'Trade too small for profitable sandwich attack', score: 0 });
+    }
+
     // ── Final score + estimated loss ──────────────────────────────────────────
     const riskScore = Math.min(100, score);
     const riskLevel = getMevRiskLevel(riskScore);
 
     let lossPct;
-    if      (riskScore >= 80) lossPct = 0.015;
-    else if (riskScore >= 60) lossPct = 0.010;
-    else if (riskScore >= 40) lossPct = 0.006;
-    else if (riskScore >= 20) lossPct = 0.003;
-    else                      lossPct = 0.001;
+    if      (riskScore >= 80) lossPct = 0.020;
+    else if (riskScore >= 60) lossPct = 0.008;
+    else if (riskScore >= 40) lossPct = 0.003;
+    else if (riskScore >= 20) lossPct = 0.0005;
+    else                      lossPct = 0.0001;
 
     const estimatedLossUSD        = amountUSD * lossPct;
     const estimatedLossPercentage = lossPct * 100;
@@ -293,5 +357,7 @@
     fetchDevnetContext,
     calculateRisk,
     calculateMEVRisk,
+    mevRouteType,
+    mevRouteTypeFromLabel,
   });
 })();

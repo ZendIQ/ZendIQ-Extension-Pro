@@ -298,6 +298,7 @@
               inputMint: SOL_MINT, outputMint: ns.lastOutputMint ?? null,
               amountUSD: solAmt * sp, routePlan: null,
               slippage: slip / 100, poolLiquidity: null,
+              routeType: 'bonding_curve',
             });
             if (mev) {
               pfRisk.mev = mev;
