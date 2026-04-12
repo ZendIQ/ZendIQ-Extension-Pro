@@ -152,7 +152,7 @@ function _buildTooltipHtml(h) {
   const hasAnyUsd = priorityFeeUsd != null || mevUsd != null;
   const divider = `<div style="border-top:1px solid rgba(153,69,255,0.2);margin:8px 0"></div>`;
   const row = (lbl, val, col) =>
-    `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:3px"><span style="color:var(--muted)">${lbl}</span><span style="color:${col ?? '#E8E8F0'};font-weight:600">${val}</span></div>`;
+    `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:3px"><span style="color:var(--muted)">${lbl}</span><span style="color:${col ?? '#E8E8F0'};font-weight:600;overflow-wrap:break-word;min-width:0;text-align:right">${val}</span></div>`;
   const sub = (lbl, val, col) =>
     `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:2px;padding-left:10px"><span style="color:var(--muted)">${lbl}</span><span style="color:${col ?? '#B0B0C0'}">${val}</span></div>`;
 
@@ -233,7 +233,7 @@ function _buildTooltipHtml(h) {
       html += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV, '#FFB547');
     } else if (_sr2 && !_sr2.detected) {
       const _scan2 = _sr2.scanned > 0 ? `Scanned ${_sr2.scanned} transaction${_sr2.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.` : 'No sandwich activity detected.';
-      html += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, '\u2713 Clean', 'var(--green)');
+      html += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, 'Not sandwiched \u2705', 'var(--green)');
     }
   }
 
@@ -477,7 +477,11 @@ function _renderHistoryEntry(h, idx) {
       const _scanTip = _sr.scanned > 0
         ? `Scanned ${_sr.scanned} transaction${_sr.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.`
         : 'No sandwich activity detected.';
-      sandwichRowHtml = `<div class="analysis-row"><span class="lbl" title="${escapeHtml(_scanTip)}" style="cursor:help">Sandwich check</span><span class="val" style="color:var(--green);font-weight:700">\u2713 Clean</span></div>`;
+      if (h.quoteAccuracy == null) {
+        sandwichRowHtml = `<div class="analysis-row"><span class="lbl" title="Waiting for on-chain confirmation before finalising sandwich check." style="cursor:help">Sandwich check</span><span class="val" style="color:var(--muted)">pending\u2026</span></div>`;
+      } else {
+        sandwichRowHtml = `<div class="analysis-row"><span class="lbl" title="${escapeHtml(_scanTip)}" style="cursor:help">Sandwich check</span><span class="val" style="color:var(--green);font-weight:700">Not sandwiched \u2705</span></div>`;
+      }
     }
   }
 

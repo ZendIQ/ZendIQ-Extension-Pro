@@ -610,12 +610,16 @@
                   const _attackTip = _sr.attackerWallet
                     ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr.attackerWallet)}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : 'unknown'}.`
                     : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : 'unknown'}.`;
-                  sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#FFB547;cursor:help" title="${escapeHtml(_attackTip)}">Sandwiched</span><span style="color:#FFB547;font-weight:700">${escapeHtml(_extStr)}</span></div>`;
+                  sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="${escapeHtml(_attackTip)}">Sandwich check</span><span style="color:#FFB547;font-weight:700">${escapeHtml(_extStr)}</span></div>`;
                 } else if (_sr && !_sr.detected) {
                   const _scanTip = _sr.scanned > 0
                     ? `Scanned ${_sr.scanned} transaction${_sr.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.`
                     : 'No sandwich activity detected.';
-                  sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#14F195;cursor:help" title="${escapeHtml(_scanTip)}">Sandwich check</span><span style="color:#14F195;font-weight:700">\u2713 Clean</span></div>`;
+                  if (h.quoteAccuracy == null) {
+                    sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Waiting for on-chain confirmation before finalising sandwich check.">Sandwich check</span><span style="color:#9B9BAD">pending\u2026</span></div>`;
+                  } else {
+                    sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="${escapeHtml(_scanTip)}">Sandwich check</span><span style="color:#14F195;font-weight:700">Not sandwiched \u2705</span></div>`;
+                  }
                 }
               }
               // ── Unoptimized trade card ───────────────────────────────────
@@ -2440,7 +2444,7 @@
                 ? Number(h.snapNetUsd)
                 : (savingsUsd != null ? savingsUsd - (priFee ?? 0) - (jitoFee ?? 0) : null);
               const rlc = {CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'}[h.riskLevel] ?? '#C2C2D4';
-              const row = (l,v,c) => `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:3px"><span style="color:#C2C2D4">${l}</span><span style="color:${c??'#E8E8F0'};font-weight:600">${v}</span></div>`;
+              const row = (l,v,c) => `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:3px"><span style="color:#C2C2D4">${l}</span><span style="color:${c??'#E8E8F0'};font-weight:600;overflow-wrap:break-word;min-width:0;text-align:right">${v}</span></div>`;
               const sub = (l,v,c) => `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:2px;padding-left:10px"><span style="color:#C2C2D4">${l}</span><span style="color:${c??'#B0B0C0'}">${v}</span></div>`;
               const divider = `<div style="border-top:1px solid rgba(153,69,255,0.2);margin:8px 0"></div>`;
               const hasAnyUsd = priFee != null || mevUsd != null;
@@ -2510,7 +2514,7 @@
                   t += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV, '#FFB547');
                 } else if (_sr2 && !_sr2.detected) {
                   const _scan2 = _sr2.scanned > 0 ? `Scanned ${_sr2.scanned} transaction${_sr2.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.` : 'No sandwich activity detected.';
-                  t += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, '\u2713 Clean', '#14F195');
+                  t += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, 'Not sandwiched \u2705', '#14F195');
                 }
               }
 
@@ -2816,7 +2820,7 @@
             ? Number(h.snapNetUsd)
             : (savingsUsd != null ? savingsUsd - (priFee ?? 0) - (jitoFee ?? 0) : null);
           const rlc = {CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'}[h.riskLevel] ?? '#C2C2D4';
-          const row = (l,v,c) => `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:3px"><span style="color:#C2C2D4">${l}</span><span style="color:${c??'#E8E8F0'};font-weight:600">${v}</span></div>`;
+          const row = (l,v,c) => `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:3px"><span style="color:#C2C2D4">${l}</span><span style="color:${c??'#E8E8F0'};font-weight:600;overflow-wrap:break-word;min-width:0;text-align:right">${v}</span></div>`;
           const sub = (l,v,c) => `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:2px;padding-left:10px"><span style="color:#C2C2D4">${l}</span><span style="color:${c??'#B0B0C0'}">${v}</span></div>`;
           const divider = `<div style="border-top:1px solid rgba(153,69,255,0.2);margin:8px 0"></div>`;
           let t = `<div style="font-size:13px;font-weight:700;color:#E8E8F0;margin-bottom:8px;border-bottom:1px solid rgba(153,69,255,0.25);padding-bottom:6px">Trade Breakdown</div>`;
@@ -2858,7 +2862,7 @@
               t += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV, '#FFB547');
             } else if (_sr2 && !_sr2.detected) {
               const _scan2 = _sr2.scanned > 0 ? `Scanned ${_sr2.scanned} transaction${_sr2.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.` : 'No sandwich activity detected.';
-              t += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, '\u2713 Clean', '#14F195');
+              t += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, 'Not sandwiched \u2705', '#14F195');
             }
           }
           if (ns.widgetMode !== 'simple') {
