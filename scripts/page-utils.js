@@ -154,7 +154,7 @@
    * @param {number} outputDecimals - Decimal places of the output token
    */
   async function fetchActualOut(signature, outputMint, walletPubkey, quotedRawOut, outputDecimals) {
-    if (!signature || !outputMint || !walletPubkey) return null;
+    if (!signature || !outputMint) return null;
     const SOL_MINT = 'So11111111111111111111111111111111111111112';
     const isSOL = outputMint === SOL_MINT;
 
@@ -169,13 +169,19 @@
         if (!tx?.meta) continue; // not confirmed yet — retry
 
         const meta = tx.meta;
+        const msg  = tx.transaction?.message ?? {};
+        const keys = msg.staticAccountKeys ?? msg.accountKeys ?? [];
+
+        // If walletPubkey wasn't available at call time (e.g. Wallet Standard not yet hooked
+        // on raydium.io), derive it from the fee payer — account index 0 is always the signer.
+        const _wp = walletPubkey
+          ?? (keys.length > 0 ? (typeof keys[0] === 'string' ? keys[0] : (keys[0]?.pubkey ?? null)) : null);
+        if (!_wp) return null;
 
         let actualOut = null;
         if (isSOL) {
           // Find wallet's index in the account-key list
-          const msg  = tx.transaction?.message ?? {};
-          const keys = msg.staticAccountKeys ?? msg.accountKeys ?? [];
-          const idx  = keys.findIndex(k => (typeof k === 'string' ? k : k.pubkey) === walletPubkey);
+          const idx = keys.findIndex(k => (typeof k === 'string' ? k : k.pubkey) === _wp);
           if (idx >= 0) {
             // Add fee back: wallet paid fee from its balance, but we want received SOL, not net change
             const receivedLamports = (meta.postBalances[idx] ?? 0) - (meta.preBalances[idx] ?? 0) + (meta.fee ?? 0);
@@ -185,8 +191,8 @@
           // SPL token — match by mint + owner in token balance snapshots
           const post = meta.postTokenBalances ?? [];
           const pre  = meta.preTokenBalances  ?? [];
-          const postEntry = post.find(e => e.mint === outputMint && e.owner === walletPubkey);
-          const preEntry  = pre.find(e  => e.mint === outputMint && e.owner === walletPubkey);
+          const postEntry = post.find(e => e.mint === outputMint && e.owner === _wp);
+          const preEntry  = pre.find(e  => e.mint === outputMint && e.owner === _wp);
           if (postEntry) {
             const diff = (postEntry.uiTokenAmount?.uiAmount ?? 0) - (preEntry?.uiTokenAmount?.uiAmount ?? 0);
             if (diff > 0) actualOut = diff;

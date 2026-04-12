@@ -587,6 +587,9 @@
                 } else if (h.optimized) {
                   // Show pending row — on-chain result expected within ~3-10s of confirmation
                   accRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Waiting for on-chain confirmation to compare against ZendIQ's quoted amount. Updates automatically a few seconds after the swap confirms.">ZendIQ Quote Accuracy</span><span style="color:#C2C2D4">pending…</span></div>`;
+                } else if (!h.optimized && (h.quotedOut != null || h.rawOutAmount != null)) {
+                  // Unoptimized (Proceed anyway): show pending until on-chain confirms
+                  accRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Waiting for on-chain confirmation to compare against the DEX's quoted amount. Updates automatically a few seconds after the swap confirms.">ZendIQ Quote Accuracy</span><span style="color:#C2C2D4">pending…</span></div>`;
                 }
               }
               // ── Unoptimized trade card ───────────────────────────────────
@@ -1099,6 +1102,7 @@
         ? Number(ns.jupiterLiveQuote.outAmount) / Math.pow(10, _dOutDec) : null;
       const _dShortSig = _sigO ? (_sigO.slice(0, 8) + '\u2026' + _sigO.slice(-4)) : null;
       const _dSolUrl   = _sigO ? ('https://solscan.io/tx/' + escapeHtml(_sigO)) : null;
+      const _dRouteLabel = ns.activeSiteAdapter?.()?.name === 'raydium' ? "Via Raydium\u2019s route" : "Via Jupiter\u2019s route";
       const _dAmtRow   = (_dInSym && _dOutSym && _dInAmt != null)
         ? `<div style="font-size:13px;color:#C2C2D4;margin:4px 0 0">${Number(_dInAmt).toFixed(4)} ${_dInSym} \u2192 ${_dOutAmt != null ? Number(_dOutAmt).toFixed(4) : '?'} ${_dOutSym}</div>`
         : '';
@@ -1108,7 +1112,7 @@
       widgetFlowContent = `
           <div style="padding:14px 16px;text-align:center">
             <div style="font-size:13px;font-weight:700;color:#14F195;margin-bottom:2px">Swap Successful</div>
-            <div style="font-size:12px;color:#FFB547;margin-bottom:2px">Via Jupiter\u2019s route</div>
+            <div style="font-size:12px;color:#FFB547;margin-bottom:2px">${_dRouteLabel}</div>
             ${_dAmtRow}
             ${_dSigLink}
             <button id="sr-btn-widget-new" style="width:100%;padding:10px;border:1px solid rgba(20,241,149,0.3);border-radius:8px;background:rgba(20,241,149,0.08);color:#14F195;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif">+ New Swap</button>
@@ -2271,7 +2275,8 @@
               if (ns.fetchActualOut) {
                 ns._fetchActualOutPending = ns._fetchActualOutPending || new Set();
                 ns.recentSwaps.forEach(p => {
-                  if (p.optimized && p.signature && p.outputMint && p.quoteAccuracy == null
+                  if (p.signature && p.outputMint && p.quoteAccuracy == null
+                      && (p.optimized || p.quotedOut != null || p.rawOutAmount != null)
                       && !ns._fetchActualOutPending.has(p.signature)) {
                     ns._fetchActualOutPending.add(p.signature);
                     (async () => {
@@ -2299,7 +2304,8 @@
             // on-chain quoteAccuracy yet, fetch it from the RPC here (page context
             // has access to ns.fetchActualOut) and re-broadcast a partial update so
             // the background/other tabs can merge it into persisted history.
-            if (m.type === 'HISTORY_UPDATE' && m.payload && m.payload.optimized) {
+            if (m.type === 'HISTORY_UPDATE' && m.payload
+                && (m.payload.optimized || m.payload.quotedOut != null || m.payload.rawOutAmount != null)) {
               try {
                 const p = m.payload;
                 if (p.signature && p.outputMint && (p.quoteAccuracy == null) && ns.fetchActualOut) {
@@ -2811,6 +2817,19 @@
               }
             } else {
               t += `<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(153,69,255,0.2);display:flex;justify-content:space-between;gap:12px"><span style="color:#C2C2D4;cursor:help" title="Waiting for on-chain confirmation to compare against the quoted amount.">On-chain vs Quote</span><span style="color:#C2C2D4">${h.quotedOut != null ? 'pending\u2026' : '\u2014'}</span></div>`;
+            }
+            // Quote Accuracy row
+            const _xLbl2 = h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium + Jito' : 'Raydium') : (h.swapType === 'rfq' ? 'RFQ' : h.swapType === 'gasless' ? 'Gasless' : 'DEX');
+            if (h.quoteAccuracy != null && isFinite(parseFloat(h.quoteAccuracy))) {
+              const _acc3 = Math.max(0, Math.min(100, parseFloat(h.quoteAccuracy)));
+              const _col3 = _acc3>=99?'#14F195':_acc3>=97?'#FFB547':'#FF4D4D';
+              t += row(`<span title="Actual on-chain fill accuracy \u2014 actual tokens received vs. the ${_xLbl2}-quoted amount, verified from the confirmed Solana transaction." style="cursor:help">${_xLbl2} Quote Accuracy \u2713</span>`, _acc3.toFixed(2)+'%', _col3);
+            } else if (h.quotedOut != null || h.rawOutAmount != null) {
+              t += row(`<span title="Waiting for on-chain confirmation to compare against the ${_xLbl2}-quoted amount. Updates automatically a few seconds after the swap confirms." style="cursor:help">${_xLbl2} Quote Accuracy</span>`, 'pending\u2026', '#C2C2D4');
+            }
+            // Solscan link
+            if (h.signature) {
+              t += `<div style="margin-top:8px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.06)"><a href="https://solscan.io/tx/${escapeHtml(h.signature)}" target="_blank" rel="noopener" style="color:#14F195;font-size:12px;text-decoration:none">View on Solscan \u2197</a></div>`;
             }
           }
           return t;

@@ -382,6 +382,98 @@
         );
 
         if (isRpc && (methodName === 'sendTransaction' || methodName === 'send_raw_transaction') && !window.__zendiq_own_tx) {
+          // ── Raydium "Continue with original route" — tap RPC response for sig ──
+          // Mirrors the lite version: signature lives in the sendTransaction fetch response
+          // as data?.result ("{jsonrpc:…,result:'<BASE58_SIG>',id:…}").
+          // __zendiq_ws_confirmed is set in page-interceptor.js BEFORE btn.click() so it’s
+          // already true when this fetch fires (wallet hook short-circuits without clearing it).
+          const _isRdmConfirmedFetch = (window.__zendiq_ws_confirmed || ns.widgetSwapStatus === 'signing-original')
+                                    && url.includes('rpcpool') && !window.__zendiq_own_tx;
+          if (_isRdmConfirmedFetch) {
+            window.__zendiq_ws_confirmed = false;   // claim the flag
+            const _rdmRisk   = ns._confirmRiskSnapshot ?? ns.lastRiskResult ?? null;
+            ns._confirmRiskSnapshot = null;
+            const _rdmLq     = ns.jupiterLiveQuote;
+            const _rdmCt     = ns.widgetCapturedTrade;
+            const _rdmRawOut = ns._rdmOriginalContext?.rawOut
+                            ?? ns._rdmSignParams?._computeOutAmount
+                            ?? (ns._rdmLastComputeOut != null ? Number(ns._rdmLastComputeOut) : null)
+                            ?? ns._rdmMinAmountOut ?? null;
+            const _TOKEN_DEC_R = { 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 6, 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 6, 'So11111111111111111111111111111111111111112': 9 };
+            const _TOKEN_SYM_R = { 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT', 'So11111111111111111111111111111111111111112': 'SOL' };
+            const _rdmInMint  = _rdmCt?.inputMint  ?? window.__zendiq_last_order_params?.inputMint  ?? null;
+            const _rdmOutMint = _rdmCt?.outputMint ?? window.__zendiq_last_order_params?.outputMint ?? null;
+            const _rdmOutDec  = _rdmCt?.outputDecimals ?? (_TOKEN_DEC_R[_rdmOutMint] ?? 6);
+            const _rdmInDec   = _rdmCt?.inputDecimals  ?? (_TOKEN_DEC_R[_rdmInMint]  ?? 9);
+            const _rdmRawAmt  = window.__zendiq_last_order_params?.amount;
+            const _rdmInAmt   = _rdmCt?.amountUI ?? (_rdmRawAmt != null ? Number(_rdmRawAmt) / Math.pow(10, _rdmInDec) : null);
+            const _rdmOutAmt  = _rdmRawOut != null ? _rdmRawOut / Math.pow(10, _rdmOutDec) : null;
+            const rdmResp = origFetch(resource, init);
+            rdmResp.then(r => r.clone().json().then(data => {
+              const sig = (typeof data?.result === 'string' && data.result.length >= 40) ? data.result : null;
+              if (sig) {
+                const entry = {
+                  signature:      sig,
+                  tokenIn:        _rdmCt?.inputSymbol  ?? _TOKEN_SYM_R[_rdmInMint]  ?? (_rdmInMint  ? _rdmInMint.slice(0, 6)  + '\u2026' : '?'),
+                  tokenOut:       _rdmCt?.outputSymbol ?? _TOKEN_SYM_R[_rdmOutMint] ?? (_rdmOutMint ? _rdmOutMint.slice(0, 6) + '\u2026' : '?'),
+                  amountIn:       _rdmInAmt  != null ? String(_rdmInAmt)  : null,
+                  amountOut:      _rdmOutAmt != null ? String(_rdmOutAmt) : null,
+                  quotedOut:      _rdmOutAmt != null ? String(_rdmOutAmt) : null,
+                  optimized:      false,
+                  timestamp:      Date.now(),
+                  inputMint:      _rdmInMint,
+                  outputMint:     _rdmOutMint,
+                  outputDecimals: _rdmOutDec,
+                  rawOutAmount:   _rdmRawOut != null ? String(_rdmRawOut) : null,
+                  swapType:       'amm',
+                  routeSource:    'raydium',
+                  riskScore:      _rdmRisk?.score  ?? null,
+                  riskLevel:      _rdmRisk?.level  ?? null,
+                  riskFactors:    _rdmRisk?.factors ?? [],
+                  mevFactors:     _rdmRisk?.mev?.factors ?? [],
+                  mevRiskLevel:   _rdmRisk?.mev?.riskLevel ?? null,
+                  mevRiskScore:   _rdmRisk?.mev?.riskScore ?? null,
+                  mevEstimatedLossPercent: _rdmRisk?.mev?.estimatedLossPercentage ?? null,
+                  inUsdValue:     _rdmLq?.inUsdValue  ?? null,
+                  outUsdValue:    _rdmLq?.outUsdValue ?? null,
+                };
+                try { window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: entry } }, '*'); } catch (_) {}
+                ns.widgetOriginalTxSig = sig;
+                ns.widgetLastTxSig     = sig;
+                ns.widgetSwapStatus    = 'done-original';
+                ns._rdmPostSwapIdle    = true;
+                try { ns.renderWidgetPanel?.(); } catch (_) {}
+                setTimeout(() => {
+                  if (ns.widgetSwapStatus === 'done-original') {
+                    ns.widgetSwapStatus = '';
+                    const _bi = document.getElementById('sr-body-inner');
+                    if (_bi) _bi.innerHTML = '';
+                    try { ns.renderWidgetPanel?.(); } catch (_) {}
+                  }
+                }, 2000);
+                if (ns.fetchActualOut && _rdmOutMint) {
+                  (async () => {
+                    try {
+                      const _wp = ns.resolveWalletPubkey?.() ?? null;
+                      const result = await ns.fetchActualOut(sig, _rdmOutMint, _wp, _rdmRawOut, _rdmOutDec);
+                      if (!result) return;
+                      window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
+                        signature: sig, actualOutAmount: String(result.actualOut),
+                        quoteAccuracy: result.quoteAccuracy, amountOut: String(result.actualOut),
+                      }}}, '*');
+                    } catch (_) {}
+                  })();
+                }
+              } else {
+                ns.widgetSwapStatus = '';
+                ns.widgetOriginalSigningInfo = null;
+                ns._rdmPostSwapIdle = true;
+                try { ns.renderWidgetPanel?.(); } catch (_) {}
+              }
+            }).catch(() => {})).catch(() => {});
+            return rdmResp;
+          }
+
           let overlayInfo = { method: methodName || 'send', params: parsed?.params };
 
           try {
@@ -465,9 +557,41 @@
       try {
         const url    = this.__sr_url || '';
         const parsed = ns.tryParseJson(body);
+        // Tap Raydium compute/swap XHR responses to capture real outputAmount.
+        // Raydium's React bundle calls /compute/swap-base-in via XHR (not fetch),
+        // so the fetch override never sees it. We store the result in _rdmLastComputeOut
+        // so onDecision (Proceed anyway) always has a quotedOut for Quote Accuracy.
+        if (url && url.includes('raydium.io') && url.includes('/compute/')) {
+          this.addEventListener('load', function () {
+            try {
+              const d = ns.tryParseJson(this.responseText);
+              const rawOut = d?.data?.outputAmount ?? d?.data?.amountOut ?? d?.data?.outAmount
+                          ?? d?.outputAmount ?? d?.amountOut ?? null;
+              if (rawOut != null) ns._rdmLastComputeOut = String(rawOut);
+            } catch (_) {}
+          }, { passive: true });
+        }
         // Let site adapters sniff any XHR request (e.g. Raydium compute API may use XHR)
         try { ns.activeSiteAdapter?.()?.onNetworkRequest?.(url, parsed); } catch (_) {}
-        if (url.includes('api.mainnet-beta.solana.com') || url.includes('.helius-rpc.com')) {
+
+        // ── Raydium send-tx XHR — transition widget to "sending…" state ──
+        // The signed tx goes to service-v1.raydium.io/send-tx (XHR, response = {success:true}).
+        // The real Solana signature comes from rpcpool.com/sendTransaction via fetch
+        // (intercepted above). This handler ONLY advances the widget state; it does NOT
+        // clear __zendiq_ws_confirmed (fetch handler owns that flag).
+        const _isRdmSendTx = url.includes('raydium.io') && url.includes('send-tx') && !window.__zendiq_own_tx;
+        if (_isRdmSendTx && (window.__zendiq_ws_confirmed || ns.widgetSwapStatus === 'signing-original')) {
+          if (ns.widgetSwapStatus === 'signing-original') {
+            if (ns._signingOriginalTimeout) { clearTimeout(ns._signingOriginalTimeout); ns._signingOriginalTimeout = null; }
+            if (ns.widgetOriginalSigningInfo) ns.widgetOriginalSigningInfo._sending = true;
+            ns.widgetCapturedTrade = null;
+            ns.widgetLastOrder     = null;
+            try { ns.renderWidgetPanel?.(); } catch (_) {}
+          }
+          return origSend.apply(this, arguments);
+        }
+
+        if (url.includes('api.mainnet-beta.solana.com') || url.includes('.helius-rpc.com') || url.includes('rpcpool.com')) {
           if (parsed?.method === 'sendTransaction' || parsed?.method === 'send_raw_transaction') {
             const xhr = this;
             ns.showPendingTransaction({ method: parsed.method, params: parsed.params }).then(decision => {

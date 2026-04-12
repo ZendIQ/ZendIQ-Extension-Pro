@@ -250,6 +250,39 @@
     return null;
   }
 
+  // Extract the transaction signature from a signed VersionedTransaction returned by
+  // wallet.signTransaction. The tx sig is the fee-payer's signature at bytes [1..65]
+  // (after the single-byte numSigners prefix).
+  // Used as an Activity recording safety-net: if _captureConfirmTrade loses the response
+  // (e.g. resp.clone().json() fails silently), this ensures the entry is already saved.
+  function _extractSigFromSignedTx(res) {
+    try {
+      const item = Array.isArray(res) ? res[0] : res;
+      let txBytes = item?.signedTransaction ?? item?.transaction ?? null;
+      // Fallback: item itself might be the serialised tx bytes
+      if (!txBytes) {
+        if (item instanceof Uint8Array) txBytes = item;
+        else if (ArrayBuffer.isView(item)) txBytes = new Uint8Array(item.buffer, item.byteOffset, item.byteLength);
+      }
+      if (!txBytes) return null;
+      if (!(txBytes instanceof Uint8Array)) {
+        if (ArrayBuffer.isView(txBytes)) {
+          txBytes = new Uint8Array(txBytes.buffer, txBytes.byteOffset, txBytes.byteLength);
+        } else if (typeof txBytes === 'object') {
+          const len = txBytes.length ?? Object.keys(txBytes).length;
+          const arr = new Uint8Array(len);
+          for (let i = 0; i < len; i++) arr[i] = txBytes[i] ?? txBytes[String(i)] ?? 0;
+          txBytes = arr;
+        }
+      }
+      if (txBytes.length < 65) return null;
+      const numSigs = txBytes[0];
+      if (numSigs < 1 || numSigs > 8) return null;
+      return ns.b58Encode?.(txBytes.slice(1, 65)) ?? null;
+    } catch (_) {}
+    return null;
+  }
+
   // ── Helpers for the "signing-original" Monitor state ────────────────────
   // Called right before origFn on the 'confirm' path — builds widgetOriginalSigningInfo
   // from whatever data is available (may have been set by handlePendingDecision already).
@@ -296,7 +329,10 @@
     try {
       const _lq   = nsRef.jupiterLiveQuote;
       const _ct   = nsRef.widgetCapturedTrade;
-      const _risk = nsRef.lastRiskResult ?? null;
+      // Prefer the risk snapshot frozen at decision time — handlePendingDecision clears
+      // lastRiskResult before the wallet hook resumes, so _confirmRiskSnapshot is the
+      // reliable source.
+      const _risk = nsRef._confirmRiskSnapshot ?? nsRef.lastRiskResult ?? null;
       const inMint  = _ct?.inputMint  ?? _lq?.inputMint  ?? null;
       const outMint = _ct?.outputMint ?? _lq?.outputMint ?? null;
       const outDec  = _ct?.outputDecimals ?? 6;
@@ -440,8 +476,21 @@
         try { ns.renderWidgetPanel?.(); } catch (_) {}
         const res = await _origFnPromise2;
         if (callerLabel === 'signAndSendTransaction') {
-          window.__zendiq_ws_confirmed = false;
-          if (!_handleSignAndSendResult(res, ns)) _clearOriginalSigningInfo(ns);
+          // Try primary path: wallet signed+broadcast, response has .signature
+          if (_handleSignAndSendResult(res, ns)) {
+            window.__zendiq_ws_confirmed = false; // broadcast done — /execute won't follow
+          } else {
+            // Wallet returned signed bytes instead of a broadcast sig (behaves like signTransaction).
+            // Keep __zendiq_ws_confirmed so /execute intercept can do the done-original transition.
+            // Also save a backup Activity entry from the signed tx bytes in case /execute fails.
+            try { const _txSig = _extractSigFromSignedTx(res); if (_txSig) _saveConfirmToHistory(_txSig, ns); } catch (_) {}
+          }
+        } else {
+          // Safety net: extract sig from signed tx bytes and save to Activity immediately.
+          // _captureConfirmTrade in page-network.js also records when Jupiter calls /execute;
+          // background.js merges both entries by sig, so the final record is enriched.
+          // This prevents a blank Activity when resp.clone().json() fails silently.
+          try { const _txSig = _extractSigFromSignedTx(res); if (_txSig) _saveConfirmToHistory(_txSig, ns); } catch (_) {}
         }
         return res;
       } catch (e) {
@@ -547,9 +596,16 @@
       try { ns.renderWidgetPanel?.(); } catch (_) {}
       const res = await _origFnPromise;
       if (callerLabel === 'signAndSendTransaction') {
-        // signAndSendTransaction returns a sig once confirmed — /execute won't follow
-        window.__zendiq_ws_confirmed = false;
-        if (!_handleSignAndSendResult(res, ns)) _clearOriginalSigningInfo(ns);
+        // Try primary: wallet signed+broadcast, response has .signature
+        if (_handleSignAndSendResult(res, ns)) {
+          window.__zendiq_ws_confirmed = false; // broadcast done — /execute won't follow
+        } else {
+          // Wallet returned signed bytes instead of broadcast sig — keep flag for /execute.
+          try { const _txSig = _extractSigFromSignedTx(res); if (_txSig) _saveConfirmToHistory(_txSig, ns); } catch (_) {}
+        }
+      } else {
+        // Safety net: extract sig from signed tx bytes and save to Activity immediately.
+        try { const _txSig = _extractSigFromSignedTx(res); if (_txSig) _saveConfirmToHistory(_txSig, ns); } catch (_) {}
       }
       // signTransaction: keep signing-original status; _captureConfirmTrade handles done-original
       return res;
@@ -663,9 +719,16 @@
       try { ns.renderWidgetPanel?.(); } catch (_) {}
       const res = await _origFnPromise;
       if (methodName === 'signAndSendTransaction') {
-        // signAndSendTransaction returns a sig once confirmed — /execute won't follow
-        window.__zendiq_ws_confirmed = false;
-        if (!_handleSignAndSendResult(res, ns)) _clearOriginalSigningInfo(ns);
+        // Try primary: wallet signed+broadcast, response has .signature
+        if (_handleSignAndSendResult(res, ns)) {
+          window.__zendiq_ws_confirmed = false; // broadcast done — /execute won't follow
+        } else {
+          // Wallet returned signed bytes instead of broadcast sig — keep flag for /execute.
+          try { const _txSig = _extractSigFromSignedTx(res); if (_txSig) _saveConfirmToHistory(_txSig, ns); } catch (_) {}
+        }
+      } else {
+        // Safety net: extract sig from signed tx bytes and save to Activity immediately.
+        try { const _txSig = _extractSigFromSignedTx(res); if (_txSig) _saveConfirmToHistory(_txSig, ns); } catch (_) {}
       }
       // signTransaction: keep signing-original status; _captureConfirmTrade handles done-original
       return res;

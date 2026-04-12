@@ -200,6 +200,7 @@ function _buildTooltipHtml(h) {
   }
 
   // ── Section 2: Performance Analysis ─────────────────────────────────────
+  const _isRFQFill = h.swapType === 'rfq' || h.swapType === 'gasless';
   html += divider;
   html += `<div style="font-size:var(--fs-base);font-weight:700;color:#E8E8F0;margin-bottom:8px">Performance Analysis</div>`;
 
@@ -245,7 +246,6 @@ function _buildTooltipHtml(h) {
   }
 
   // Savings & Costs — always shown
-  const _isRFQFill  = h.swapType === 'rfq' || h.swapType === 'gasless';
   const _mevMult = (h.routeSource === 'raydium' && h.jitoBundle) ? 0.95 : _isRFQFill ? 1.0 : 0.70;
   // Prefer the frozen snap value (set at Review & Sign time when jitoUsd was non-zero).
   // Falls back to re-computing from stored risk data when the snap value was added later.

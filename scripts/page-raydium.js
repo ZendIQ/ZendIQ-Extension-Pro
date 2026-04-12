@@ -175,24 +175,48 @@
         const _risk    = ns.lastRiskResult ?? null;
         // Sign and broadcast the original Raydium tx
         const res = await origFn(...args);
-        // Extract signature: Wallet Standard returns {signature: Uint8Array} or array thereof
+        // Extract signature — Wallet Standard signTransaction returns [{ signedTransaction: Uint8Array }]
+        // but Raydium may pass a nested format [[{...}]] so unwrap up to 2 levels.
         let _sig = null;
         try {
-          const _item = Array.isArray(res) ? res[0] : res;
-          const _raw  = _item?.signature ?? null;
-          if      (typeof _raw === 'string')    _sig = _raw;
-          else if (_raw instanceof Uint8Array)  _sig = ns.b58Encode(_raw);
-          else if (_raw && typeof _raw === 'object') {
-            const _bytes = new Uint8Array(Object.keys(_raw).length);
-            for (const k of Object.keys(_raw)) _bytes[+k] = _raw[k];
-            _sig = ns.b58Encode(_bytes);
+          // Unwrap up to 2 levels of array nesting
+          let _r = res;
+          if (Array.isArray(_r) && Array.isArray(_r[0])) _r = _r[0]; // [[{...}]] → [{...}]
+          const _item = Array.isArray(_r) ? _r[0] : _r;
+          // 1. signedTransaction bytes (signTransaction result) → extract fee-payer sig from bytes[1..65]
+          let _txBytes = _item?.signedTransaction ?? _item?.transaction ?? null;
+          if (!_txBytes && _item instanceof Uint8Array) _txBytes = _item;
+          if (!_txBytes && ArrayBuffer.isView(_item)) _txBytes = new Uint8Array(_item.buffer, _item.byteOffset, _item.byteLength);
+          if (_txBytes && !(_txBytes instanceof Uint8Array)) {
+            if (ArrayBuffer.isView(_txBytes)) _txBytes = new Uint8Array(_txBytes.buffer, _txBytes.byteOffset, _txBytes.byteLength);
+            else if (typeof _txBytes === 'object') { const _len = _txBytes.length ?? Object.keys(_txBytes).length; const _a = new Uint8Array(_len); for (let _i = 0; _i < _len; _i++) _a[_i] = _txBytes[_i] ?? _txBytes[String(_i)] ?? 0; _txBytes = _a; }
+          }
+          if (_txBytes instanceof Uint8Array && _txBytes.length > 65 && _txBytes[0] >= 1 && _txBytes[0] <= 8) {
+            _sig = ns.b58Encode(_txBytes.slice(1, 65));
+          }
+          // 2. signAndSendTransaction fallback: .signature field
+          if (!_sig) {
+            const _raw = _item?.signature ?? null;
+            if      (typeof _raw === 'string')    _sig = _raw;
+            else if (_raw instanceof Uint8Array)  _sig = ns.b58Encode(_raw);
+            else if (_raw && typeof _raw === 'object') {
+              const _bytes = new Uint8Array(Object.keys(_raw).length);
+              for (const k of Object.keys(_raw)) _bytes[+k] = _raw[k];
+              _sig = ns.b58Encode(_bytes);
+            }
           }
         } catch (_) {}
         // Record to Activity
         if (_sig) {
           const _inAmt  = _ct?.amountUI ?? null;
-          const _outAmt = ns._rdmMinAmountOut != null
-            ? ns._rdmMinAmountOut / Math.pow(10, _outDec) : null;
+          // Prefer the Raydium compute API output (stored by fetchWidgetQuote as _computeOutAmount)
+          // over the tx minimum-amount-out (slippage floor). _rdmSignParams is only set when Raydium
+          // wins the comparison; when Jupiter wins, fall back to _rdmLastComputeOut (always stored
+          // after any successful compute fetch) then to _rdmMinAmountOut (slippage floor from tx bytes).
+          const _rdmRawOut = ns._rdmSignParams?._computeOutAmount
+            ?? (ns._rdmLastComputeOut != null ? Number(ns._rdmLastComputeOut) : null)
+            ?? (ns._rdmMinAmountOut  != null ? Number(ns._rdmMinAmountOut)  : null);
+          const _outAmt = _rdmRawOut != null ? _rdmRawOut / Math.pow(10, _outDec) : null;
           const entry = {
             signature:    _sig,
             tokenIn:      _ct?.inputSymbol  ?? '?',
@@ -205,7 +229,7 @@
             inputMint:    _inMint,
             outputMint:   _outMint,
             outputDecimals: _outDec,
-            rawOutAmount: ns._rdmMinAmountOut != null ? String(ns._rdmMinAmountOut) : null,
+            rawOutAmount: _rdmRawOut != null ? String(Math.round(_rdmRawOut)) : null,
             swapType:     'amm',
             riskScore:    _risk?.score  ?? null,
             riskLevel:    _risk?.level  ?? null,
@@ -233,6 +257,9 @@
           };
           ns.widgetSwapStatus   = 'done-original';
           ns.widgetLastTxSig    = _sig;
+          // Raydium uses send-tx (not /execute), so page-network.js never clears this flag.
+          // Must clear here so the next Raydium swap is intercepted normally.
+          window.__zendiq_ws_confirmed = false;
           if (ns._quoteRefreshTimer) { clearInterval(ns._quoteRefreshTimer); ns._quoteRefreshTimer = null; }
           ns.widgetCapturedTrade = null;
           ns.widgetLastOrder     = null;
@@ -257,7 +284,7 @@
             Promise.resolve().then(async () => {
               try {
                 const result = await ns.fetchActualOut(_sig, _outMint, _wp,
-                  ns._rdmMinAmountOut != null ? Number(ns._rdmMinAmountOut) : null, _outDec);
+                  _rdmRawOut, _outDec);
                 if (!result) return;
                 window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
                   signature:       _sig,
