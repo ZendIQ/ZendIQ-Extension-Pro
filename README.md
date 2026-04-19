@@ -1,6 +1,6 @@
 # ZendIQ Pro
 
-> **Solana swap optimiser with MEV protection.** Intercepts swaps on Jupiter and Raydium, scores risk in real time, and rebuilds your route through Jupiter Ultra to get you more tokens — before you sign.
+> **Solana swap optimiser with MEV protection.** Intercepts swaps on Jupiter, Raydium, and Pump.fun, scores risk in real time, and rebuilds your route through Jupiter Ultra to get you more tokens — before you sign.
 >
 > 🌐 [zendiq.ai](https://zendiq.ai)
 
@@ -27,7 +27,7 @@ It works on **Jupiter** (`jup.ag`), **Raydium** (`raydium.io`), and **Pump.fun**
 | Integration | Role |
 |-------------|------|
 | **Jupiter Ultra API** | Optimised swap order routing, transaction building, and execution |
-| **Jito** | MEV protection via priority tips routed through Jupiter's execution engine |
+| **Jito** | MEV protection via priority tips routed through Jupiter's execution engine; atomic bundle submission on pump.fun |
 | **Solana RPC** (`mainnet-beta`, `publicnode`) | On-chain data: mint/freeze authority, holder distribution, wallet accounts |
 | **Helius RPC** *(optional)* | Faster RPC for deployer history and bundle detection scans |
 | **RugCheck** | Token risk flags, LP lock status, rug-pull detection |
@@ -175,7 +175,7 @@ ZendIQ currently operates no analytics backend for the Pro edition.
 | `activeTab` | Detect the currently open DEX tab |
 | `scripting` | Inject the risk overlay and wallet hook into DEX pages |
 | `tabs` | Query open tabs to find the active DEX |
-| `*://jup.ag/*`, `*://raydium.io/*` | Intercept swap events on supported DEXes |
+| `*://jup.ag/*`, `*://raydium.io/*`, `*://pump.fun/*` | Intercept swap events on supported DEXes |
 | `https://lite-api.jup.ag/*` | Fetch optimised order and execute via Jupiter Ultra |
 | `https://api.rugcheck.xyz/*` | Token risk flags |
 | `https://api.dexscreener.com/*` | Token metadata and market data |
