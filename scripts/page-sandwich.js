@@ -48,16 +48,15 @@
   // Native SOL mint address — balance lives in meta.preBalances/postBalances, not token balances.
   const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
-  // Returns the raw-integer delta (post − pre) for a given wallet+mint pair
-  // using the meta.preTokenBalances / postTokenBalances arrays from a jsonParsed
-  // getTransaction response.  "owner" in those arrays is the wallet pubkey.
+  // Returns the raw-integer delta (post − pre) for a given wallet+mint pair.
+  // Sums ALL matching entries for that owner+mint (a wallet can have multiple
+  // token accounts for the same mint — only taking the first one would miss the
+  // real balance change if the bot uses a non-default ATA).
   function _ownerDelta(preBals, postBals, walletPubkey, mint) {
-    const _find = (arr) => (arr ?? []).find(b => b.owner === walletPubkey && b.mint === mint);
-    const pre   = _find(preBals);
-    const post  = _find(postBals);
-    const preAmt  = pre  ? Number(pre.uiTokenAmount.amount)  : 0;
-    const postAmt = post ? Number(post.uiTokenAmount.amount) : 0;
-    return postAmt - preAmt;
+    const _sum = (arr) => (arr ?? [])
+      .filter(b => b.owner === walletPubkey && b.mint === mint)
+      .reduce((s, b) => s + Number(b.uiTokenAmount.amount), 0);
+    return _sum(postBals) - _sum(preBals);
   }
 
   // Returns the native SOL lamport delta for a wallet in a tx.
@@ -178,6 +177,26 @@
           .filter(i => i < _accountKeys.length);
         const _poolVaults = [...new Set(_poolVaultIdxs.map(i => _accountKeys[i]))].slice(0, 2);
 
+        // Pump.fun bonding curve override — every buy/sell on a pump.fun token touches
+        // the same Bonding Curve account (accounts[3] of the instruction), which is a
+        // more reliable lookup key than the vault accounts used for Raydium/Jupiter.
+        // PumpSwap (pAMMBay6...) uses the same accounts[] layout — handle both.
+        const PUMP_PROGRAMS = new Set([
+          '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', // pump.fun bonding curve
+          'pAMMBay6oceH4gMLqCv6JEBYFrwJYRn6JhQVacyKbNe',  // PumpSwap (same layout; no test data yet)
+        ]);
+        const _pumpIx = (userTx.transaction?.message?.instructions ?? []).find(
+          ix => PUMP_PROGRAMS.has(ix.programId)
+        );
+        if (_pumpIx && Array.isArray(_pumpIx.accounts) && _pumpIx.accounts.length > 3) {
+          const _bondingCurve = _pumpIx.accounts[3];
+          if (_bondingCurve) {
+            // Replace vault list with the single bonding curve address.
+            _poolVaults.length = 0;
+            _poolVaults.push(_bondingCurve);
+          }
+        }
+
         if (_poolVaults.length === 0) return { error: 'unavailable' };
 
         // Query both pool vaults (if available) and merge — the back-run tx may
@@ -187,7 +206,8 @@
           ns.rpcCall('getSignaturesForAddress', [_va, { before: sig, limit: 20, commitment: 'confirmed' }]),
           ns.rpcCall('getSignaturesForAddress', [_va, { until: sig,  limit: 20, commitment: 'confirmed' }]),
         ]);
-        const _vaultResults = await Promise.all(_vaultQueries);
+        const _settled = await Promise.allSettled(_vaultQueries);
+        const _vaultResults = _settled.map(s => s.status === 'fulfilled' ? s.value : null);
 
         // Keep only sigs that landed in the same slot as the user's tx.
         const _inSlot = (res) =>
@@ -348,7 +368,83 @@
           }
         }
 
-        // No matching pair found — clean
+        // ── Step 5c: front-run only detection ──────────────────────────────
+        // The back-run sell is unreachable via RPC in Jito bundles due to cursor-
+        // pagination ordering — `getSignaturesForAddress` cannot consistently place
+        // the back-run in afterSigs.  Similarly, the front-run itself may land in
+        // afterSigs (offset:1) rather than beforeSigs when the bundle reorders txs
+        // within the same slot, causing it to be skipped by the offset<0 guard above.
+        //
+        // A sandwich bot MUST front-run the victim (buy the same token in the same
+        // slot) — detecting the front-run alone is sufficient and is how most
+        // production sandwich detectors work.  Scan ALL settled candidates (both
+        // offsets) for non-victim wallets that gained the outputMint token.
+        const _frontRunBuyers = [];
+        for (const s of settled) {
+          if (s.status !== 'fulfilled') continue;
+          const { cSig: _cSig, data: _data } = s.value;
+          if (!_data?.meta) continue;
+          const _fp = _feePayer(_data);
+          if (!_fp || _fp === feePayer) continue; // skip victim
+          const _pre  = _data.meta.preTokenBalances  ?? [];
+          const _post = _data.meta.postTokenBalances ?? [];
+          const _tokenDelta = outputMint === SOL_MINT
+            ? _nativeDelta(_data, _fp)
+            : _ownerDelta(_pre, _post, _fp, outputMint);
+          if (_tokenDelta <= 0) continue; // did not gain outputMint — not a buy
+          // SOL spent (lamports → SOL); negative lamport delta = spent SOL buying tokens.
+          const _solLamDelta = _nativeDelta(_data, _fp);
+          const _solSpent    = _solLamDelta < 0 ? Math.abs(_solLamDelta) / 1e9 : null;
+          _frontRunBuyers.push({ cSig: _cSig, feePayer: _fp, tokenDelta: _tokenDelta, solSpent: _solSpent, txData: _data });
+        }
+
+        if (_frontRunBuyers.length > 0) {
+          // Pick the wallet that bought the most tokens (largest front-run).
+          const _best = _frontRunBuyers.reduce((a, b) => b.tokenDelta > a.tokenDelta ? b : a);
+          const _sig5c = ['token_flow'];
+          if (_checkJitoTip(_best.txData))  _sig5c.push('jito_bundle');
+          if (_checkBotProgram(_best.txData)) _sig5c.push('known_program');
+          if (_frontRunBuyers.length > 1)     _sig5c.push('multi_front_runner');
+          // Confidence: possible with token_flow alone; probable with at least one
+          // corroborating signal (Jito, known program, or multiple buyers in same slot).
+          const _conf5c = _sig5c.length > 1 ? 'probable' : 'possible';
+          // Rough extraction estimate: the bot's SOL spend as a fraction of the
+          // victim's input represents the price impact they extracted from the user.
+          // We can't compute exact profit without the back-run.
+          let _extUsd5c = null;
+          const _amtIn5c = opts.amountIn    != null ? Number(opts.amountIn)    : null;
+          const _usdIn5c = opts.amountInUsd != null ? Number(opts.amountInUsd) : null;
+          if (_best.solSpent != null && _amtIn5c > 0 && _usdIn5c != null) {
+            // Extraction ≈ victim's input USD × (bot_sol / victim_sol) × typical margin 10%
+            _extUsd5c = _usdIn5c * (_best.solSpent / _amtIn5c) * 0.10;
+          }
+          const res5c = {
+            detected: true,
+            method:   'front-run',
+            confidence: _conf5c,
+            signals:   _sig5c,
+            attackerWallet: _best.feePayer,
+            frontRunSig:    _best.cSig,
+            backRunSig:     null,
+            frontRunner: {
+              wallet:     _best.feePayer,
+              signature:  _best.cSig,
+              tokenDelta: _best.tokenDelta,
+              solSpent:   _best.solSpent,
+            },
+            extractedNative: null,
+            extractedUI:     null,
+            extractedUsd:    _extUsd5c,
+            inputMint,
+            outputMint,
+            scanned: candidateJobs.length,
+            slot,
+          };
+          ns.sandwichCache.set(sig, res5c);
+          return res5c;
+        }
+
+        // No matching pair or front-runner found — clean
         const cleanRes = { detected: false, scanned: candidateJobs.length, slot };
         ns.sandwichCache.set(sig, cleanRes);
         return cleanRes;

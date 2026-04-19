@@ -116,7 +116,19 @@
         if (decision === 'confirm') {
           window.__zendiq_ws_confirmed = true;
           window.__zendiq_swap_bypass = true;
-          btn.click();
+          // Re-query the button fresh — React may have re-rendered the DOM while the
+          // ZendIQ overlay was open, making the original `btn` reference a detached node
+          // whose `.click()` dispatches into the void (never reaches React's root handler).
+          // Use EXACT original text match — the broad regex was matching pump.fun's app-
+          // download / upsell buttons ("Buy on App", etc.) causing navigation to app.pump.fun.
+          const _freshBtn = _isPumpBuy
+            ? (document.body.contains(btn) ? btn
+              : Array.from(document.querySelectorAll('button, [role="button"]')).find(b => {
+                  const t = b.textContent?.trim().replace(/\s+/g, ' ') ?? '';
+                  return t === txt;
+                }) ?? btn)
+            : btn;
+          _freshBtn.click();
           window.__zendiq_swap_bypass = false;
         } else if (decision === 'optimise') {
           // widget handles the optimised route — do nothing

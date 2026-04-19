@@ -22,7 +22,14 @@
     "https://ultra-api.jup.ag/*",
     "https://api.rugcheck.xyz/*",
     "https://api.dexscreener.com/*",
-    "https://api.geckoterminal.com/*"
+    "https://api.geckoterminal.com/*",
+    "https://pump.fun/*",
+    "https://*.pump.fun/*",
+    "https://frontend-api.pump.fun/*",
+    "https://frontend-api-v2.pump.fun/*",
+    "https://frontend-api-v3.pump.fun/*",
+    "https://*.block-engine.jito.wtf/*",
+    "https://pumpportal.fun/*"
   ],
   "content_scripts": [
     {

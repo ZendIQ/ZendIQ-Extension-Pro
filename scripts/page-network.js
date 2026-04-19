@@ -231,7 +231,51 @@
         // ── Site adapter network hook (mint/slippage extraction, API sniff) ──
         ns.activeSiteAdapter?.()?.onNetworkRequest?.(url, parsed);
 
-        // ── /order intercept — capture URL params then enrich from response body ──
+        // ── pump.fun API response tap ─────────────────────────────────────
+        // Intercepts ALL pump.fun fetch calls and searches each JSON response for
+        // either (a) explicit bonding_curve/bondingCurve fields or
+        // (b) a base64-encoded Solana transaction containing the buy instruction.
+        // Covers coins API, trade-build API, and any other pump.fun endpoint that
+        // carries the bonding curve address.  Does NOT require a trailing slash in
+        // the URL (previous pattern had that bug).  Non-JSON responses are silently
+        // ignored by the .catch handler.
+        if (url && /pump\.fun/.test(url) && !window.__zendiq_own_tx) {
+          const _pumpResp = await origFetch(resource, init);
+          _pumpResp.clone().json().then(j => {
+            if (!j || typeof j !== 'object') return;
+            // (a) Explicit bonding curve address fields
+            const _bc  = j.bonding_curve ?? j.bondingCurve ?? null;
+            const _abc = j.associated_bonding_curve ?? j.associatedBondingCurve ?? null;
+            if (_bc && _abc && typeof _bc === 'string' && _bc.length > 30) {
+              ns._pumpExtractedAccounts = { bondingCurve: _bc, assocBondingCurve: _abc };
+              if (ns.pumpFunContext) { ns.pumpFunContext.bondingCurve = _bc; ns.pumpFunContext.assocBondingCurve = _abc; }
+            }
+            // (b) Base64 transaction bytes — parse bonding curve from raw tx
+            const _txB64 = j.transaction ?? j.tx ?? j.Transaction ?? j.data?.transaction ?? null;
+            if (_txB64 && typeof _txB64 === 'string' && _txB64.length > 100) {
+              try {
+                const _raw = atob(_txB64);
+                const _bytes = new Uint8Array(_raw.length);
+                for (let i = 0; i < _raw.length; i++) _bytes[i] = _raw.charCodeAt(i);
+                if (_bytes.length > 100) {
+                  const _ext = ns.activeSiteAdapter?.()?.parseTxAccounts?.(_bytes);
+                  if (_ext?.bondingCurve) {
+                    // Cache full account template so _buildPumpBuyTx can reuse pump.fun's exact layout
+                    if (_ext.allKeys?.length > 8 && _ext.buyIxAcctIndices?.length > 10) {
+                      ns._pumpTxTemplate = { allKeys: _ext.allKeys, buyIxAcctIndices: _ext.buyIxAcctIndices, msgHeader: _ext.msgHeader };
+                    }
+                    ns._pumpExtractedAccounts = _ext;
+                    ns._pumpGlobalAccounts = { global: _ext.global, feeRecip: _ext.feeRecip, evtAuth: _ext.evtAuth };
+                    if (ns.pumpFunContext) { ns.pumpFunContext.bondingCurve = _ext.bondingCurve; ns.pumpFunContext.assocBondingCurve = _ext.assocBondingCurve; }
+                  }
+                }
+              } catch (_) {}
+            }
+          }).catch(() => {});
+          return _pumpResp;
+        }
+
+
         const isJupiterOrder = url && url.includes('jup.ag') && url.includes('/order')
                             && (init?.method ?? 'GET') === 'GET' && !window.__zendiq_own_tx;
         if (isJupiterOrder) {
@@ -401,7 +445,8 @@
           url.includes('rpcpool')
         );
 
-        if (isRpc && (methodName === 'sendTransaction' || methodName === 'send_raw_transaction') && !window.__zendiq_own_tx) {
+        if (isRpc && (methodName === 'sendTransaction' || methodName === 'send_raw_transaction') && !window.__zendiq_own_tx
+            && !window.location.hostname.includes('pump.fun')) {
           // ── Raydium "Continue with original route" — tap RPC response for sig ──
           // Mirrors the lite version: signature lives in the sendTransaction fetch response
           // as data?.result ("{jsonrpc:…,result:'<BASE58_SIG>',id:…}").
@@ -574,22 +619,197 @@
           }
         }
       } catch (e) {
-        if (e?.message && !e.message.includes('Content-Security-Policy')) {
+        if (e?.message && !e.message.includes('Content-Security-Policy') && !e.message.includes('Failed to fetch')) {
           console.warn('[ZendIQ] fetch interception error', e);
         }
+        throw e; // always rethrow so callers receive a proper rejection, not undefined
       }
+
+      // ── Pump.fun transaction detection ──────────────────────────────────
+      // Our wallet hooks (signTransaction / signAndSendTransaction) do NOT fire
+      // on pump.fun — the site uses an internal wallet adapter that caches the
+      // original signing methods before our hooks are installed.
+      // Pump.fun submits signed txs to Jito block engines and Temporal/Nozomi
+      // in parallel (8+ POSTs to */transactions). Jito JSON-RPC response format:
+      // { jsonrpc: "2.0", result: "<base58_signature>" }
+      // We tap the first successful response containing a signature.
+      if (window.location.hostname.includes('pump.fun')
+          && (ns.widgetSwapStatus === 'pump-signing' || ns.widgetSwapStatus === 'pump-sending' || ns.widgetSwapStatus === 'signing-original' || window.__zendiq_ws_confirmed)
+          && typeof resource === 'string'
+          && resource.includes('/transactions')) {
+        const _pumpMethod = init?.method?.toUpperCase?.();
+        if (_pumpMethod === 'POST') {
+          // Extract signature from request body as fallback — the serialized tx's
+          // first 64 bytes (after the 1-byte numSigners prefix) are the fee-payer sig.
+          let _reqBodySig = null;
+          try {
+            const _body = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
+            // Jito format: { jsonrpc, method: "sendTransaction", params: ["<base58_tx>"] }
+            const _txB58 = _body?.params?.[0];
+            if (typeof _txB58 === 'string' && _txB58.length > 100) {
+              _reqBodySig = _txB58; // store full base58 tx — we'll extract sig if needed
+              // ── Cache pump.fun fixed program accounts from this transaction ──────
+              // Extract global state, fee recipient, and event authority addresses.
+              // These are fixed per contract deployment but we capture from real txs
+              // so we never rely solely on hardcoded values.
+              if (!ns._pumpGlobalAccounts) {
+                try {
+                  const _B58A = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+                  function _decB58(s) {
+                    let n = 0n;
+                    for (const c of s) { const idx = _B58A.indexOf(c); if (idx < 0) return null; n = n * 58n + BigInt(idx); }
+                    const b = new Uint8Array(32);
+                    for (let i = 31; i >= 0 && n > 0n; i--) { b[i] = Number(n & 0xffn); n >>= 8n; }
+                    return b;
+                  }
+                  function _encB58(b) {
+                    const d = [0]; for (let i = 0; i < b.length; i++) { let c = b[i]; for (let j = 0; j < d.length; j++) { c += d[j] << 8; d[j] = c % 58; c = (c / 58) | 0; } while (c) { d.push(c % 58); c = (c / 58) | 0; } }
+                    return d.reverse().map(x => _B58A[x]).join('');
+                  }
+                  const _txBytes = _decB58(_txB58);
+                  if (_txBytes) {
+                    // Parse: numSigs + sigs → header (3) → compact-u16 numAccts → account keys
+                    let _off = 0;
+                    const _ns2 = _txBytes[_off++] ?? 0;
+                    _off += _ns2 * 64; // skip signatures
+                    if (_txBytes[_off] >= 0x80) _off++; // skip v0 version byte
+                    _off += 3; // skip header
+                    let _na = _txBytes[_off++]; if (_na & 0x80) { _na = (_na & 0x7f) | (_txBytes[_off++] << 7); }
+                    const _accts = [];
+                    for (let i = 0; i < _na; i++) { _accts.push(_encB58(new Uint8Array(_txBytes.buffer, _txBytes.byteOffset + _off, 32))); _off += 32; }
+                    // In a pump.fun buy tx, account order is typically:
+                    // [user, global, feeRecip, mint, bondingCurve, assocBC, userATA, system, token, rent, eventAuth, program]
+                    // We identify program by known address, then derive positions
+                    const _PUMP_PROG = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+                    const _progIdx = _accts.indexOf(_PUMP_PROG);
+                    if (_progIdx >= 0 && _accts.length >= 10) {
+                      // Global = 2nd-to-last readonly unsigned acct (index progIdx-1 is event_auth, progIdx-2 is rent, etc.)
+                      // More reliably: global is typically at index 1, feeRecip at 2, evtAuth at progIdx-1
+                      ns._pumpGlobalAccounts = {
+                        global:   _accts[1],
+                        feeRecip: _accts[2],
+                        evtAuth:  _accts[_progIdx - 1],
+                      };
+                    }
+                  }
+                } catch (_) {}
+              }
+            }
+          } catch (_) {}
+
+          const resp = await origFetch(resource, init);
+          try {
+            const _clone = resp.clone();
+            _clone.text().then(_text => {
+              // Already handled by a prior parallel request
+              if (ns._pumpTxSigHandled) return;
+              let sig = null;
+              try {
+                const data = JSON.parse(_text);
+                // Jito JSON-RPC: { result: "<base58_signature>" }
+                sig = data?.result ?? data?.signature ?? data?.txSignature ?? null;
+                // Some endpoints return string result directly
+                if (typeof sig === 'string' && sig.length >= 43 && sig.length <= 90) {
+                  // valid base58 sig
+                } else {
+                  sig = null;
+                }
+              } catch (_) {
+                // Response might be plain text signature
+                if (typeof _text === 'string' && _text.length >= 43 && _text.length <= 90) {
+                  sig = _text.trim();
+                }
+              }
+              if (!sig) return;
+              ns._pumpTxSigHandled = true; // prevent duplicate handling from parallel requests
+              ns._pumpTxCooldownUntil = Date.now() + 10000; // suppress re-intercepts for 10s
+              window.__zendiq_ws_confirmed = false;
+              clearTimeout(ns._pumpSigningTimeout);
+              const _wasOptimise = ns._pumpTxWasOptimised
+                ?? (ns.widgetSwapStatus === 'pump-signing' && ns.pumpFunPatchedSlippage);
+              ns._recordPumpActivity?.(sig, !!_wasOptimise);
+              ns._pumpTxWasOptimised = false; // clear after use
+              // Transition widget
+              ns.widgetOriginalTxSig = sig;
+              ns.widgetSwapStatus    = _wasOptimise ? 'pump-done' : 'done-original';
+              ns.widgetActiveTab     = 'monitor';
+              try { ns.renderWidgetPanel?.(); } catch (_) {}
+              // Auto-dismiss after 2s
+              clearTimeout(ns._pumpDoneTimer);
+              ns._pumpDoneTimer = setTimeout(() => {
+                if (ns.widgetSwapStatus === 'pump-done' || ns.widgetSwapStatus === 'done-original') {
+                  ns.widgetSwapStatus = '';
+                  ns.pumpFunContext    = null;
+                  ns.pumpFunErrorMsg   = null;
+                  ns._pumpTxSigHandled = false;
+                  try { ns.renderWidgetPanel?.(); } catch (_) {}
+                }
+              }, 2000);
+            }).catch(() => {});
+          } catch (_) {}
+          return resp;
+        }
+      }
+
       return origFetch(resource, init);
     };
   } catch (e) { console.warn('[ZendIQ] Could not override fetch', e); }
 
   // ── XHR override ────────────────────────────────────────────────────────
+  // Skip the send override on pump.fun — all three intercept targets (Raydium compute,
+  // Raydium send-tx, RPC sendTransaction) are irrelevant there. Installing it anyway
+  // puts ZendIQ in every XHR call stack, making DevTools show page-network.js as the
+  // initiator for pump.fun's own analytics and API calls.
   try {
     const origOpen = XMLHttpRequest.prototype.open;
     const origSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function (method, url) {
       this.__sr_url = url;
+      // ── pump.fun XHR response tap ──────────────────────────────────────
+      // The send override is skipped on pump.fun to avoid DevTools attribution
+      // noise, but adding a load listener HERE (in open) doesn't affect the
+      // send call-site attribution.  Covers any pump.fun API call that goes
+      // through XHR instead of window.fetch (e.g. /coins/{mint}, /trade/*).
+      if (url && /pump\.fun/.test(url)) {
+        this.addEventListener('load', function () {
+          try {
+            const j = ns.tryParseJson(this.responseText);
+            if (!j || typeof j !== 'object') return;
+            // (a) Explicit bonding curve fields
+            const _bc  = j.bonding_curve ?? j.bondingCurve ?? null;
+            const _abc = j.associated_bonding_curve ?? j.associatedBondingCurve ?? null;
+            if (_bc && _abc && typeof _bc === 'string' && _bc.length > 30) {
+              ns._pumpExtractedAccounts = { bondingCurve: _bc, assocBondingCurve: _abc };
+              if (ns.pumpFunContext) { ns.pumpFunContext.bondingCurve = _bc; ns.pumpFunContext.assocBondingCurve = _abc; }
+            }
+            // (b) Base64 transaction bytes
+            const _txB64 = j.transaction ?? j.tx ?? j.Transaction ?? null;
+            if (_txB64 && typeof _txB64 === 'string' && _txB64.length > 100) {
+              try {
+                const _raw = atob(_txB64);
+                const _bytes = new Uint8Array(_raw.length);
+                for (let i = 0; i < _raw.length; i++) _bytes[i] = _raw.charCodeAt(i);
+                if (_bytes.length > 100) {
+                  const _ext = ns.activeSiteAdapter?.()?.parseTxAccounts?.(_bytes);
+                  if (_ext?.bondingCurve) {
+                    if (_ext.allKeys?.length > 8 && _ext.buyIxAcctIndices?.length > 10) {
+                      ns._pumpTxTemplate = { allKeys: _ext.allKeys, buyIxAcctIndices: _ext.buyIxAcctIndices, msgHeader: _ext.msgHeader };
+                    }
+                    ns._pumpExtractedAccounts = _ext;
+                    ns._pumpGlobalAccounts = { global: _ext.global, feeRecip: _ext.feeRecip, evtAuth: _ext.evtAuth };
+                    if (ns.pumpFunContext) { ns.pumpFunContext.bondingCurve = _ext.bondingCurve; ns.pumpFunContext.assocBondingCurve = _ext.assocBondingCurve; }
+                  }
+                }
+              } catch (_) {}
+            }
+          } catch (_) {}
+        }, { passive: true });
+      }
       return origOpen.apply(this, arguments);
     };
+    if (window.location.hostname.includes('pump.fun')) {
+      // open hook is enough on pump.fun; skip the send override entirely
+    } else {
     XMLHttpRequest.prototype.send = function (body) {
       try {
         const url    = this.__sr_url || '';
@@ -644,5 +864,6 @@
       } catch (e) { console.warn('[ZendIQ] XHR interception error', e); }
       return origSend.apply(this, arguments);
     };
+    } // end else (non-pump.fun)
   } catch (e) { console.warn('[ZendIQ] Could not override XHR', e); }
 })();

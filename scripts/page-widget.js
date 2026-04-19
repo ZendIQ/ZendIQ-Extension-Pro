@@ -331,7 +331,7 @@
     };
     // ── End shared Review & Sign builders ────────────────────────────────────
     // Expose card builders to site adapters (pump, raydium, etc.)
-    Object.assign(ns, { _rClr, _factorRows, _buildOrderCard, _buildTokenRiskCard, _buildExecutionRiskCard, _buildSavingsCostsCard, _buildReviewShell });
+    Object.assign(ns, { _rClr, _riskLabel, _factorRows, _buildOrderCard, _buildTokenRiskCard, _buildExecutionRiskCard, _buildSavingsCostsCard, _buildReviewShell });
 
     const widget = document.getElementById('sr-widget');
     if (!widget) return;
@@ -523,7 +523,7 @@
               const inVal  = _fmtW(h.amountIn,  h.tokenIn  || '?');
               const outVal = _fmtW(h.amountOut, h.tokenOut || '?');
               // Exchange label from swapType / routeSource
-              const exchLbl = h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM') : h.swapType === 'rfq' ? 'RFQ · Jupiter' : h.swapType === 'gasless' ? 'Gasless · Jupiter' : (h.optimized ? 'ZendIQ · AMM' : 'Jupiter · AMM');
+              const exchLbl = h.routeSource === 'pump.fun' ? (h.jitoBundle ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM') : h.swapType === 'rfq' ? 'RFQ · Jupiter' : h.swapType === 'gasless' ? 'Gasless · Jupiter' : (h.optimized ? 'ZendIQ · AMM' : 'Jupiter · AMM');
               // Savings row
               let savRow = '';
               if (h.optimized) {
@@ -590,6 +590,9 @@
                 } else if (!h.optimized && (h.quotedOut != null || h.rawOutAmount != null)) {
                   // Unoptimized (Proceed anyway): show pending until on-chain confirms
                   accRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Waiting for on-chain confirmation to compare against the DEX's quoted amount. Updates automatically a few seconds after the swap confirms.">ZendIQ Quote Accuracy</span><span style="color:#C2C2D4">pending…</span></div>`;
+                } else if (!h.optimized && h.actualOutAmount != null) {
+                  // No quoted amount available (e.g. old pump.fun entries) — show confirmed result
+                  accRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="On-chain result confirmed. No pre-execution quote was available for comparison.">On-chain Confirmed</span><span style="color:#14F195;font-weight:700">\u2713</span></div>`;
                 }
               }
               // Sandwich detection row — only shown when sandwichResult field has been set.
@@ -615,12 +618,33 @@
                   const _scanTip = _sr.scanned > 0
                     ? `Scanned ${_sr.scanned} transaction${_sr.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.`
                     : 'No sandwich activity detected.';
-                  if (h.quoteAccuracy == null) {
+                  // quoteAccuracy is always null on pump.fun (no pre-execution quote);
+                  // use actualOutAmount as on-chain arrival indicator instead.
+                  if (h.quoteAccuracy == null && h.actualOutAmount == null) {
                     sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Waiting for on-chain confirmation before finalising sandwich check.">Sandwich check</span><span style="color:#9B9BAD">pending\u2026</span></div>`;
                   } else {
                     sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="${escapeHtml(_scanTip)}">Sandwich check</span><span style="color:#14F195;font-weight:700">Not sandwiched \u2705</span></div>`;
                   }
                 }
+              }
+              // ── Failed trade card (tx sent but rejected on-chain) ──────────
+              if (h.failed) {
+                return `
+                  <div id="sr-wc-${i}" style="background:rgba(255,77,77,0.04);border:1px solid rgba(255,77,77,0.25);border-radius:8px;padding:10px;margin-bottom:6px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+                      <span style="font-size:13px;font-weight:700;color:#FF4D4D">\u2715 Failed on-chain</span>
+                      <span style="font-size:12px;font-weight:700;color:#E8E8F0;font-family:'Space Mono',monospace">- ${inVal}</span>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                      <span style="font-size:13px;color:#C2C2D4">${exchLbl}</span>
+                      <span style="font-size:13px;color:#9B9BAD">No tokens received</span>
+                    </div>
+                    ${sandwichRow}
+                    <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#9B9BAD">
+                      <div style="color:#14F195;">${solscanLink}</div>
+                      <div style="color:#9B9BAD;font-size:12px">${ago}</div>
+                    </div>
+                  </div>`;
               }
               // ── Unoptimized trade card ───────────────────────────────────
               if (!h.optimized) {
@@ -1084,14 +1108,23 @@
       } else {
         const _tsIdle = ns.tokenScoreResult?.loaded && ns.tokenScoreResult?.mint === ns.lastOutputMint
           ? ns.tokenScoreResult : null;
-        const _outM   = ns.lastOutputMint;
-        const _tsIdleHtml = _tsIdle
+        // Only show token-scan text on Jupiter where live ticks set lastOutputMint
+        // during active trading. On pump.fun/raydium the adapter's own renderMonitor
+        // handles the active-swap state; the generic fallback here is idle-only.
+        const _hasAdapterMon = !!ns.activeSiteAdapter?.()?.renderMonitor;
+        const _outM   = _hasAdapterMon ? null : ns.lastOutputMint;
+        const _tsIdleHtml = _tsIdle && !_hasAdapterMon
           ? _buildTokenRiskCard(_tsIdle, ns.widgetMode === 'simple')
           : (_outM ? `<div style="font-size:12px;color:#9B9BAD;text-align:center;padding:4px 0">Scanning token risk&hellip;</div>` : '');
+        const _isPump = window.location.hostname.includes('pump.fun');
+        const _isRdm  = window.location.hostname.includes('raydium');
+        const _idleHint = _isPump ? 'Start a swap on pump.fun to see risk analysis here.'
+          : _isRdm ? 'Swap on <a href="https://raydium.io" style="color:#9945FF;text-decoration:none">raydium.io</a> to see risk analysis here.'
+          : 'Swap on <a href="https://jup.ag" style="color:#9945FF;text-decoration:none">jup.ag</a> to see risk analysis here.';
         monitorContent = `
           <div style="padding:14px 16px;">
             <div style="font-size:12px;color:#C2C2D4;text-align:center;padding:12px 0;line-height:1.6">
-              Monitoring active.<br>Connect your wallet and start a swap to see risk analysis here.
+              Monitoring active.<br>${_idleHint}
             </div>
             ${_tsIdleHtml}
           </div>`;
@@ -1125,7 +1158,9 @@
       const _sigO  = ns.widgetOriginalTxSig;
       const _oiD   = ns.widgetOriginalSigningInfo ?? {};
       const _dInSym  = _oiD.inputSymbol  ?? MINT_SYM[_oiD.inputMint]  ?? '?';
-      const _dOutSym = _oiD.outputSymbol ?? MINT_SYM[_oiD.outputMint] ?? '?';
+      const _dOutSym = _oiD.outputSymbol !== '?'
+        ? _oiD.outputSymbol
+        : (ns.tokenScoreCache?.get(_oiD.outputMint)?.result?.symbol ?? MINT_SYM[_oiD.outputMint] ?? '?');
       const _dInDec  = _oiD.inputDecimals  ?? (_oiD.inputMint  ? (MINT_DEC[_oiD.inputMint]  ?? 9) : 9);
       const _dOutDec = _oiD.outputDecimals ?? (_oiD.outputMint ? (MINT_DEC[_oiD.outputMint] ?? 9) : 9);
       const _dInAmt  = _oiD.inAmt ?? (_oiD.inAmountRaw != null ? Number(_oiD.inAmountRaw) / Math.pow(10, _dInDec) : null);
@@ -1134,7 +1169,10 @@
         ? Number(ns.jupiterLiveQuote.outAmount) / Math.pow(10, _dOutDec) : null;
       const _dShortSig = _sigO ? (_sigO.slice(0, 8) + '\u2026' + _sigO.slice(-4)) : null;
       const _dSolUrl   = _sigO ? ('https://solscan.io/tx/' + escapeHtml(_sigO)) : null;
-      const _dRouteLabel = ns.activeSiteAdapter?.()?.name === 'raydium' ? "Via Raydium\u2019s route" : "Via Jupiter\u2019s route";
+      const _dAdapterName = ns.activeSiteAdapter?.()?.name;
+      const _dRouteLabel = _dAdapterName === 'raydium' ? "Via Raydium\u2019s route"
+        : _dAdapterName === 'pump' ? "Via pump.fun\u2019s route"
+        : "Via Jupiter\u2019s route";
       const _dAmtRow   = (_dInSym && _dOutSym && _dInAmt != null)
         ? `<div style="font-size:13px;color:#C2C2D4;margin:4px 0 0">${Number(_dInAmt).toFixed(4)} ${_dInSym} \u2192 ${_dOutAmt != null ? Number(_dOutAmt).toFixed(4) : '?'} ${_dOutSym}</div>`
         : '';
@@ -1180,7 +1218,9 @@
       const _oi   = ns.widgetOriginalSigningInfo ?? {};
       const _olq  = ns.jupiterLiveQuote;
       const _oInSym  = _oi.inputSymbol  ?? MINT_SYM[_oi.inputMint]  ?? '?';
-      const _oOutSym = _oi.outputSymbol ?? MINT_SYM[_oi.outputMint] ?? '?';
+      const _oOutSym = _oi.outputSymbol !== '?'
+        ? _oi.outputSymbol
+        : (ns.tokenScoreCache?.get(_oi.outputMint)?.result?.symbol ?? MINT_SYM[_oi.outputMint] ?? '?');
       const _oInDec  = _oi.inputDecimals  ?? (_oi.inputMint  ? (MINT_DEC[_oi.inputMint]  ?? 9) : 9);
       const _oOutDec = _oi.outputDecimals ?? (_oi.outputMint ? (MINT_DEC[_oi.outputMint] ?? 9) : 9);
       const _oInAmt  = _oi.inAmt ?? (_oi.inAmountRaw != null ? Number(_oi.inAmountRaw) / Math.pow(10, _oInDec) : null);
@@ -1192,6 +1232,8 @@
         ?? (_oRScore != null ? (_oRScore >= 70 ? 'CRITICAL' : _oRScore >= 40 ? 'HIGH' : _oRScore >= 20 ? 'MEDIUM' : 'LOW') : null);
       const _oRlc    = { CRITICAL: '#FF4D4D', HIGH: '#FFB547', MEDIUM: '#9945FF', LOW: '#14F195' }[_oRLevel] ?? '#C2C2D4';
       const _fmt4o   = v => v != null ? Number(v).toFixed(4) : '?';
+      const _oAdapterN = ns.activeSiteAdapter?.()?.name;
+      const _oSrcName = _oAdapterN === 'raydium' ? "Raydium\u2019s" : _oAdapterN === 'pump' ? "pump.fun\u2019s" : "Jupiter\u2019s";
       widgetFlowContent = `
           <div style="padding:14px 16px">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -1199,7 +1241,7 @@
               <span style="font-size:12px;color:#FFB547;font-weight:600">&#9888; Not optimized</span>
             </div>
             <div style="background:rgba(255,181,71,0.04);border:1px solid rgba(255,181,71,0.18);border-radius:8px;padding:9px 11px;margin-bottom:8px">
-              <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.6px;color:#FFB547;font-weight:700;margin-bottom:7px">Jupiter\u2019s original swap \u2014 no ZendIQ routing</div>
+              <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.6px;color:#FFB547;font-weight:700;margin-bottom:7px">${_oSrcName} original swap \u2014 no ZendIQ routing</div>
               ${_oInAmt != null ? `<div style="display:flex;justify-content:space-between;margin-bottom:4px">
                 <span style="font-size:13px;color:#C2C2D4">Selling</span>
                 <span style="font-size:13px;color:#E8E8F0;font-weight:600">${_fmt4o(_oInAmt)} ${_oInSym}</span>
@@ -1219,7 +1261,7 @@
                 <span style="font-size:13px;font-weight:700;color:${_oRlc}">${_oRScore}/100 ${_oRLevel ?? ''}</span>
               </div>` : ''}
             </div>
-            <div style="font-size:13px;color:#C2C2D4;text-align:center">${_oi._sending ? 'Broadcasting to Solana\u2026' : (_oi.reason === 'no_net_benefit' ? 'ZendIQ found no net benefit \u2014 Jupiter\u2019s route is as good or better' : 'Check your wallet \u2014 this is Jupiter\u2019s original route')}</div>
+            <div style="font-size:13px;color:#C2C2D4;text-align:center">${_oi._sending ? 'Broadcasting to Solana\u2026' : (_oi.reason === 'no_net_benefit' ? `ZendIQ found no net benefit \u2014 ${_oSrcName} route is as good or better` : `Check your wallet \u2014 this is ${_oSrcName} original route`)}</div>
           </div>`;
     } else if (ns._adapterBusyStates?.().includes(ns.widgetSwapStatus)) {
       // ── Site adapter flow states (pump-slippage-review, pump-signing, pump-done, etc.) ──
@@ -2414,7 +2456,7 @@
               const fmt = v => (v == null || !isFinite(v)) ? '—' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
               const fmtA = (val, sym) => { if (val == null) return '— '+(sym||''); const n=parseFloat(val); if (!isFinite(n)) return String(val)+' '+(sym||''); const abs=Math.abs(n); const p=abs>=1000?2:abs>=1?4:abs>=0.001?6:8; const [ip,dp]=n.toFixed(p).split('.'); return ip.replace(/\B(?=(\d{3})+(?!\d))/g,'.')+(dp?','+dp:'')+' '+(sym||''); };
               const fmtAgo = ts => { const s=Math.round((Date.now()-(ts||0))/1000); return s<60?s+'s ago':s<3600?Math.round(s/60)+'m ago':Math.round(s/3600)+'h ago'; };
-              const exchLbl = h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':(h.optimized?'ZendIQ · AMM':'Jupiter · AMM');
+              const exchLbl = h.routeSource === 'pump.fun' ? (h.jitoBundle ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':(h.optimized?'ZendIQ · AMM':'Jupiter · AMM');
               const sol = h.solPriceUsd != null ? Number(h.solPriceUsd) : null;
               const SOL_MINT = 'So11111111111111111111111111111111111111112';
               const outputIsSol = h.outputMint === SOL_MINT || h.tokenOut === 'SOL' || h.tokenOut === 'WSOL';
@@ -2546,7 +2588,7 @@
 
               // ZendIQ Costs — always shown
               const _isRFQFill3 = h.swapType === 'rfq' || h.swapType === 'gasless';
-              const _mevMult3 = (h.routeSource === 'raydium' && h.jitoBundle) ? 0.95 : _isRFQFill3 ? 1.0 : 0.70;
+              const _mevMult3 = ((h.routeSource === 'raydium' || h.routeSource === 'pump.fun') && h.jitoBundle) ? 0.95 : _isRFQFill3 ? 1.0 : 0.70;
               const _mevProt3 = h.snapMevProtectionUsd != null && h.snapMevProtectionUsd >= 0.0001
                 ? h.snapMevProtectionUsd
                 : (mevUsd != null && (_isRFQFill3 || (jitoFee ?? 0) > 0) && mevUsd * _mevMult3 >= 0.0001) ? mevUsd * _mevMult3 : null;
@@ -2558,8 +2600,8 @@
               if (_mevProt3 != null) t += sub(_mevLabel3, '+' + fmt(_mevProt3), '#9945FF');
               if (savingsUsd != null || _mevProt3 != null) t += `<div style="border-top:1px solid rgba(255,255,255,0.06);margin:4px 0 4px 10px"></div>`;
               t += sub('ZendIQ Fee (0.05%)', '<span style="color:#14F195;font-weight:600">FREE · Beta</span>');
-              t += sub(`<span title="Compute unit price paid to Solana validators to prioritise your transaction. Baked into the transaction at quote time." style="cursor:help">Priority Fee (via ${h.routeSource === 'raydium' ? 'Raydium' : 'Jupiter'})</span>`, priFee != null ? fmt(priFee) : '—', priFee != null && priFee > 0 ? '#FFB547' : undefined);
-              t += sub(`<span title="Tip routed via Jupiter to Jito validators who block sandwich attacks. This is NOT a Jito bundle — Jupiter prevents third-party bundling via a reserved account in every Ultra transaction." style="cursor:help">Jito Tip (via Jupiter)</span>`, h.jitoTipLamports > 0 ? fmt(jitoFee) : 'none', h.jitoTipLamports > 0 ? '#9945FF' : undefined);
+              t += sub(`<span title="${h.routeSource === 'pump.fun' ? 'Priority fee baked into pumpportal.fun\'s transaction — not separately charged by ZendIQ.' : 'Compute unit price paid to Solana validators to prioritise your transaction. Baked into the transaction at quote time.'}" style="cursor:help">${h.routeSource === 'raydium' ? 'Priority Fee (via Raydium)' : h.routeSource === 'pump.fun' ? 'Priority fee (pumpportal.fun)' : 'Priority Fee (via Jupiter)'}</span>`, h.routeSource === 'pump.fun' && priFee == null ? 'included' : (priFee != null ? fmt(priFee) : '—'), h.routeSource === 'pump.fun' && priFee == null ? '#9B9BAD' : (priFee != null && priFee > 0 ? '#FFB547' : undefined));
+              t += sub(h.jitoBundle ? `<span title="Tip paid directly to Jito validators as part of an atomic bundle. ZendIQ submits your transaction + this tip together — validators are incentivised to include both atomically, blocking sandwich attacks before they execute." style="cursor:help">Jito Bundle Tip</span>` : `<span title="Tip routed via Jupiter to Jito validators who block sandwich attacks. This is NOT a Jito bundle — Jupiter prevents third-party bundling via a reserved account in every Ultra transaction." style="cursor:help">Jito Tip (via Jupiter)</span>`, h.jitoTipLamports > 0 ? fmt(jitoFee) : 'none', h.jitoTipLamports > 0 ? '#9945FF' : undefined);
               if (totalCost > 0) t += `<div style="display:flex;justify-content:space-between;gap:12px;margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.06)"><span style="color:#C2C2D4;padding-left:10px">Total</span><span style="color:#FFB547;font-weight:700">${fmt(totalCost)}</span></div>`;
 
               // Net Benefit — always shown; fall back to token display when USD prices unavailable
@@ -2709,7 +2751,7 @@
                 }
               }
 
-              const exchLbl = h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium \u00b7 AMM + Jito' : 'Raydium \u00b7 AMM') : h.swapType === 'rfq' ? 'RFQ \u00b7 Jupiter' : h.swapType === 'gasless' ? 'Gasless \u00b7 Jupiter' : 'Jupiter \u00b7 AMM';
+              const exchLbl = h.routeSource === 'pump.fun' ? (h.jitoBundle ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium \u00b7 AMM + Jito' : 'Raydium \u00b7 AMM') : h.swapType === 'rfq' ? 'RFQ \u00b7 Jupiter' : h.swapType === 'gasless' ? 'Gasless \u00b7 Jupiter' : 'Jupiter \u00b7 AMM';
               const inFmt  = fmtHistAmt(h.amountIn)  + '\u00a0' + escapeHtml(h.tokenIn  || '?');
               const outFmt = fmtHistAmt(h.amountOut) + '\u00a0' + escapeHtml(h.tokenOut || '?');
 
@@ -2794,7 +2836,7 @@
           const fmt = v => (v == null || !isFinite(v)) ? '—' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
           const fmtA = (val, sym) => { if (val == null) return '— '+(sym||''); const n=parseFloat(val); if (!isFinite(n)) return String(val)+' '+(sym||''); const abs=Math.abs(n); const p=abs>=1000?2:abs>=1?4:abs>=0.001?6:8; const [ip,dp]=n.toFixed(p).split('.'); return ip.replace(/\B(?=(\d{3})+(?!\d))/g,'.')+(dp?','+dp:'')+' '+(sym||''); };
           const fmtAgo = ts => { const s=Math.round((Date.now()-(ts||0))/1000); return s<60?s+'s ago':s<3600?Math.round(s/60)+'m ago':Math.round(s/3600)+'h ago'; };
-          const exchLbl = h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':(h.optimized?'ZendIQ · AMM':'Jupiter · AMM');
+          const exchLbl = h.routeSource === 'pump.fun' ? (h.jitoBundle ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':(h.optimized?'ZendIQ · AMM':'Jupiter · AMM');
           const sol = h.solPriceUsd != null ? Number(h.solPriceUsd) : null;
           const SOL_MINT = 'So11111111111111111111111111111111111111112';
           const outputIsSol = h.outputMint === SOL_MINT || h.tokenOut === 'SOL' || h.tokenOut === 'WSOL';
@@ -2876,7 +2918,7 @@
           }
           if (h.optimized) {
             // ── Savings & Costs (only for optimized trades — ZendIQ built this tx) ──
-            const _mevMult2 = (h.routeSource === 'raydium' && h.jitoBundle) ? 0.95 : 0.70;
+            const _mevMult2 = ((h.routeSource === 'raydium' || h.routeSource === 'pump.fun') && h.jitoBundle) ? 0.95 : 0.70;
             const _mevProt2 = h.snapMevProtectionUsd != null && h.snapMevProtectionUsd >= 0.0001
               ? h.snapMevProtectionUsd
               : (mevUsd != null && (jitoFee ?? 0) > 0 && mevUsd * _mevMult2 >= 0.0001) ? mevUsd * _mevMult2 : null;
@@ -2885,8 +2927,8 @@
             if (_mevProt2 != null) t += sub(`<span title="Statistical MEV protection value: estimated bot-attack exposure \xd7 ${Math.round(_mevMult2 * 100)}% coverage rate from Jito routing. Covers most sandwich attacks before they execute." style="cursor:help">Bot protection (\xd7${Math.round(_mevMult2 * 100)}%)</span>`, '+' + fmt(_mevProt2), '#9945FF');
             if (savingsUsd != null || _mevProt2 != null) t += `<div style="border-top:1px solid rgba(255,255,255,0.06);margin:4px 0 4px 10px"></div>`;
             t += sub('ZendIQ Fee (0.05%)', '<span style="color:#14F195;font-weight:600">FREE · Beta</span>');
-            t += sub(`<span title="Priority fee baked into the transaction at quote time." style="cursor:help">Priority Fee (via ${h.routeSource === 'raydium' ? 'Raydium' : 'Jupiter'})</span>`, priFee != null ? fmt(priFee) : '—', priFee != null && priFee > 0 ? '#FFB547' : undefined);
-            t += sub(`<span title="Jito tip routed via Jupiter to validators who block sandwich attacks." style="cursor:help">Jito Tip (via Jupiter)</span>`, h.jitoTipLamports > 0 ? fmt(jitoFee) : 'none', h.jitoTipLamports > 0 ? '#9945FF' : undefined);
+            t += sub(`<span title="${h.routeSource === 'pump.fun' ? 'Priority fee baked into pumpportal.fun\'s transaction — not separately charged by ZendIQ.' : 'Priority fee baked into the transaction at quote time.'}" style="cursor:help">${h.routeSource === 'raydium' ? 'Priority Fee (via Raydium)' : h.routeSource === 'pump.fun' ? 'Priority fee (pumpportal.fun)' : 'Priority Fee (via Jupiter)'}</span>`, h.routeSource === 'pump.fun' && priFee == null ? 'included' : (priFee != null ? fmt(priFee) : '—'), h.routeSource === 'pump.fun' && priFee == null ? '#9B9BAD' : (priFee != null && priFee > 0 ? '#FFB547' : undefined));
+            t += sub(h.jitoBundle ? `<span title="Tip paid directly to Jito validators as part of an atomic bundle. ZendIQ submits your transaction + this tip together — validators are incentivised to include both atomically, blocking sandwich attacks before they execute." style="cursor:help">Jito Bundle Tip</span>` : `<span title="Jito tip routed via Jupiter to validators who block sandwich attacks." style="cursor:help">Jito Tip (via Jupiter)</span>`, h.jitoTipLamports > 0 ? fmt(jitoFee) : 'none', h.jitoTipLamports > 0 ? '#9945FF' : undefined);
             if (totalCost > 0) t += `<div style="display:flex;justify-content:space-between;gap:12px;margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.06)"><span style="color:#C2C2D4;padding-left:10px">Total</span><span style="color:#FFB547;font-weight:700">${fmt(totalCost)}</span></div>`;
             // ── Net Benefit / Actual Gain footer ──
             const _confirmed2 = h.quoteAccuracy != null && Number(h.quoteAccuracy) >= 99;
@@ -2926,7 +2968,7 @@
               t += `<div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(153,69,255,0.2);display:flex;justify-content:space-between;gap:12px"><span style="color:#C2C2D4;cursor:help" title="Waiting for on-chain confirmation to compare against the quoted amount.">On-chain vs Quote</span><span style="color:#C2C2D4">${h.quotedOut != null ? 'pending\u2026' : '\u2014'}</span></div>`;
             }
             // Quote Accuracy row
-            const _xLbl2 = h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium + Jito' : 'Raydium') : (h.swapType === 'rfq' ? 'RFQ' : h.swapType === 'gasless' ? 'Gasless' : 'DEX');
+            const _xLbl2 = h.routeSource === 'pump.fun' ? (h.jitoBundle ? 'pump.fun + Jito' : 'pump.fun') : h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium + Jito' : 'Raydium') : (h.swapType === 'rfq' ? 'RFQ' : h.swapType === 'gasless' ? 'Gasless' : 'DEX');
             if (h.quoteAccuracy != null && isFinite(parseFloat(h.quoteAccuracy))) {
               const _acc3 = Math.max(0, Math.min(100, parseFloat(h.quoteAccuracy)));
               const _col3 = _acc3>=99?'#14F195':_acc3>=97?'#FFB547':'#FF4D4D';
@@ -3093,13 +3135,17 @@
         }
       }, 2000);
     }
-    // Auto-dismiss Jupiter success panel after 2s — same as ZendIQ done
+    // Auto-dismiss Jupiter/pump success panel after 2s — collapse widget
     if (ns.widgetSwapStatus === 'done-original') {
       setTimeout(() => {
         if (ns.widgetSwapStatus === 'done-original') {
           ns.widgetOriginalSigningInfo = null; ns.widgetOriginalTxSig = null;
           ns.widgetCapturedTrade = null; ns.widgetLastOrder = null;
+          ns.pumpFunContext = null; ns.pumpFunErrorMsg = null; ns._pumpTxSigHandled = false;
+          ns.lastOutputMint = null; ns.tokenScoreResult = null; ns._tokenScoreMint = null;
           ns.widgetSwapStatus = ''; ns.widgetSwapError = '';
+          const _w = document.getElementById('sr-widget');
+          if (_w) { _w.classList.remove('expanded', 'alert'); const _bi = _w.querySelector('#sr-body-inner'); if (_bi) _bi.innerHTML = ''; }
           renderWidgetPanel();
         }
       }, 2000);
@@ -3293,16 +3339,22 @@
     const style = document.createElement('style');
     style.textContent = `
       #sr-widget {
-        position: fixed;
+        position: fixed !important;
         top: 16px; right: 16px;
         z-index: 2147483647;
-        width: 310px;
+        width: 310px !important;
+        min-width: 310px !important;
+        max-width: 310px !important;
+        box-sizing: border-box !important;
         font-family: 'DM Sans', -apple-system, sans-serif;
         animation: srWidgetIn 0.4s cubic-bezier(0.34,1.56,0.64,1) 0.8s both;
-        transition: width 0.35s cubic-bezier(0.4,0,0.2,1);
+        transition: width 0.35s cubic-bezier(0.4,0,0.2,1),
+                    min-width 0.35s cubic-bezier(0.4,0,0.2,1),
+                    max-width 0.35s cubic-bezier(0.4,0,0.2,1);
         user-select: none;
       }
-      #sr-widget.expanded { width: 400px; }
+      #sr-widget *, #sr-widget *::before, #sr-widget *::after { box-sizing: border-box !important; }
+      #sr-widget.expanded { width: 400px !important; min-width: 400px !important; max-width: 400px !important; }
 
       @keyframes srWidgetIn {
         from { opacity:0; transform: translateX(14px) scale(0.92); }
@@ -3439,6 +3491,17 @@
       <div id="sr-body"><div id="sr-body-inner"></div><div id="sr-footer"><span>v${ns.version} &middot; <span style="color:#9945FF;font-weight:600">Open Beta</span></span><span>Not financial advice &middot; use at own risk</span></div></div>`;
 
     document.body.appendChild(el);
+
+    // Compensate for host-page CSS that shrinks our fixed widget (zoom, scale, etc.)
+    // Measure actual rendered size vs declared CSS and counter-scale if needed.
+    try {
+      const _rect = el.getBoundingClientRect();
+      const _expected = 310;
+      if (_rect.width > 0 && Math.abs(_rect.width - _expected) > 5) {
+        const _factor = _expected / _rect.width;
+        el.style.zoom = String(_factor);
+      }
+    } catch (_) {}
 
     const pill = el.querySelector('#sr-pill');
 

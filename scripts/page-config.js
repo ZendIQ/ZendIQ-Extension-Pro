@@ -98,6 +98,14 @@
     pumpFunWantOptimise: false, // flag: user clicked Sign at 0.5% — onWalletArgs should patch tx in-place
     pumpFunRawArgs: null,       // raw wallet hook args captured before pump.fun slippage review
     pumpFunModifiedArgs: null,  // wallet hook args with maxSolCost patched to 0.5% slippage
+    pumpFunErrorMsg: null,       // short error message shown in pump-error widget state
+    pumpFunPatchedSlippage: null, // true = maxSolCost was successfully patched to 0.5%; false = patch failed (original slippage used)
+    _pumpTxSigHandled: false,     // de-dupe flag: first successful Jito/Temporal response wins
+    _pumpTxCooldownUntil: 0,      // timestamp: suppress re-intercepts for 10s after successful pump tx
+    _pumpPrefetchedTx: null,      // { bytes: Uint8Array, fetchedAt: number } — prefetched during panel review
+    _pumpBcData: null,            // cached bonding curve data from frontend-api.pump.fun (proactively fetched)
+    _pumpDerivedGlobals: null,    // cached on-chain-derived { global, feeRecip, evtAuth } for current _PUMP_PROG
+    _pumpTxTemplate: null,        // cached full tx account template from network tap (allKeys + buyIxAcctIndices + msgHeader)
 
     // ── Site adapter registry ────────────────────────────────────────────
     _siteAdapters: [],  // populated by page-pump.js, page-raydium.js, etc.

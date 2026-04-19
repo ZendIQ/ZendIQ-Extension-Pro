@@ -13,7 +13,6 @@
     if (window.solana?.signAndSendTransaction) {
       if (ns.walletHooked) return;
       ns.walletHooked = true;
-
       const wallet = window.solana;
 
       const realSignAndSend = wallet.signAndSendTransaction;
@@ -55,6 +54,12 @@
       }
 
       ns.updateWidgetStatus('Active');
+      // Cache pubkey in storage so popup can fall back to it when executeScript
+      // can't run (e.g. pump.fun homepage with no network requests yet).
+      try {
+        const _pk = resolveWalletPubkey();
+        if (_pk) window.postMessage({ type: 'ZENDIQ_SAVE_WALLET_PUBKEY', pubkey: _pk }, '*');
+      } catch (_) {}
       return;
     }
 
@@ -414,10 +419,54 @@
 
   // ── zendiqWsOverlay ─────────────────────────────────────────────────────
   async function zendiqWsOverlay(callerLabel, origFn, args) {
+    // Pump.fun signing — check BEFORE __zendiq_own_tx and __zendiq_ws_confirmed.
+    if (ns.widgetSwapStatus === 'pump-signing') {
+      // Patch tx bytes (maxSolCost → 0.5%) then pass through to the wallet.
+      // Do NOT call onDecision here — it calls origFn a second time, creating a
+      // duplicate concurrent signing request that hangs indefinitely in the wallet.
+      // page-network.js intercepts the /transactions response and handles
+      // pump-done state + Activity recording via ns._pumpTxWasOptimised.
+      window.__zendiq_ws_confirmed = false;
+      ns.activeSiteAdapter?.()?.onWalletArgs?.(args);
+      return origFn(...args);
+    }
     if (window.__zendiq_own_tx) return origFn(...args);
     // Click interceptor already handled this swap — user confirmed, pass straight through.
     // Do NOT clear the flag here; the /execute fetch intercept is the final step and reads it.
-    if (window.__zendiq_ws_confirmed) return origFn(...args);
+    if (window.__zendiq_ws_confirmed) {
+      // Pump.fun "Proceed anyway" — no Jupiter /execute follows, so handle
+      // signing-original → done-original + Activity recording directly.
+      if (window.location.hostname.includes('pump.fun') && ns.pumpFunContext) {
+        _ensureOriginalSigningInfo(ns);
+        ns.widgetSwapStatus = 'signing-original';
+        ns.widgetActiveTab  = 'monitor';
+        const _wp = document.getElementById('sr-widget');
+        if (_wp) { _wp.style.display = ''; if (!_wp.classList.contains('expanded')) _wp.classList.add('expanded'); }
+        try { ns.renderWidgetPanel?.(); } catch (_) {}
+        try {
+          const _origP = origFn(...args);
+          if (ns.widgetOriginalSigningInfo) ns.widgetOriginalSigningInfo._sending = true;
+          try { ns.renderWidgetPanel?.(); } catch (_) {}
+          const res = await _origP;
+          window.__zendiq_ws_confirmed = false;
+          ns._pumpTxCooldownUntil = Date.now() + 10000;
+          const _sig = _extractSig(res) ?? _extractSigFromSignedTx(res);
+          if (_sig) ns._recordPumpActivity?.(_sig, false);
+          ns.widgetOriginalTxSig = _sig ?? null;
+          ns.widgetSwapStatus    = 'done-original';
+          ns.widgetActiveTab     = 'monitor';
+          if (ns._signingOriginalTimeout) { clearTimeout(ns._signingOriginalTimeout); ns._signingOriginalTimeout = null; }
+          try { ns.renderWidgetPanel?.(); } catch (_) {}
+          return res;
+        } catch (e) {
+          window.__zendiq_ws_confirmed = false;
+          ns.widgetSwapStatus = '';
+          _clearOriginalSigningInfo(ns);
+          throw e;
+        }
+      }
+      return origFn(...args);
+    }
     // Post-sign cooldown: ZendIQ just threw 'optimise' — auto-retries from the DEX
     // (e.g. Raydium fires immediately after the throw) must be silently dropped, NOT
     // passed through via origFn, which would open the wallet for the original tx on top
@@ -427,6 +476,9 @@
     // (ATA creation, Jupiter retry, etc.) should pass straight through without analysis.
     if (ns.widgetSwapStatus === 'signing-original') return origFn(...args);
     if (ns.pendingDecisionPromise) {
+      // Capture tx accounts NOW (before awaiting the decision) so the site adapter
+      // can store the template (e.g. ns._pumpTxTemplate) for use by Sign at 0.5%.
+      ns.activeSiteAdapter?.()?.onWalletArgs?.(args);
       const decision = await ns.pendingDecisionPromise;
       if (decision === 'cancel') throw new Error('Transaction rejected by user via ZendIQ');
       // 'skip': ZendIQ is busy (signing/sending/done) — silently drop the retry
@@ -441,6 +493,10 @@
       }
       // Site adapter confirm hook for the early-return path (pendingDecisionPromise already resolved).
       if (decision === 'confirm') {
+        // Pump.fun pump-signing: the full-analysis path (or the pump-signing re-entry guard
+        // at the top) handles onDecision. Don't call it again from the joiner — that would
+        // open two wallet prompts and leave the widget stuck.
+        if (ns.widgetSwapStatus === 'pump-signing') return;
         // Set flag BEFORE calling adapter so any concurrent sign call (e.g. on Raydium where
         // the adapter returns early before __zendiq_ws_confirmed would otherwise be set) is
         // bypassed and never triggers a second Review & Sign panel.
@@ -499,6 +555,24 @@
         _clearOriginalSigningInfo(ns);
         throw e;
       }
+    }
+    // Pump.fun click-intercept path: the decision was already made (user clicked
+    // "Sign at 0.5%" or "Proceed anyway"), pendingDecisionPromise was resolved to
+    // 'confirm' and cleared to null. Pump re-fires the wallet separately when it
+    // rebuilds+submits the tx. showPendingTransaction would see 'pump-signing' in
+    // busyStates and return 'skip', silently dropping the wallet call.
+    // Instead, call onDecision('confirm') directly so it patches the tx (if
+    // pumpFunWantOptimise) and transitions to pump-done.
+    if (ns.widgetSwapStatus === 'pump-signing') {
+      try {
+        const _pumpR = await ns.activeSiteAdapter?.()?.onDecision?.('confirm', origFn, args);
+        if (_pumpR !== undefined) return _pumpR;
+      } catch (e) {
+        ns.widgetSwapStatus = '';
+        try { ns.renderWidgetPanel?.(); } catch (_) {}
+        throw e;
+      }
+      return origFn(...args);
     }
     // Run ZendIQ risk analysis + show overlay — keep origFn OUTSIDE this try so
     // wallet rejections propagate cleanly and don't get wrapped by the catch block.
@@ -650,12 +724,52 @@
 
   // ── handleTransaction ────────────────────────────────────────────────────
   async function handleTransaction(transaction, options, originalMethod, methodName) {
+    // Pump.fun signing — check BEFORE __zendiq_own_tx and __zendiq_ws_confirmed.
+    if (ns.widgetSwapStatus === 'pump-signing') {
+      // Patch tx bytes then pass through. No onDecision — same reason as zendiqWsOverlay.
+      window.__zendiq_ws_confirmed = false;
+      const _pArgs = [transaction, options];
+      ns.activeSiteAdapter?.()?.onWalletArgs?.(_pArgs);
+      return originalMethod(_pArgs[0], options);
+    }
     if (window.__zendiq_own_tx) {
       return originalMethod(transaction, options);
     }
     // Click interceptor already handled this swap — user confirmed, pass straight through.
     // Do NOT clear the flag here; the /execute fetch intercept is the final step and reads it.
-    if (window.__zendiq_ws_confirmed) return originalMethod(transaction, options);
+    if (window.__zendiq_ws_confirmed) {
+      // Pump.fun "Proceed anyway" — same handling as zendiqWsOverlay above.
+      if (window.location.hostname.includes('pump.fun') && ns.pumpFunContext) {
+        _ensureOriginalSigningInfo(ns);
+        ns.widgetSwapStatus = 'signing-original';
+        ns.widgetActiveTab  = 'monitor';
+        const _wp = document.getElementById('sr-widget');
+        if (_wp) { _wp.style.display = ''; if (!_wp.classList.contains('expanded')) _wp.classList.add('expanded'); }
+        try { ns.renderWidgetPanel?.(); } catch (_) {}
+        try {
+          const _origP = originalMethod(transaction, options);
+          if (ns.widgetOriginalSigningInfo) ns.widgetOriginalSigningInfo._sending = true;
+          try { ns.renderWidgetPanel?.(); } catch (_) {}
+          const res = await _origP;
+          window.__zendiq_ws_confirmed = false;
+          ns._pumpTxCooldownUntil = Date.now() + 10000;
+          const _sig = _extractSig(res) ?? _extractSigFromSignedTx(res);
+          if (_sig) ns._recordPumpActivity?.(_sig, false);
+          ns.widgetOriginalTxSig = _sig ?? null;
+          ns.widgetSwapStatus    = 'done-original';
+          ns.widgetActiveTab     = 'monitor';
+          if (ns._signingOriginalTimeout) { clearTimeout(ns._signingOriginalTimeout); ns._signingOriginalTimeout = null; }
+          try { ns.renderWidgetPanel?.(); } catch (_) {}
+          return res;
+        } catch (e) {
+          window.__zendiq_ws_confirmed = false;
+          ns.widgetSwapStatus = '';
+          _clearOriginalSigningInfo(ns);
+          throw e;
+        }
+      }
+      return originalMethod(transaction, options);
+    }
     // Post-sign cooldown: silently drop auto-retries (same reason as zendiqWsOverlay above).
     if (ns._signCooldownUntil && Date.now() < ns._signCooldownUntil) return;
     // If the original tx is already being signed, any concurrent/legacy sign call passes through.
@@ -663,8 +777,10 @@
     // If the Wallet Standard hook (zendiqWsOverlay) is already running a flow for this swap,
     // join it rather than starting a parallel analysis. Mirrors the same guard in zendiqWsOverlay.
     if (ns.pendingDecisionPromise) {
+      // Capture tx accounts NOW (before awaiting the decision) so the site adapter
+      // can store the template (e.g. ns._pumpTxTemplate) for use by Sign at 0.5%.
+      ns.activeSiteAdapter?.()?.onWalletArgs?.([transaction, options]);
       const decision = await ns.pendingDecisionPromise;
-      if (decision === 'cancel')   throw new Error('Transaction cancelled by user via ZendIQ');
       if (decision === 'optimise') throw new Error('Transaction replaced by optimised route via ZendIQ');
       if (decision === 'pump-optimise') {
         const _adptResult2 = await ns.activeSiteAdapter?.()?.onDecisionLegacy?.(decision, originalMethod, transaction, options);

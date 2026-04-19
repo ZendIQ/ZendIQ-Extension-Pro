@@ -128,8 +128,25 @@ async function detectWallet() {
   if (!tab?.id) { status.textContent = 'Open jup.ag first'; return; }
 
   status.textContent = 'Checking…';
+  let _injectResult = null;
   try {
-    const r = await _injectGetPubkey(tab.id);
+    _injectResult = await _injectGetPubkey(tab.id);
+  } catch (e) {
+    // executeScript fails if host_permissions not yet granted for this origin,
+    // or if the tab was open before the extension was installed. Fall back to
+    // the pubkey cached in storage by the MAIN world page script.
+    try {
+      const { sendiq_wallet_pubkey: _pk } = await chrome.storage.local.get(['sendiq_wallet_pubkey']);
+      if (_pk) _injectResult = { state: 'connected', pubkey: _pk };
+    } catch (_) {}
+    if (!_injectResult) {
+      status.textContent = 'Could not read wallet';
+      console.error('[ZendIQ] detectWallet:', e);
+      return;
+    }
+  }
+  try {
+    const r = _injectResult;
     if (r.state === 'connected' && r.pubkey) {
       walletPubkey = r.pubkey;
       dot.classList.add('on');

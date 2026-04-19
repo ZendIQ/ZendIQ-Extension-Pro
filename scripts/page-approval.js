@@ -80,7 +80,8 @@
       // cancel, so users can retry cleanly without a page refresh.
       const _busyStates = ['fetching', 'signing', 'signing-original', 'sending', 'done', 'done-original',
         ...(ns._adapterBusyStates?.() ?? [])];
-      if (_busyStates.includes(ns.widgetSwapStatus)) {
+      if (_busyStates.includes(ns.widgetSwapStatus)
+          || Date.now() < (ns._pumpTxCooldownUntil ?? 0)) {
         // 'skip': ZendIQ is actively processing — caller should silently drop the incoming
         // tx rather than letting it through or showing a new overlay. This prevents
         // Raydium's immediate auto-retry (after the 'optimise' throw) from opening a
@@ -91,8 +92,14 @@
       }
 
       // Site adapters (e.g. pump.fun) handle their own complete swap detection flow.
+      // Always register pendingDecisionResolve BEFORE handing off to the adapter so
+      // that button-click handlers (which call ns.pendingDecisionResolve) can resolve
+      // the wallet promise that zendiqWsOverlay / handleTransaction is awaiting.
       const _swapAdapter = ns.activeSiteAdapter?.();
-      if (_swapAdapter?.onSwapDetected) return _swapAdapter.onSwapDetected(txInfo, resolve);
+      if (_swapAdapter?.onSwapDetected) {
+        ns.pendingDecisionResolve = resolve;
+        return _swapAdapter.onSwapDetected(txInfo, resolve);
+      }
 
       const risk = ns.lastRiskResult;
 

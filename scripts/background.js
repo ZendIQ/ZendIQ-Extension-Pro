@@ -16,6 +16,19 @@ const FETCH_JSON_ALLOWED = [
   'https://api.geckoterminal.com',
   'https://transaction-v1.raydium.io',
   'https://api-v3.raydium.io',
+  'https://frontend-api.pump.fun',
+  'https://frontend-api-v2.pump.fun',
+  'https://frontend-api-v3.pump.fun',
+  'https://mainnet.block-engine.jito.wtf',
+  'https://amsterdam.mainnet.block-engine.jito.wtf',
+  'https://ny.mainnet.block-engine.jito.wtf',
+  'https://frankfurt.mainnet.block-engine.jito.wtf',
+  'https://tokyo.mainnet.block-engine.jito.wtf',
+  'https://london.mainnet.block-engine.jito.wtf',
+  'https://dublin.mainnet.block-engine.jito.wtf',
+  'https://slc.mainnet.block-engine.jito.wtf',
+  'https://singapore.mainnet.block-engine.jito.wtf',
+  'https://pumpportal.fun',
 ];
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -93,7 +106,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(async r => {
         if (!r.ok) {
           const status = r.status;
-          if (status !== 400 && status !== 404 && status !== 429 && status !== 502 && status !== 503) console.error('[SR bg] FETCH_JSON error: HTTP', status, msg.url);
+          if (status !== 400 && status !== 404 && status !== 429 && status !== 502 && status !== 503 && status !== 530) console.error('[SR bg] FETCH_JSON error: HTTP', status, msg.url);
           sendResponse({ ok: false, error: 'HTTP ' + status, status });
           return;
         }
@@ -138,6 +151,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   // ── RPC call ──────────────────────────────────────────────────────────────
+  if (msg.type === 'FETCH_BYTES_POST') {
+    // Fetch a URL and return the response body as base64 (for binary responses like pump.fun tx).
+    const allowed = FETCH_JSON_ALLOWED.some(o => { try { return new URL(msg.url).origin === o; } catch(_) { return false; } });
+    if (!allowed) { sendResponse({ ok: false, error: 'URL not in allowlist: ' + msg.url }); return true; }
+    fetch(msg.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...( msg.headers ?? {}) },
+      body: msg.body,
+    })
+      .then(async r => {
+        if (!r.ok) { sendResponse({ ok: false, error: 'HTTP ' + r.status }); return; }
+        const buf = await r.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        // Convert to base64 for postMessage transport
+        let b64 = '';
+        for (let i = 0; i < bytes.length; i += 8192)
+          b64 += String.fromCharCode(...bytes.subarray(i, i + 8192));
+        sendResponse({ ok: true, data: btoa(b64) });
+      })
+      .catch(e => sendResponse({ ok: false, error: e.message }));
+    return true;
+  }
+
   if (msg.type === 'RPC_CALL') {
     // Race all endpoints with a 10 s timeout each; first success wins.
     // Sequential fallback only runs when all parallel attempts fail.
@@ -203,7 +239,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           chrome.storage.local.set({ sendiq_swap_history: hist }, () => {
             // After persisting, forward update to all supported DEX tabs so their widget can refresh
             const _send2 = (id, m) => chrome.tabs.sendMessage(id, m, () => { void chrome.runtime.lastError; });
-            const _dexUrls = ['*://*.jup.ag/*', '*://*.raydium.io/*', '*://raydium.io/*'];
+            const _dexUrls = ['*://*.jup.ag/*', '*://*.raydium.io/*', '*://raydium.io/*', '*://*.pump.fun/*', '*://pump.fun/*'];
             _dexUrls.forEach(pattern => {
               chrome.tabs.query({ url: pattern }, (tabs) => {
                 if (tabs && tabs.length) tabs.forEach(t => _send2(t.id, msg));

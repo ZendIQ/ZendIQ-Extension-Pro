@@ -21,6 +21,19 @@
     } catch (e) { return null; }
   }
 
+  function b58Decode(str) {
+    const ALPHA = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    let n = 0n;
+    for (const c of str) {
+      const i = ALPHA.indexOf(c);
+      if (i < 0) throw new Error('b58Decode: invalid char ' + c);
+      n = n * 58n + BigInt(i);
+    }
+    const out = new Uint8Array(32);
+    for (let i = 31; i >= 0 && n > 0n; i--) { out[i] = Number(n & 0xffn); n >>= 8n; }
+    return out;
+  }
+
   function b58Encode(bytes) {
     const ALPHA = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
     const digits = [0];
@@ -221,6 +234,7 @@
     tryParseJson,
     base64ToUint8Array,
     b58Encode,
+    b58Decode,
     extractFeePayerFromTx,
     rpcCall,
     fetchActualOut,

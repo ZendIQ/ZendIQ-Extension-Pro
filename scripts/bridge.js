@@ -68,6 +68,23 @@ window.addEventListener('message', (e) => {
     return;
   }
 
+  if (e.data.sr_bridge_to_ext && e.data.msg?.type === 'FETCH_BYTES_POST') {
+    const { url, body, _id } = e.data.msg;
+    try {
+      chrome.runtime.sendMessage({ type: 'FETCH_BYTES_POST', url, body }, (res) => {
+        if (chrome.runtime.lastError) {
+          if (!chrome.runtime.lastError.message?.includes('context'))
+            console.warn('[ZendIQ][bridge] FETCH_BYTES_POST bg error', chrome.runtime.lastError.message);
+          return;
+        }
+        try { window.postMessage({ sr_bridge: true, msg: { type: 'FETCH_BYTES_POST_RESPONSE', _id, result: res } }, '*'); } catch (_) {}
+      });
+    } catch (err) {
+      if (!err?.message?.includes('context')) console.warn('[ZendIQ][bridge] FETCH_BYTES_POST error', err?.message);
+    }
+    return;
+  }
+
   if (e.data.sr_bridge_to_ext && e.data.msg?.type === 'RPC_CALL') {
     const { method, params, _id } = e.data.msg;
     try {
@@ -97,6 +114,14 @@ window.addEventListener('message', (e) => {
       // becomes unavailable. This is expected and harmless; silently ignore it.
       if (!err?.message?.includes('context')) console.warn('[ZendIQ][bridge] sendMessage failed', err?.message);
     }
+    return;
+  }
+
+  // ZendIQ: cache wallet pubkey from MAIN world so popup can read it as fallback
+  // when executeScript fails (e.g. pump.fun homepage before coin loads).
+  if (e.data.type === 'ZENDIQ_SAVE_WALLET_PUBKEY') {
+    const pk = String(e.data.pubkey ?? '').replace(/[^1-9A-HJ-NP-Za-km-z]/g, '');
+    if (pk.length >= 32 && pk.length <= 44) chrome.storage.local.set({ sendiq_wallet_pubkey: pk });
     return;
   }
 

@@ -265,7 +265,7 @@ function _buildTooltipHtml(h) {
   }
 
   // Savings & Costs — always shown
-  const _mevMult = (h.routeSource === 'raydium' && h.jitoBundle) ? 0.95 : _isRFQFill ? 1.0 : 0.70;
+  const _mevMult = ((h.routeSource === 'raydium' || h.routeSource === 'pump.fun') && h.jitoBundle) ? 0.95 : _isRFQFill ? 1.0 : 0.70;
   // Prefer the frozen snap value (set at Review & Sign time when jitoUsd was non-zero).
   // Falls back to re-computing from stored risk data when the snap value was added later.
   const _mevProtection = h.snapMevProtectionUsd != null && h.snapMevProtectionUsd >= 0.0001
@@ -280,12 +280,14 @@ function _buildTooltipHtml(h) {
   if (savingsUsd != null || _mevProtection != null) html += `<div style="border-top:1px solid rgba(255,255,255,0.06);margin:4px 0 4px 10px"></div>`;
   html += sub('ZendIQ Fee (0.05%)', '<span style="color:#14F195;font-weight:600">FREE · Beta</span>');
   html += sub(
-    `<span title="Compute unit price paid to Solana validators to prioritise your transaction. Baked into the transaction at quote time." style="cursor:help">${h.routeSource === 'raydium' ? 'Priority Fee (via Raydium)' : 'Priority Fee (via Jupiter)'}</span>`,
-    priorityFeeUsd != null ? fmt(priorityFeeUsd) : '—',
-    priorityFeeUsd != null && priorityFeeUsd > 0 ? '#FFB547' : undefined
+    `<span title="${h.routeSource === 'pump.fun' ? 'Priority fee baked into pumpportal.fun\'s transaction — not separately charged by ZendIQ.' : 'Compute unit price paid to Solana validators to prioritise your transaction. Baked into the transaction at quote time.'}" style="cursor:help">${h.routeSource === 'raydium' ? 'Priority Fee (via Raydium)' : h.routeSource === 'pump.fun' ? 'Priority fee (pumpportal.fun)' : 'Priority Fee (via Jupiter)'}</span>`,
+    h.routeSource === 'pump.fun' && priorityFeeUsd == null ? 'included' : (priorityFeeUsd != null ? fmt(priorityFeeUsd) : '—'),
+    h.routeSource === 'pump.fun' && priorityFeeUsd == null ? 'var(--muted)' : (priorityFeeUsd != null && priorityFeeUsd > 0 ? '#FFB547' : undefined)
   );
   html += sub(
-    `<span title="Tip routed via Jupiter to Jito validators who block sandwich attacks. This is NOT a Jito bundle — Jupiter prevents third-party bundling via a reserved account in every Ultra transaction." style="cursor:help">Jito Tip (via Jupiter)</span>`,
+    h.jitoBundle
+      ? `<span title="Tip paid directly to Jito validators as part of an atomic bundle. ZendIQ submits your transaction + this tip together — validators are incentivised to include both atomically, blocking sandwich attacks before they execute." style="cursor:help">Jito Bundle Tip</span>`
+      : `<span title="Tip routed via Jupiter to Jito validators who block sandwich attacks. This is NOT a Jito bundle — Jupiter prevents third-party bundling via a reserved account in every Ultra transaction." style="cursor:help">Jito Tip (via Jupiter)</span>`,
     h.jitoTipLamports > 0 ? fmt(jitoTipUsd) : 'none',
     h.jitoTipLamports > 0 ? '#9945FF' : undefined
   );
@@ -402,6 +404,7 @@ function _fmtAmt(val, sym) {
 }
 // Human-readable exchange label from swapType / routeSource field.
 function _exchangeLabel(h) {
+  if (h.routeSource === 'pump.fun') return h.jitoBundle ? 'pump.fun + Jito Bundle' : 'pump.fun';
   if (h.routeSource === 'raydium') return h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM';
   switch ((h.swapType || '').toLowerCase()) {
     case 'rfq':       return 'Jupiter RFQ';
@@ -477,12 +480,33 @@ function _renderHistoryEntry(h, idx) {
       const _scanTip = _sr.scanned > 0
         ? `Scanned ${_sr.scanned} transaction${_sr.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.`
         : 'No sandwich activity detected.';
-      if (h.quoteAccuracy == null) {
+      // quoteAccuracy is always null on pump.fun (no pre-execution quote);
+      // use actualOutAmount as on-chain arrival indicator instead.
+      if (h.quoteAccuracy == null && h.actualOutAmount == null) {
         sandwichRowHtml = `<div class="analysis-row"><span class="lbl" title="Waiting for on-chain confirmation before finalising sandwich check." style="cursor:help">Sandwich check</span><span class="val" style="color:var(--muted)">pending\u2026</span></div>`;
       } else {
         sandwichRowHtml = `<div class="analysis-row"><span class="lbl" title="${escapeHtml(_scanTip)}" style="cursor:help">Sandwich check</span><span class="val" style="color:var(--green);font-weight:700">Not sandwiched \u2705</span></div>`;
       }
     }
+  }
+
+  // ── Failed trade card (tx sent but rejected on-chain) ─────────────────────
+  if (h.failed) {
+    return `<div class="analysis-card" id="${id}" style="margin-bottom:8px;padding:8px;cursor:default;background:rgba(255,77,77,0.04);border-color:rgba(255,77,77,0.25)">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+        <span style="font-size:var(--fs-base);font-weight:700;color:#FF4D4D">\u2715 Failed on-chain</span>
+        <span style="font-size:12px;font-weight:700;color:#E8E8F0;font-family:'Space Mono',monospace">- ${inVal}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-size:var(--fs-base);color:var(--muted)">${escapeHtml(_exchangeLabel(h))}</span>
+        <span style="font-size:var(--fs-base);color:var(--muted)">No tokens received</span>
+      </div>
+      ${sandwichRowHtml}
+      <div class="analysis-row" style="display:flex;justify-content:space-between;align-items:center">
+        ${solscanLink ? `<div>${solscanLink}</div>` : '<div></div>'}
+        <div style="color:var(--muted);font-size:12px">${ago}</div>
+      </div>
+    </div>`;
   }
 
   // ── Unoptimized trade card (user chose "Proceed anyway") ──────────────────
@@ -502,12 +526,15 @@ function _renderHistoryEntry(h, idx) {
       execRow = `<div class="analysis-row"><span class="lbl" title="Waiting for on-chain confirmation to compare against the quoted amount." style="cursor:help">On-chain vs Quote</span><span class="val" style="color:var(--muted)">pending…</span></div>`;
     }
     const accU = _quoteAccuracy(h);
-    const accRowU = accU
-      ? `<div class="analysis-row"><span class="lbl" title="${accU.onChain
+    let accRowU = '';
+    if (accU) {
+      accRowU = `<div class="analysis-row"><span class="lbl" title="${accU.onChain
           ? 'Actual on-chain fill accuracy \u2014 actual tokens received vs. the quoted amount, verified from the confirmed Solana transaction.'
           : 'Estimated from pre-execution price impact. Updates automatically a few seconds after confirmation.'
-        }" style="cursor:help">${accU.onChain ? _exchangeLabel(h) + ' Quote Accuracy \u2713' : _exchangeLabel(h) + ' Quote Accuracy'}</span><span class="val" style="color:${accU.color};font-weight:700">${accU.text}</span></div>`
-      : '';
+        }" style="cursor:help">${accU.onChain ? _exchangeLabel(h) + ' Quote Accuracy \u2713' : _exchangeLabel(h) + ' Quote Accuracy'}</span><span class="val" style="color:${accU.color};font-weight:700">${accU.text}</span></div>`;
+    } else if (h.actualOutAmount != null) {
+      accRowU = `<div class="analysis-row"><span class="lbl" title="On-chain result confirmed. No pre-execution quote was available for comparison." style="cursor:help">On-chain Confirmed</span><span class="val" style="color:var(--green);font-weight:700">\u2713</span></div>`;
+    }
     return `<div class="analysis-card" id="${id}" style="margin-bottom:8px;padding:8px;cursor:default;background:rgba(255,181,71,0.04);border-color:rgba(255,181,71,0.2)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
         <span style="font-size:var(--fs-base);font-weight:700;color:#FFB547">⚠ Not optimized</span>
