@@ -457,6 +457,21 @@
           ns.widgetActiveTab     = 'monitor';
           if (ns._signingOriginalTimeout) { clearTimeout(ns._signingOriginalTimeout); ns._signingOriginalTimeout = null; }
           try { ns.renderWidgetPanel?.(); } catch (_) {}
+          // Async on-chain sanity check — if the bonding curve price moved beyond slippage
+          // the tx will be rejected on-chain. Poll at ~4s and mark Activity entry as failed.
+          if (_sig) (async () => {
+            try {
+              await new Promise(r => setTimeout(r, 4000));
+              const txRes = await ns.rpcCall('getTransaction', [
+                _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+              ]);
+              if (txRes?.result?.meta?.err) {
+                window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE',
+                  payload: { signature: _sig, txFailed: true, optimized: false },
+                }}, '*');
+              }
+            } catch (_) {}
+          })();
           return res;
         } catch (e) {
           window.__zendiq_ws_confirmed = false;

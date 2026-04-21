@@ -1503,12 +1503,12 @@
     // which pump.fun never calls, leaving the widget permanently stuck.
     async onDecision(decision, origFn, args) {
       if (decision === 'confirm') {
-        // onDecision is ONLY reachable when the user clicked "Sign at 0.5%".
-        // ("Proceed anyway" resolves 'confirm' but never calls onDecision — it goes
-        //  through the signing-original / done-original path.)
-        // Always show pump-done on success so the user gets confirmation feedback.
+        // Reachable from two paths:
+        //   (a) "Sign at 0.5%" — user optimised; tx is patched, pump-done on success.
+        //   (b) "Proceed anyway" / "Continue with Jupiter" — user declined ZendIQ's route;
+        //       tx is unmodified, done-original on success (amber "Via Jupiter" card).
         //
-        // Two patching cases:
+        // Two patching cases on path (a):
         //   (a) onWalletArgs ran first (zendiqWsOverlay path) — it cleared pumpFunWantOptimise
         //       and set pumpFunModifiedArgs; args are already patched in-place.
         //   (b) onWalletArgs hasn't run yet — pumpFunWantOptimise is still true; we patch here.
@@ -1528,10 +1528,38 @@
           const r = await origFn(...callArgs);
           window.__zendiq_own_tx = false;
           window.__zendiq_ws_confirmed = false;
-          // Always show pump-done — onDecision is only reachable from the Sign at 0.5% path.
+          const _sig = _extractSigFromResult(r);
+          if (!_patchApplied) {
+            // "Proceed anyway" path — signing-original was already set by handlePendingDecision;
+            // transition to done-original (amber "Via Jupiter's route" card) not pump-done.
+            if (_sig) _recordPumpActivity(_sig, false);
+            ns.widgetOriginalTxSig = _sig ?? null;
+            ns._pumpTxSigHandled   = true;
+            ns._pumpTxWasOptimised = false;
+            ns._pumpTxCooldownUntil = Date.now() + 10000;
+            ns.widgetSwapStatus = 'done-original';
+            ns.widgetActiveTab  = 'monitor';
+            if (ns._signingOriginalTimeout) { clearTimeout(ns._signingOriginalTimeout); ns._signingOriginalTimeout = null; }
+            try { ns.renderWidgetPanel?.(); } catch (_) {}
+            // Async sanity check — slippage rejection on bonding curve will show as on-chain error
+            if (_sig) (async () => {
+              try {
+                await new Promise(resW => setTimeout(resW, 4000));
+                const txRes = await ns.rpcCall('getTransaction', [
+                  _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+                ]);
+                if (txRes?.result?.meta?.err) {
+                  window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE',
+                    payload: { signature: _sig, txFailed: true, optimized: false },
+                  }}, '*');
+                }
+              } catch (_) {}
+            })();
+            return r;
+          }
+          // "Sign at 0.5%" path — show green pump-done success card.
           ns.widgetSwapStatus = 'pump-done';
           try { ns.renderWidgetPanel?.(); } catch (_) {}
-          const _sig = _extractSigFromResult(r);
           if (_sig) _recordPumpActivity(_sig, _patchApplied);
           ns._pumpTxSigHandled   = true;        // prevent network interceptor from overwriting
           ns._pumpTxWasOptimised = _patchApplied; // backup for network interceptor if it still fires
@@ -1556,6 +1584,13 @@
         } catch (e) {
           window.__zendiq_own_tx = false;
           window.__zendiq_ws_confirmed = false;
+          if (!ns.pumpFunPatchedSlippage) {
+            // "Proceed anyway" wallet rejection — clear signing-original state cleanly
+            ns.widgetSwapStatus = '';
+            ns.widgetOriginalSigningInfo = null;
+            try { ns.renderWidgetPanel?.(); } catch (_) {}
+            throw e;
+          }
           // Show a brief error card so the user knows to retry, rather than silent idle.
           // Wallet rejection messages vary by wallet; "reject/cancel/declined" covers most.
           const _isCancel = /reject|cancel|declin|denied|refus/i.test(e.message ?? '');
@@ -2019,6 +2054,10 @@
         const _wp = document.getElementById('sr-widget');
         if (_wp) { _wp.style.display = ''; if (!_wp.classList.contains('expanded')) _wp.classList.add('expanded'); }
         ns.renderWidgetPanel?.();
+        // Set confirmed flag so zendiqWsOverlay routes to the pump.fun proceed path
+        // (signing-original → done-original + Activity recording) when pump.fun fires
+        // the wallet call. Without this the signing-original passthrough guard short-circuits.
+        window.__zendiq_ws_confirmed = true;
         if (ns.pendingDecisionResolve) {
           const res = ns.pendingDecisionResolve;
           ns.pendingDecisionResolve = null;

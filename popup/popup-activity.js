@@ -227,10 +227,13 @@ function _buildTooltipHtml(h) {
       html += row(`<span title="Block data unavailable \u2014 sandwich check could not complete." style="cursor:help">Sandwich check</span>`, 'unknown', 'var(--muted)');
     } else if (_sr2?.detected) {
       const _tip2 = _sr2.attackerWallet
-        ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr2.attackerWallet)}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`
-        : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr2.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`;
-      const _extV = _sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '\u2248\u00a0$' + _sr2.extractedUsd.toFixed(2) + ' extracted' : 'detected';
-      html += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV, '#FFB547');
+        ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr2.attackerWallet)}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : '$0 — your slippage protection absorbed the attack.'}`
+        : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr2.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : '$0 — your slippage protection absorbed the attack.'}`;
+      const _hasLoss2 = _sr2.extractedUsd != null && _sr2.extractedUsd > 0.001;
+      const _extV = _hasLoss2
+        ? `<span style="color:#FFB547">\u2248\u00a0$${_sr2.extractedUsd.toFixed(2)} extracted</span>`
+        : `<span style="color:#FFB547">\u26a0 detected</span><span style="color:#14F195"> \u00b7 $0 lost</span>`;
+      html += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV);
     } else if (_sr2 && !_sr2.detected) {
       const _scan2 = _sr2.scanned > 0 ? `Scanned ${_sr2.scanned} transaction${_sr2.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.` : 'No sandwich activity detected.';
       html += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, 'Not sandwiched \u2705', 'var(--green)');
@@ -404,13 +407,13 @@ function _fmtAmt(val, sym) {
 }
 // Human-readable exchange label from swapType / routeSource field.
 function _exchangeLabel(h) {
-  if (h.routeSource === 'pump.fun') return h.jitoBundle ? 'pump.fun + Jito Bundle' : 'pump.fun';
-  if (h.routeSource === 'raydium') return h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM';
+  if (h.routeSource === 'pump.fun') return (h.jitoBundle || h.jitoTipLamports > 0) ? 'pump.fun + Jito Bundle' : 'pump.fun';
+  if (h.routeSource === 'raydium') return (h.jitoBundle || h.jitoTipLamports > 0) ? 'Raydium · AMM + Jito Bundle' : 'Raydium · AMM';
   switch ((h.swapType || '').toLowerCase()) {
     case 'rfq':       return 'Jupiter RFQ';
     case 'gasless':   return 'Jupiter (Gasless)';
     case 'aggregator':
-    default:          return h.optimized ? 'ZendIQ · AMM' : 'Jupiter';
+    default:          return 'Jupiter · AMM';
   }
 }
 // Quote accuracy: how close to the ZendIQ-quoted rate the execution landed.
@@ -471,11 +474,12 @@ function _renderHistoryEntry(h, idx) {
     } else if (_sr?.detected) {
       const _extStr = _sr.extractedUsd != null && _sr.extractedUsd > 0.001
         ? '\u26a0 ~$' + _sr.extractedUsd.toFixed(2) + ' extracted'
-        : '\u26a0 detected';
+        : '\u26a0 detected \u00b7 $0 lost';
+      const _extColor = _sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '#FFB547' : '#14F195';
       const _attackTip = _sr.attackerWallet
-        ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr.attackerWallet)}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : 'unknown'}.`
-        : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : 'unknown'}.`;
-      sandwichRowHtml = `<div class="analysis-row"><span class="lbl" title="${_attackTip}" style="cursor:help">Sandwiched</span><span class="val" style="color:#FFB547;font-weight:700">${escapeHtml(_extStr)}</span></div>`;
+        ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr.attackerWallet)}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : '$0 — your slippage protection absorbed the attack.'}`
+        : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : '$0 — your slippage protection absorbed the attack.'}`;
+      sandwichRowHtml = `<div class="analysis-row"><span class="lbl" title="${_attackTip}" style="cursor:help">Sandwiched</span><span class="val" style="color:${_extColor};font-weight:700">${escapeHtml(_extStr)}</span></div>`;
     } else if (_sr && !_sr.detected) {
       const _scanTip = _sr.scanned > 0
         ? `Scanned ${_sr.scanned} transaction${_sr.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.`

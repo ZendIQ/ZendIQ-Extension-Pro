@@ -1577,13 +1577,15 @@
         //
         // Raydium routes always need a Jito tip ? there is no /execute endpoint for them,
         // and without a tip the bundle is deprioritised and frequently "Invalid".
-        // If calcDynamicFees returned no tip (low risk score), use 20k as the minimum
-        // so the bundle path is always taken for Raydium, regardless of risk profile.
+        // If calcDynamicFees returned no tip (low risk score), use 1_000 lamports as the
+        // minimum so the bundle path is always taken for Raydium, regardless of risk profile.
         const _isRdmBundle = ns.widgetLastOrder?._source === 'raydium' && (ns.jitoMode ?? 'auto') !== 'never';
         const _jitoBundleTip = _isRdmBundle
           ? Math.max(ns.widgetLastOrderFees?.jitoTipLamports ?? 0, 1_000)
           : (ns.widgetLastOrderFees?.jitoTipLamports ?? 0);
-        // Wallet pubkey: try multiple sources ? ns.walletPubkey may not be set yet at this
+        // widgetLastOrderFees.jitoTipLamports is updated ONLY on confirmed bundle success below
+        // (so Activity never shows a tip cost for bundles that fell back to standard RPC).
+        // Wallet pubkey: try multiple sources — ns.walletPubkey may not be set yet at this
         // point in the flow; _rdmSignParams is always populated for Raydium orders.
         const _bundleWallet = ns.walletPubkey
           || ns._rdmSignParams?.walletPubkey
@@ -1594,11 +1596,11 @@
           _jitoBundleTip >= 1000
           && (ns.jitoMode ?? 'auto') !== 'never'
           && !_hadRdmSimFail                                // don't bundle on sim-failure recovery
-          && _rdmTxsToSign.length + 1 <= 5                 // Jito max: 5 txs per bundle
-          && _bundleWallet                                  // need wallet pubkey for tip tx
+          && _rdmTxsToSign.length <= 5                      // Jito max: 5 txs per bundle (tip injected, not a separate tx)
+          && _bundleWallet                                  // need wallet pubkey for tip
         ) {
           try {
-            // Jito tip accounts ? pick one at random to reduce contention (per Jito docs).
+            // Jito tip accounts — pick one at random to reduce contention (per Jito docs).
             const _JITO_TIPS = [
               '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
               'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
@@ -1609,149 +1611,52 @@
               'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
               '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
             ];
-            const _tipAcctStr = _JITO_TIPS[Math.floor(Math.random() * _JITO_TIPS.length)];
+            // -- Build a standalone Jito tip tx (separate from Raydium's tx) -------------
+            // Raydium's txs use complex ATL structures. Injecting instructions into them
+            // causes AccountLoadedTwice / InsufficientFunds / 400 errors from Jito.
+            // Instead: keep Raydium's tx completely unmodified and append a plain SOL
+            // transfer to a Jito tip account as a separate tx at the END of the bundle.
+            // Bundle layout: [swapTx1?, swapTx, tipTx] — tip must be last per Jito spec.
+            function _buildRdmTipTx(userB58, blockhashBytes, tipLamports, useV0) {
+              const tipAcct = _JITO_TIPS[Math.floor(Math.random() * _JITO_TIPS.length)];
+              const user    = ns.b58Decode(userB58);
+              const tip     = ns.b58Decode(tipAcct);
+              const sys     = new Uint8Array(32); // SystemProgram — all zeros
+              const _encU64 = (n) => { const b = new Uint8Array(8); let v = BigInt(n); for (let i = 0; i < 8; i++) { b[i] = Number(v & 0xffn); v >>= 8n; } return b; };
+              const ixData  = new Uint8Array([2, 0, 0, 0, ..._encU64(tipLamports)]);
+              // Jito requires all txs in a bundle to use the same version.
+              const msg = useV0
+                ? [ 0x80, 1, 0, 1, 3, ...user, ...tip, ...sys, ...blockhashBytes,
+                    1, 2, 2, 0, 1, 12, ...ixData, 0 ]
+                : [ 1, 0, 1, 3, ...user, ...tip, ...sys, ...blockhashBytes,
+                    1, 2, 2, 0, 1, 12, ...ixData ];
+              const tx = new Uint8Array(1 + 64 + msg.length);
+              tx[0] = 1; // compact-u16(1) — one signature slot
+              tx.set(msg, 65);
+              return tx;
+            }
+            // Parse blockhash + version from the swap tx bytes (read-only, no modification).
+            function _parseSwapMeta(txBytes) {
+              let p = 0;
+              const _cu = (buf, pos) => { let v = buf[pos++]; if (v & 0x80) v = (v & 0x7f) | (buf[pos++] << 7); return [v, pos]; };
+              let [nSigs, pSigs] = _cu(txBytes, p); p = pSigs + nSigs * 64;
+              const isV0 = (txBytes[p] & 0x80) !== 0;
+              if (isV0) p++;
+              p += 3; // skip header bytes
+              let [nAccts, pKeys] = _cu(txBytes, p); p = pKeys + nAccts * 32;
+              return { isV0, blockhash: txBytes.slice(p, p + 32) };
+            }
+            const _lastRdmRaw = Uint8Array.from(atob(_rdmTxsToSign[_rdmTxsToSign.length - 1]), c => c.charCodeAt(0));
+            const { isV0: _rdmIsV0, blockhash: _rdmBlockhash } = _parseSwapMeta(_lastRdmRaw);
+            const _tipTxRaw = _buildRdmTipTx(_bundleWallet, _rdmBlockhash, _jitoBundleTip, _rdmIsV0);
 
-            // -- Build helpers ----------------------------------------------------------
-            function _b58Dec(s) {
-              const ALPHA = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-              let n = BigInt(0);
-              for (const c of s) { n = n * 58n + BigInt(ALPHA.indexOf(c)); }
-              const bytes = []; let tmp = n;
-              while (tmp > 0n) { bytes.unshift(Number(tmp & 0xffn)); tmp >>= 8n; }
-              const lead = s.match(/^1*/)[0].length;
-              return new Uint8Array([...new Uint8Array(lead), ...bytes]);
-            }
-            function _encodeU64LE(n) {
-              const b = new Uint8Array(8); let v = BigInt(n);
-              for (let i = 0; i < 8; i++) { b[i] = Number(v & 0xffn); v >>= 8n; } return b;
-            }
-            function _cu16(n) {
-              if (n <= 0x7f) return new Uint8Array([n]);
-              if (n <= 0x3fff) return new Uint8Array([(n & 0x7f) | 0x80, n >> 7]);
-              return new Uint8Array([(n & 0x7f) | 0x80, ((n >> 7) & 0x7f) | 0x80, n >> 14]);
-            }
-            // Read a compact-u16 from bytes at offset; returns { val, next } where next = byte after.
-            function _readCu16(bytes, off) {
-              let val = 0, shift = 0, i = off;
-              do { val |= (bytes[i] & 0x7f) << shift; shift += 7; } while (bytes[i++] & 0x80);
-              return { val, next: i };
-            }
-
-            // -- Get a FRESH blockhash from RPC for the tip tx -------------------------
-            // Using a live RPC call guarantees the tip TX has a valid, non-stale blockhash
-            // and eliminates any risk of manual byte-parse errors from the Raydium TX.
-            // (The swap TX and tip TX may have different blockhashes ? Jito validates each independently.)
-            let _bhB58 = null;
-            try {
-              const _bhRpc = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
-              const _bhR = await fetch(_bhRpc, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestBlockhash', params: [{ commitment: 'confirmed' }] }),
-              });
-              const _bhD = await _bhR.json();
-              _bhB58 = _bhD?.result?.value?.blockhash ?? null;
-            } catch (_bhErr) {
-            }
-            if (!_bhB58) {
-              // Fallback: extract from Raydium TX bytes (manual V0 parse)
-              const _lastRdmBytes = Uint8Array.from(atob(_rdmTxsToSign[_rdmTxsToSign.length - 1]), c => c.charCodeAt(0));
-              let _bhOff = 0;
-              { const r = _readCu16(_lastRdmBytes, 0); _bhOff = r.next + r.val * 64; }
-              if (_lastRdmBytes[_bhOff] !== 0x80) throw new Error('Raydium tx is not V0');
-              _bhOff += 4;
-              { const r = _readCu16(_lastRdmBytes, _bhOff); _bhOff = r.next + r.val * 32; }
-              const _bhBytes = _lastRdmBytes.slice(_bhOff, _bhOff + 32);
-              if (_bhBytes.length !== 32) throw new Error('blockhash extraction failed');
-              _bhB58 = ns.b58Encode(_bhBytes);
-            }
-
-            // -- Build tip tx ----------------------------------------------------------
-            // Preference order:
-            //   1. web3.js TransactionMessage ? V0
-            //   2. web3.js legacy Transaction
-            //   3. VersionedTransaction directly from raw V0 message bytes (VersionedTransaction IS available)
-            //   4. Raw bytes V0 (last resort)
-            let _tipTxRaw;
-            const _w3 = _web3Pkg;
-            if (_w3?.TransactionMessage && _w3?.PublicKey && _w3?.SystemProgram && _w3?.VersionedTransaction) {
-              try {
-                const _tipMsg = new _w3.TransactionMessage({
-                  payerKey: new _w3.PublicKey(_bundleWallet),
-                  recentBlockhash: _bhB58,
-                  instructions: [_w3.SystemProgram.transfer({
-                    fromPubkey: new _w3.PublicKey(_bundleWallet),
-                    toPubkey:   new _w3.PublicKey(_tipAcctStr),
-                    lamports:   _jitoBundleTip,
-                  })],
-                }).compileToV0Message();
-                _tipTxRaw = new _w3.VersionedTransaction(_tipMsg).serialize();
-              } catch (_tipBuildErr) {
-                _tipTxRaw = null;
-              }
-            }
-            if (!_tipTxRaw && _w3?.Transaction && _w3?.PublicKey && _w3?.SystemProgram) {
-              try {
-                const _legTip = new _w3.Transaction({ recentBlockhash: _bhB58, feePayer: new _w3.PublicKey(_bundleWallet) });
-                _legTip.add(_w3.SystemProgram.transfer({
-                  fromPubkey: new _w3.PublicKey(_bundleWallet),
-                  toPubkey:   new _w3.PublicKey(_tipAcctStr),
-                  lamports:   _jitoBundleTip,
-                }));
-                _tipTxRaw = _legTip.serialize({ requireAllSignatures: false, verifySignatures: false });
-              } catch (_tipBuildErr2) {
-                _tipTxRaw = null;
-              }
-            }
-            // Option 3: Build legacy message bytes and round-trip through VersionedTransaction.deserialize
-            // to produce a properly-initialised object for signing.
-            // Uses LEGACY format (no 0x80 prefix, no ALT section) ? matches Jito's own tip TX examples.
-            if (!_tipTxRaw && VersionedTransaction) {
-              try {
-                const _fromPKv = _b58Dec(_bundleWallet);
-                const _toPKv   = _b58Dec(_tipAcctStr);
-                const _sysPKv  = new Uint8Array(32);
-                const _bhRawV  = _b58Dec(_bhB58);
-                const _ixDataV = new Uint8Array([2, 0, 0, 0, ..._encodeU64LE(_jitoBundleTip)]);
-                const _legMsgV = new Uint8Array([
-                  1, 0, 1,                                                                  // legacy header
-                  ..._cu16(3), ..._fromPKv, ..._toPKv, ..._sysPKv,                         // accounts
-                  ..._bhRawV,                                                               // blockhash
-                  ..._cu16(1), 2, ..._cu16(2), 0, 1, ..._cu16(_ixDataV.length), ..._ixDataV, // instruction
-                ]);
-                const _wrappedRaw = new Uint8Array([..._cu16(1), ...new Uint8Array(64), ..._legMsgV]);
-                const _vtip = VersionedTransaction.deserialize(_wrappedRaw);
-                _tipTxRaw = _vtip.serialize();
-              } catch (_vtErr) {
-                _tipTxRaw = null;
-              }
-            }
-            if (!_tipTxRaw) {
-              // Raw bytes fallback: hand-craft a LEGACY SystemProgram.transfer tx.
-              // Legacy format is simpler than V0 and universally accepted by Jito simulation.
-              // Jito's own documentation examples all use legacy transactions for tip TXs.
-              // Legacy message = [header(3)] [accounts] [blockhash] [instructions] ? NO 0x80 prefix, NO ALT section.
-              const _fromPK     = _b58Dec(_bundleWallet);
-              const _toPK       = _b58Dec(_tipAcctStr);
-              const _sysPK      = new Uint8Array(32); // System Program = 32 zero bytes
-              const _bhRawBytes = _b58Dec(_bhB58);
-              const _ixData = new Uint8Array([2, 0, 0, 0, ..._encodeU64LE(_jitoBundleTip)]);
-              const _ix     = new Uint8Array([2, ..._cu16(2), 0, 1, ..._cu16(_ixData.length), ..._ixData]);
-              const _legMsg = new Uint8Array([
-                1, 0, 1,                                      // header: 1 req sig, 0 readonly-signed, 1 readonly-unsigned
-                ..._cu16(3), ..._fromPK, ..._toPK, ..._sysPK, // accounts
-                ..._bhRawBytes,                               // blockhash
-                ..._cu16(1), ..._ix,                          // instructions (no ALT section in legacy)
-              ]);
-              _tipTxRaw = new Uint8Array([..._cu16(1), ...new Uint8Array(64), ..._legMsg]);
-            }
-
-            // Order: [raydium_tx_0, ..., raydium_tx_N, tip_tx] (tip MUST be last per Jito).
+            // Bundle = all Raydium txs unmodified + tip tx last.
             const _toSignRaw = [
               ..._rdmTxsToSign.map(b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0))),
               _tipTxRaw,
             ];
 
-            // -- Sign all txs ? single wallet confirmation -----------------------------
+            // -- Sign all txs — single wallet confirmation -----------------------------
             const _wsA  = ns._wsAccount || ns._wsWallet?.accounts?.[0] || null;
             const _wsSF = ns._wsWallet?.features?.['solana:signTransaction'];
             let _signedAll = [];
@@ -1770,10 +1675,6 @@
               _signedAll = _results.map(r => r?.signedTransaction ? new Uint8Array(r.signedTransaction) : null);
               if (_signedAll.some(b => !b)) throw new Error('bundle: signTransaction returned null bytes');
               _bundleSignedSwapBytes = _signedAll[_rdmTxsToSign.length - 1] ?? null;
-              // Verify tip TX signature is non-zero (wallet actually signed it)
-              const _tipSigned = _signedAll[_rdmTxsToSign.length];
-              const _tipSigBytes = _tipSigned?.slice(1, 9);
-              const _tipSigZero = _tipSigBytes && _tipSigBytes.every(b => b === 0);
             } else if (legacyWallet?.signAllTransactions && VersionedTransaction) {
               // Legacy wallet fallback: needs VersionedTransaction objects ? also one popup.
               const _objs = _toSignRaw.map(b => VersionedTransaction.deserialize(b));
@@ -1793,323 +1694,226 @@
               return btoa(bin);
             });
 
-            // -- Pre-submit: simulate swap TX to diagnose Invalid bundle status ---------
-            // If simulation fails here, Jito would also reject it (CLMM slippage, stale tick data).
+            // -- Pre-submit: simulate swap TX to catch obvious failures before wasting a Jito slot ---
+            // NOTE: Raydium V0 txs use ALTs; many RPC nodes return simulation errors for ALT-heavy
+            // txs even when they would succeed on-chain (node hasn't loaded ALT data into cache).
+            // Simulation result is therefore DIAGNOSTIC ONLY — we log it but never abort on it.
+            // Real on-chain failure detection is handled by the getSignatureStatuses check below.
             try {
               const _simUrl = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
               const _simR = await fetch(_simUrl, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'simulateTransaction',
-                  params: [_bundleB64[0], { encoding: 'base64', commitment: 'confirmed', replaceRecentBlockhash: true }] })
+                  params: [_bundleB64[_bundleB64.length - 2], { encoding: 'base64', commitment: 'confirmed', replaceRecentBlockhash: true }] })
               });
               const _simD = await _simR.json();
               const _simErr = _simD?.result?.value?.err;
+              if (_simErr) {
+                const _simErrStr = JSON.stringify(_simErr);
+                // Deterministic failures — will ALWAYS fail on-chain regardless of skipPreflight.
+                // Abort now and let Jupiter execute instead.
+                //   AccountLoadedTwice   = tip injection added an account already in ATL
+                //   InsufficientFunds*   = 100%-SOL swap left no lamports for the injected tip
+                if (_simErrStr.includes('AccountLoadedTwice') ||
+                    /insufficient.{0,30}(lamport|fund|fee|rent)/i.test(_simErrStr)) {
+                  _hadRdmSimFail = true;
+                  throw new Error('__rdm_sim_fallback__');
+                }
+                // Non-deterministic errors (ALT cache misses, custom program pre-checks)
+                // may still land fine on-chain with skipPreflight. Log only.
+                console.warn('[ZendIQ] Raydium bundle sim warning (may be ALT cache miss):', _simErrStr);
+              }
             } catch (_simEx) {
+              if (_simEx.message === '__rdm_sim_fallback__') throw _simEx;
             }
-            // -- Submit to ALL Jito endpoints simultaneously — first success wins --------
-            // Promise.any races all 9 regional endpoints in parallel; max wait = 4s regardless of how many are slow.
-            const _JITO_ENDPOINTS = [
-              'https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/bundles',
-              'https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles',
-              'https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles',
-              'https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles',
-              'https://london.mainnet.block-engine.jito.wtf/api/v1/bundles',
-              'https://dublin.mainnet.block-engine.jito.wtf/api/v1/bundles',
-              'https://slc.mainnet.block-engine.jito.wtf/api/v1/bundles',
-              'https://singapore.mainnet.block-engine.jito.wtf/api/v1/bundles',
-              'https://mainnet.block-engine.jito.wtf/api/v1/bundles',
+            // -- Submit to Jito -------------------------------------------------------
+            // Single-tx path (most Raydium swaps): use sendTransaction?bundleOnly=true —
+            // same approach as pump.fun. Returns a real sig in data.result and the bundle
+            // ID in the x-bundle-id response header. No separate bundle status polling
+            // needed beyond polling the sig on RPC.
+            // Multi-tx path (ATA-create + swap): must use /bundles (accepts array).
+            const _isSingleBundle = false; // always use /bundles — bundleOnly=true rejected Raydium ATL txs
+            const _JITO_BASE_URLS = [
+              'https://amsterdam.mainnet.block-engine.jito.wtf',
+              'https://ny.mainnet.block-engine.jito.wtf',
+              'https://frankfurt.mainnet.block-engine.jito.wtf',
+              'https://tokyo.mainnet.block-engine.jito.wtf',
+              'https://london.mainnet.block-engine.jito.wtf',
+              'https://dublin.mainnet.block-engine.jito.wtf',
+              'https://slc.mainnet.block-engine.jito.wtf',
+              'https://singapore.mainnet.block-engine.jito.wtf',
+              'https://mainnet.block-engine.jito.wtf',
             ];
-            const _jitoPayload = { jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [_bundleB64, { encoding: 'base64' }] };
-            const _tryJitoEndpoint = async (url) => {
-              const d = await ns.pageJsonPost(url, _jitoPayload, 4000);
-              if (d?.result) return { result: d.result, endpoint: url };
-              throw new Error(JSON.stringify(d?.error ?? 'no result'));
-            };
-            let _jitoResult;
-            try {
-              _jitoResult = await Promise.any(_JITO_ENDPOINTS.map(_tryJitoEndpoint));
-            } catch (_) {
-              throw new Error('Jito: all regional endpoints unavailable (429/503/timeout)');
-            }
-            const _bundleId  = _jitoResult.result;
-            const _jitoBase  = _jitoResult.endpoint.replace('/api/v1/bundles', '');
 
-            // -- Extract swap tx signature (NOT the tip tx) ----------------------------
-            // In a signed tx the first sig starts at byte 1 (after compact-u16(1) prefix).
+            // Extract swap tx sig from signed bytes (bytes 1-64 after compact-u16 sig count).
+            // Tip tx is last in _signedAll; swap tx is at index [_rdmTxsToSign.length - 1].
             const _swapRaw = _signedAll[_rdmTxsToSign.length - 1];
             if (_swapRaw?.length > 65) rpcSig = ns.b58Encode(_swapRaw.slice(1, 65));
-            // Extract tip tx sig for Activity display (second Solscan link)
-            const _tipRaw2    = _signedAll[_rdmTxsToSign.length];
-            const _jitoTipSig = (_tipRaw2?.length > 65) ? ns.b58Encode(_tipRaw2.slice(1, 65)) : null;
+            const _jitoTipSig = null; // tip is a separate tx in the bundle, no ZendIQ tracking needed
 
-            // -- Poll getInflightBundleStatuses until Landed / Failed / Invalid --------
-            // Poll from the SAME regional endpoint where we submitted (not global mainnet).
-            // Each block engine has its own inflight tracker; cross-region polling returns Invalid.
-            if (_bundleId) {
-              // Jito Explorer URL for manual diagnosis
-              const _INFLIGHT_URL = _jitoBase + '/api/v1/getInflightBundleStatuses';
-              const _STATUSES_URL = _jitoBase + '/api/v1/getBundleStatuses';
+            let _bundleId = null;
+            let _jitoBase = null;
 
-              // Step 1: getInflightBundleStatuses
-              const _inflightBody = { jsonrpc: '2.0', id: 1, method: 'getInflightBundleStatuses', params: [[_bundleId]] };
-              for (let _pi = 0; _pi < 12; _pi++) {  // 12 x 500ms = 6s max
-                await new Promise(r => setTimeout(r, 500));
-                try {
-                  const _sd = await ns.pageJsonPost(_INFLIGHT_URL, _inflightBody);
-                  const _sv = _sd?.result?.value?.[0];
-                  if (!_sv) continue;  // null = not yet in tracker, keep polling
-                  if (_sv.status === 'Landed') {
-                    _jitoBundleOk = true; break;
-                  }
-                  if (_sv.status === 'Failed') throw new Error('Jito bundle failed on-chain -- please retry');
-                  // 'Pending' -> keep polling; 'Invalid' -> may have landed before first poll, continue
-                } catch (_pollErr) {
-                  if (_pollErr.message.startsWith('Jito bundle failed')) throw _pollErr;
-                }
+            if (_isSingleBundle) {
+              // ── Single-tx: sendTransaction?bundleOnly=true (pump.fun approach) ──────
+              const _swapB64 = _bundleB64[0];
+              const _body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction',
+                params: [_swapB64, { encoding: 'base64' }] });
+              const _tryEndpoint = async (base) => {
+                const url = base + '/api/v1/transactions?bundleOnly=true';
+                const r = await fetch(url, { method: 'POST',
+                  headers: { 'Content-Type': 'application/json' }, body: _body,
+                  signal: AbortSignal.timeout(8000) });
+                const d = await r.json();
+                const bid = r.headers.get('x-bundle-id') ?? null;
+                if (d?.result) return { sig: d.result, bundleId: bid, base };
+                throw new Error(JSON.stringify(d?.error ?? 'no result'));
+              };
+              let _st;
+              try {
+                _st = await Promise.any(_JITO_BASE_URLS.map(_tryEndpoint));
+              } catch (_) {
+                throw new Error('Jito: all regional endpoints unavailable (429/503/timeout)');
               }
+              if (_st.sig) rpcSig = _st.sig; // authoritative sig from Jito response
+              _bundleId = _st.bundleId;
+              _jitoBase = _st.base;
 
-              // Step 2: getBundleStatuses ? the authoritative Jito landing check per docs.
-              // Searches chain history (up to MAX_RECENT_BLOCKHASHES = 300 rooted slots).
-              // Returns null if not landed; object with confirmation_status if committed.
-              if (!_jitoBundleOk) {
+              // Poll RPC for confirmation — same as pump.fun.
+              // Sig came directly from Jito so we know it's the right one.
+              let _confirmed = false;
+              const _rpcUrl  = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
+              for (let _pi = 0; _pi < 20 && !_confirmed; _pi++) {
+                await new Promise(r => setTimeout(r, 1000));
                 try {
-                  const _gbsBody = { jsonrpc: '2.0', id: 1, method: 'getBundleStatuses', params: [[_bundleId]] };
-                  const _gbsD = await ns.pageJsonPost(_STATUSES_URL, _gbsBody, 4000);
-                  const _gbsV = _gbsD?.result?.value?.[0];
-                  if (_gbsV?.confirmation_status) {
-                    // Extract the actual on-chain swap sig from bundle transactions
-                    if (_gbsV.transactions?.[0]) rpcSig = _gbsV.transactions[0];
-                    _jitoBundleOk = true;
-                  }
-                } catch (_gbsErr) {
-                }
-              }
-              // Check the swap tx sig directly on RPC -- if confirmed, the bundle landed.
-              if (!_jitoBundleOk && rpcSig) {
-                try {
-                  const _rpcUrl = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
-                  const _r = await fetch(_rpcUrl, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses', params: [[rpcSig]] })
-                  });
+                  const _r = await fetch(_rpcUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses', params: [[rpcSig]] }) });
                   const _d = await _r.json();
-                  const _sigStatus = _d?.result?.value?.[0];
-                  if (_sigStatus && !_sigStatus.err) {
-                    // Swap TX confirmed ? also check the tip TX to verify atomic bundle landing.
-                    let _tipLanded = false;
-                    if (_jitoTipSig) {
-                      try {
-                        const _rt = await fetch(_rpcUrl, {
-                          method: 'POST', headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'getSignatureStatuses', params: [[_jitoTipSig]] })
-                        });
-                        const _dt = await _rt.json();
-                        const _tipStatus = _dt?.result?.value?.[0];
-                        _tipLanded = !!(_tipStatus && !_tipStatus.err);
-                      } catch (_) {}
-                    }
-                    _jitoBundleOk = true;
-                  } else if (_sigStatus === null || (_sigStatus && _sigStatus.err)) {
-                    // null = TX not found = truly expired (Jito rejected); .err = on-chain execution failure.
-                    // Before giving up and asking the user to sign again, try broadcasting the
-                    // already-signed swap TX directly via standard RPC — no Jito, no extra wallet popup.
-                    const _signedSwapFb = _signedAll[_rdmTxsToSign.length - 1];
-                    let _fbOk = false;
-                    if (_signedSwapFb) {
-                      try {
-                        let _fbBin = ''; for (let _i = 0; _i < _signedSwapFb.length; _i++) _fbBin += String.fromCharCode(_signedSwapFb[_i]);
-                        const _fbB64 = btoa(_fbBin);
-                        const _fbRpc = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
-                        const _fbR = await fetch(_fbRpc, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction',
-                            params: [_fbB64, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }] }),
-                        });
-                        const _fbD = await _fbR.json();
-                        if (_fbD?.result) {
-                          rpcSig   = _fbD.result;
-                          _fbOk    = true;
-                          _jitoBundleOk = true;
-                        } else {
-                        }
-                      } catch (_fbErr) {
-                      }
-                    }
-                    if (!_fbOk) throw new Error('__bundle_expired__');
-                  }
-                  // undefined = RPC error -> fall through to optimistic success below
-                } catch (_rpcErr) {
-                  if (_rpcErr.message === '__bundle_expired__') throw _rpcErr;
-                }
+                  const _sv = _d?.result?.value?.[0];
+                  if (_sv && !_sv.err) { _confirmed = true; _jitoBundleOk = true; break; }
+                  if (_sv?.err) { _hadRdmSimFail = true; throw new Error('__rdm_sim_fallback__'); }
+                  // null = not yet seen, keep polling
+                } catch (_pe) { if (_pe.message === '__rdm_sim_fallback__') throw _pe; }
               }
-              // Final fallback: treat as broadcast success (Jito auto-forwards to standard RPC)
-              if (!_jitoBundleOk) { _jitoBundleOk = true; }
+              if (!_confirmed) throw new Error('__bundle_expired__');
+
+            } else {
+              // ── Multi-tx: /bundles (ATA-create + swap) ───────────────────────────────
+              const _BUNDLE_ENDPOINTS = _JITO_BASE_URLS.map(b => b + '/api/v1/bundles');
+              const _jitoPayload = { jsonrpc: '2.0', id: 1, method: 'sendBundle',
+                params: [_bundleB64, { encoding: 'base64' }] };
+              const _tryBundle = async (url) => {
+                const d = await ns.pageJsonPost(url, _jitoPayload, 4000);
+                if (d?.result) return { result: d.result, endpoint: url };
+                throw new Error(JSON.stringify(d?.error ?? 'no result'));
+              };
+              let _jitoResult;
+              try {
+                _jitoResult = await Promise.any(_BUNDLE_ENDPOINTS.map(_tryBundle));
+              } catch (_) {
+                throw new Error('Jito: all regional endpoints unavailable (429/503/timeout)');
+              }
+              _bundleId = _jitoResult.result;
+              _jitoBase = _jitoResult.endpoint.replace('/api/v1/bundles', '');
+
+              if (_bundleId) {
+                const _INFLIGHT_URL = _jitoBase + '/api/v1/getInflightBundleStatuses';
+                const _STATUSES_URL = _jitoBase + '/api/v1/getBundleStatuses';
+
+                // Step 1: getInflightBundleStatuses
+                const _inflightBody = { jsonrpc: '2.0', id: 1, method: 'getInflightBundleStatuses', params: [[_bundleId]] };
+                for (let _pi = 0; _pi < 12; _pi++) {
+                  await new Promise(r => setTimeout(r, 500));
+                  try {
+                    const _sd = await ns.pageJsonPost(_INFLIGHT_URL, _inflightBody);
+                    const _sv = _sd?.result?.value?.[0];
+                    if (!_sv) continue;
+                    if (_sv.status === 'Landed') { _jitoBundleOk = true; break; }
+                    if (_sv.status === 'Failed') throw new Error('Jito bundle failed on-chain -- please retry');
+                  } catch (_pollErr) {
+                    if (_pollErr.message.startsWith('Jito bundle failed')) throw _pollErr;
+                  }
+                }
+
+                // Step 2: getBundleStatuses
+                if (!_jitoBundleOk) {
+                  try {
+                    const _gbsBody = { jsonrpc: '2.0', id: 1, method: 'getBundleStatuses', params: [[_bundleId]] };
+                    const _gbsD = await ns.pageJsonPost(_STATUSES_URL, _gbsBody, 4000);
+                    const _gbsV = _gbsD?.result?.value?.[0];
+                    if (_gbsV?.confirmation_status) {
+                      if (_gbsV.transactions?.[0]) rpcSig = _gbsV.transactions[0];
+                      _jitoBundleOk = true;
+                    }
+                  } catch (_) {}
+                }
+
+                // Step 3: direct RPC sig check
+                if (!_jitoBundleOk && rpcSig) {
+                  try {
+                    const _rpcUrl = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
+                    const _r = await fetch(_rpcUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses', params: [[rpcSig]] }) });
+                    const _d = await _r.json();
+                    const _sigStatus = _d?.result?.value?.[0];
+                    if (_sigStatus && !_sigStatus.err) {
+                      _jitoBundleOk = true;
+                    } else if (_sigStatus === null) {
+                      const _signedSwapFb = _signedAll[_rdmTxsToSign.length - 1];
+                      let _fbOk = false;
+                      if (_signedSwapFb) {
+                        try {
+                          let _fbBin = ''; for (let _i = 0; _i < _signedSwapFb.length; _i++) _fbBin += String.fromCharCode(_signedSwapFb[_i]);
+                          const _fbB64 = btoa(_fbBin);
+                          const _fbRpc = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
+                          const _fbR = await fetch(_fbRpc, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction',
+                              params: [_fbB64, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }] }) });
+                          const _fbD = await _fbR.json();
+                          if (_fbD?.result) {
+                            rpcSig = _fbD.result;
+                            for (let _ci = 0; _ci < 8; _ci++) {
+                              await new Promise(r => setTimeout(r, 1500));
+                              try {
+                                const _cr = await fetch(_fbRpc, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses', params: [[rpcSig]] }) });
+                                const _cd = await _cr.json();
+                                const _cv = _cd?.result?.value?.[0];
+                                if (_cv && !_cv.err) { _fbOk = true; _jitoBundleOk = true; break; }
+                                if (_cv?.err) throw new Error('__rdm_sim_fallback__');
+                              } catch (_cErr) { if (_cErr.message === '__rdm_sim_fallback__') throw _cErr; }
+                            }
+                          }
+                        } catch (_fbErr) { if (_fbErr.message === '__rdm_sim_fallback__') throw _fbErr; }
+                      }
+                      if (!_fbOk) throw new Error('__bundle_expired__');
+                    } else if (_sigStatus && _sigStatus.err) {
+                      _hadRdmSimFail = true;
+                      throw new Error('__rdm_sim_fallback__');
+                    }
+                  } catch (_rpcErr) {
+                    if (_rpcErr.message === '__bundle_expired__') throw _rpcErr;
+                  }
+                }
+                if (!_jitoBundleOk) throw new Error('__bundle_expired__');
+              }
             }
 
             data = { status: 'Success', signature: rpcSig, jitoTipSig: _jitoTipSig ?? null, bundleId: _bundleId ?? null };
+            // Now that bundle is confirmed, record the actual tip paid in widgetLastOrderFees
+            // so Activity shows the correct cost (0 for low-risk trades that skipped the floor).
+            if (ns.widgetLastOrderFees && _jitoBundleTip > (ns.widgetLastOrderFees.jitoTipLamports ?? 0)) {
+              ns.widgetLastOrderFees = { ...ns.widgetLastOrderFees, jitoTipLamports: _jitoBundleTip };
+            }
           } catch (jitoErr) {
             if (/reject|cancel|denied|abort/i.test(jitoErr?.message ?? '')) throw new Error('cancelled');
             if (jitoErr?.message === '__bundle_expired__') throw jitoErr;
             if (jitoErr?.message?.startsWith('Jito bundle failed')) throw jitoErr;
             if (jitoErr?.message === '__rdm_sim_fallback__') throw jitoErr;
-            console.warn('[ZendIQ] Jito bundle error, falling back to standard broadcast:', jitoErr.message);
+            // Any other unexpected Jito error — surface it to the user, no silent fallback.
+            throw jitoErr;
           }
         }
-
-        if (!_jitoBundleOk) {  // standard per-tx sign+send (also the Jito fallback path)
-        for (let _ti = 0; _ti < _rdmTxsToSign.length; _ti++) {
-          const _rdmB64   = _rdmTxsToSign[_ti];
-          const _rdmBytes = Uint8Array.from(atob(_rdmB64), c => c.charCodeAt(0));
-          let   _txSig    = null; // base58 sig, or '__sent__' when wallet returned no sig
-
-          // Jito fallback: bundle already signed this tx ? broadcast the signed bytes directly.
-          // Skips all signing tiers and the simulation (already done during bundle path).
-          const _isLastTx = (_ti === _rdmTxsToSign.length - 1);
-          if (_isLastTx && _bundleSignedSwapBytes) {
-            let _fbin = ''; for (let i = 0; i < _bundleSignedSwapBytes.length; i++) _fbin += String.fromCharCode(_bundleSignedSwapBytes[i]);
-            const _fb64 = btoa(_fbin);
-            const _fbRpc = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
-            try {
-              const _fr = await fetch(_fbRpc, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction',
-                  params: [_fb64, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }] }) });
-              const _fd = await _fr.json();
-            } catch (_fbE) { /* fall through to standard signing tiers below */ }
-          }
-
-          // Pre-simulate via RPC before showing the wallet popup.
-          // Wallets (Jupiter Wallet, Phantom) run their own internal simulation and show a
-          // scary "Simulation failed" warning even though we pass skipPreflight:true for
-          // broadcast. By simulating first ourselves, we detect failures silently and fall
-          // back to Jupiter immediately ? the user never sees the wallet warning.
-          // Only simulate the swap tx (last in list); the ATA-create tx always passes.
-          // Skip when _bundleSignedSwapBytes already broadcast the tx successfully.
-          if (_isLastTx && !_txSig) {
-            try {
-              const _simRpc = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
-              const _simR = await fetch(_simRpc, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 1,
-                  method: 'simulateTransaction',
-                  params: [_rdmB64, { encoding: 'base64', commitment: 'processed',
-                                      replaceRecentBlockhash: true }] }),
-              });
-              const _simD = await _simR.json();
-              if (_simD?.result?.value?.err) {
-                // Only bail for insufficient-lamports (Max SOL swap edge case).
-                // Raydium CLMM/AMM txs often return custom program errors or generic
-                // simulation failures but land perfectly fine on-chain with skipPreflight.
-                // Falling back on those would silently replace the user's Raydium route
-                // with a Jupiter route, which is worse than letting the wallet try.
-                const _errStr = JSON.stringify(_simD.result.value.err);
-                if (/insufficient.{0,30}lamport/i.test(_errStr)) {
-                  _hadRdmSimFail = true;
-                  throw new Error('__rdm_sim_fallback__');
-                }
-                // Other sim errors: proceed ? skipPreflight handles it
-              }
-            } catch (e) {
-              if (e.message === '__rdm_sim_fallback__') throw e;
-              // sim call itself failed (network/timeout) ? proceed and let wallet try
-            }
-          }
-
-          // Tier 1: WS signAndSendTransaction with skipPreflight:true ? wallet broadcasts
-          // using its own premium RPC without running preflight simulation first.
-          // Raydium AMM V4 txs frequently fail simulation (complex account setup / compute
-          // budget edge cases) so skipPreflight is required. The Wallet Standard options field
-          // is supported by all major WS wallets (Jupiter Wallet, Phantom, Backpack, Solflare).
-          if (!_txSig && ns._wsWallet) {
-            const _wsAcc  = ns._wsAccount || ns._wsWallet.accounts?.[0] || null;
-            const _wsSnSF = ns._wsWallet.features?.['solana:signAndSendTransaction'];
-            if (_wsSnSF?.signAndSendTransaction && _wsAcc) {
-              try {
-                const _res = await _wsSnSF.signAndSendTransaction({
-                  account: _wsAcc, transaction: _rdmBytes, chain: 'solana:mainnet',
-                  options: { skipPreflight: true, maxRetries: 0 },
-                });
-                _txSig = _extractRdmSig(_res) ?? '__sent__';
-              } catch (e) {
-                if (_isSimErr(e)) { _rdmSimFailed = true; _hadRdmSimFail = true; }
-                if (/reject|cancel|denied|abort/i.test(e?.message ?? '')) throw new Error('cancelled');
-              }
-            }
-          }
-
-          // Tier 2: legacy wallet signAndSendTransaction with skipPreflight
-          if (!_txSig && legacyWallet?.signAndSendTransaction) {
-            try {
-              const _txObj = VersionedTransaction ? VersionedTransaction.deserialize(_rdmBytes) : _rdmBytes;
-              const _res   = await legacyWallet.signAndSendTransaction(_txObj, { skipPreflight: true, isVersioned: true });
-              _txSig = _extractRdmSig(_res) ?? '__sent__';
-            } catch (e) {
-              if (_isSimErr(e)) { _rdmSimFailed = true; _hadRdmSimFail = true; }
-              if (/reject|cancel|denied|abort/i.test(e?.message ?? '')) throw new Error('cancelled');
-            }
-          }
-
-          // Tier 3: WS signTransaction (last resort) ? get signed bytes, broadcast directly
-          // via the page's observed Solana RPC URL (same node jup.ag uses, no bridge hop,
-          // no second wallet popup). Falls through to ns.rpcCall if _jupRpcUrl isn't known yet.
-          if (!_txSig && ns._wsWallet) {
-            const _wsAcc = ns._wsAccount || ns._wsWallet.accounts?.[0] || null;
-            const _wsSF  = ns._wsWallet.features?.['solana:signTransaction'];
-            if (_wsSF?.signTransaction && _wsAcc) {
-              try {
-                const [_wsRes] = await _wsSF.signTransaction({ account: _wsAcc, transaction: _rdmBytes, chain: 'solana:mainnet' });
-                if (_wsRes?.signedTransaction) {
-                  let bin = ''; for (let i = 0; i < _wsRes.signedTransaction.length; i++) bin += String.fromCharCode(_wsRes.signedTransaction[i]);
-                  const _b64signed = btoa(bin);
-                  const _sendRpc   = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
-                  try {
-                    const _fr = await fetch(_sendRpc, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction',
-                        params: [_b64signed, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }] }) });
-                    const _fd = await _fr.json();
-                    if (_fd?.result) _txSig = _fd.result;
-                  } catch (_) {
-                    const _r = await ns.rpcCall('sendTransaction', [_b64signed, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }]);
-                    if (_r?.result) _txSig = _r.result;
-                  }
-                }
-              } catch (e) {
-                if (_isSimErr(e)) { _rdmSimFailed = true; _hadRdmSimFail = true; }
-                if (/reject|cancel|denied|abort/i.test(e?.message ?? '')) throw new Error('cancelled');
-              }
-            }
-          }
-
-          if (!_txSig && _rdmSimFailed) throw new Error('__rdm_sim_fallback__');
-          if (!_txSig) throw new Error('Could not sign or broadcast Raydium transaction ? make sure your wallet is connected');
-
-          if (_txSig !== '__sent__') rpcSig = _txSig; // keep last real sig (= swap tx)
-
-          // Wait for intermediate txs to confirm before signing/sending the next
-          // (e.g. ATA-create tx must be confirmed before the swap tx can execute)
-          if (_ti < _rdmTxsToSign.length - 1) {
-            if (_txSig && _txSig !== '__sent__') {
-              const _rpcUrl = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
-              for (let _ci = 0; _ci < 20; _ci++) {
-                await _sleep(1500);
-                try {
-                  const _cr = await fetch(_rpcUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses', params: [[_txSig]] }) });
-                  const _cd = await _cr.json();
-                  const _status = _cd?.result?.value?.[0];
-                  if (_status && !_status.err) break;
-                } catch (_) {}
-              }
-            } else {
-              // Wallet broadcast but returned no sig ? wait a fixed 8s for ATA confirmation
-              await _sleep(8000);
-            }
-          }
-        }
-
-        // Normalise to Jupiter-compatible result shape used by the history / done logic below
-        data = { status: 'Success', signature: rpcSig };
-        } // end if (!_jitoBundleOk)
       }
 
       ns.widgetSwapStatus    = 'done';
@@ -2145,7 +1949,7 @@
           timestamp: Date.now(),
           solscanUrl:  sig ? ('https://solscan.io/tx/' + sig) : null,
           jitoTipSig:  data?.jitoTipSig ?? null,
-          jitoBundle:  !!(data?.jitoTipSig),
+          jitoBundle:  !!(data?.bundleId || data?.jitoTipSig),
           // Fee / risk / savings metadata
           priorityFeeLamports: ns.widgetLastOrderFees?.priorityFeeLamports ?? ns.PRIORITY_FEE_LOW,
           jitoTipLamports:     ns.widgetLastOrderFees?.jitoTipLamports ?? 0,
@@ -2257,7 +2061,7 @@
           ns.renderWidgetPanel();
           await fetchWidgetQuote(false, true);
           if (ns.widgetSwapStatus === 'ready') {
-            ns.widgetSwapError = 'Raydium simulation failed ? tap Sign & Send to use Jupiter\'s route';
+            ns.widgetSwapError = 'Raydium route failed simulation \u2014 Jupiter\'s route loaded below';
             ns.renderWidgetPanel();
           }
         } catch (_fbErr) {

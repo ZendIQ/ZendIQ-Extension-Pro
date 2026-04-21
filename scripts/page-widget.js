@@ -523,7 +523,7 @@
               const inVal  = _fmtW(h.amountIn,  h.tokenIn  || '?');
               const outVal = _fmtW(h.amountOut, h.tokenOut || '?');
               // Exchange label from swapType / routeSource
-              const exchLbl = h.routeSource === 'pump.fun' ? (h.jitoBundle ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM') : h.swapType === 'rfq' ? 'RFQ · Jupiter' : h.swapType === 'gasless' ? 'Gasless · Jupiter' : (h.optimized ? 'ZendIQ · AMM' : 'Jupiter · AMM');
+              const exchLbl = h.routeSource === 'pump.fun' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'Raydium · AMM + Jito Bundle' : 'Raydium · AMM') : h.swapType === 'rfq' ? 'RFQ · Jupiter' : h.swapType === 'gasless' ? 'Gasless · Jupiter' : 'Jupiter · AMM';
               // Savings row
               let savRow = '';
               if (h.optimized) {
@@ -607,13 +607,14 @@
                 } else if (_sr?.error) {
                   sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Block data was unavailable \u2014 sandwich check could not complete.">Sandwich check</span><span style="color:#9B9BAD">unknown</span></div>`;
                 } else if (_sr?.detected) {
-                  const _extStr = _sr.extractedUsd != null && _sr.extractedUsd > 0.001
-                    ? '\u26a0 ~$' + _sr.extractedUsd.toFixed(2) + ' extracted'
-                    : '\u26a0 detected';
+                  const _hasLoss = _sr.extractedUsd != null && _sr.extractedUsd > 0.001;
+                  const _extHtml = _hasLoss
+                    ? `<span style="color:#FFB547;font-weight:700">\u26a0 ~$${_sr.extractedUsd.toFixed(2)} extracted</span>`
+                    : `<span style="font-weight:700"><span style="color:#FFB547">\u26a0 detected</span><span style="color:#14F195"> \u00b7 $0 lost</span></span>`;
                   const _attackTip = _sr.attackerWallet
-                    ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr.attackerWallet)}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : 'unknown'}.`
-                    : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr.extractedUsd != null && _sr.extractedUsd > 0.001 ? '~$' + _sr.extractedUsd.toFixed(2) : 'unknown'}.`;
-                  sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="${escapeHtml(_attackTip)}">Sandwich check</span><span style="color:#FFB547;font-weight:700">${escapeHtml(_extStr)}</span></div>`;
+                    ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr.attackerWallet)}. Estimated extraction: ${_hasLoss ? '~$' + _sr.extractedUsd.toFixed(2) : '$0 \u2014 your slippage protection absorbed the attack.'}`
+                    : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_hasLoss ? '~$' + _sr.extractedUsd.toFixed(2) : '$0 \u2014 your slippage protection absorbed the attack.'}.`;
+                  sandwichRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="${escapeHtml(_attackTip)}">Sandwich check</span>${_extHtml}</div>`;
                 } else if (_sr && !_sr.detected) {
                   const _scanTip = _sr.scanned > 0
                     ? `Scanned ${_sr.scanned} transaction${_sr.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.`
@@ -2456,7 +2457,7 @@
               const fmt = v => (v == null || !isFinite(v)) ? '—' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
               const fmtA = (val, sym) => { if (val == null) return '— '+(sym||''); const n=parseFloat(val); if (!isFinite(n)) return String(val)+' '+(sym||''); const abs=Math.abs(n); const p=abs>=1000?2:abs>=1?4:abs>=0.001?6:8; const [ip,dp]=n.toFixed(p).split('.'); return ip.replace(/\B(?=(\d{3})+(?!\d))/g,'.')+(dp?','+dp:'')+' '+(sym||''); };
               const fmtAgo = ts => { const s=Math.round((Date.now()-(ts||0))/1000); return s<60?s+'s ago':s<3600?Math.round(s/60)+'m ago':Math.round(s/3600)+'h ago'; };
-              const exchLbl = h.routeSource === 'pump.fun' ? (h.jitoBundle ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':(h.optimized?'ZendIQ · AMM':'Jupiter · AMM');
+              const exchLbl = h.routeSource === 'pump.fun' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'Raydium · AMM + Jito Bundle' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':'Jupiter · AMM';
               const sol = h.solPriceUsd != null ? Number(h.solPriceUsd) : null;
               const SOL_MINT = 'So11111111111111111111111111111111111111112';
               const outputIsSol = h.outputMint === SOL_MINT || h.tokenOut === 'SOL' || h.tokenOut === 'WSOL';
@@ -2550,10 +2551,13 @@
                   t += row(`<span title="Block data unavailable \u2014 sandwich check could not complete." style="cursor:help">Sandwich check</span>`, 'unknown', '#9B9BAD');
                 } else if (_sr2?.detected) {
                   const _tip2 = _sr2.attackerWallet
-                    ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr2.attackerWallet)}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`
-                    : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr2.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`;
-                  const _extV = _sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '\u2248\u00a0$' + _sr2.extractedUsd.toFixed(2) + ' extracted' : 'detected';
-                  t += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV, '#FFB547');
+                    ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr2.attackerWallet)}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : '$0 \u2014 your slippage protection absorbed the attack.'}`
+                    : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr2.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : '$0 \u2014 your slippage protection absorbed the attack.'}`;
+                  const _hasLoss2 = _sr2.extractedUsd != null && _sr2.extractedUsd > 0.001;
+                  const _extV = _hasLoss2
+                    ? `<span style="color:#FFB547">\u2248\u00a0$${_sr2.extractedUsd.toFixed(2)} extracted</span>`
+                    : `<span style="color:#FFB547">\u26a0 detected</span><span style="color:#14F195"> \u00b7 $0 lost</span>`;
+                  t += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV);
                 } else if (_sr2 && !_sr2.detected) {
                   const _scan2 = _sr2.scanned > 0 ? `Scanned ${_sr2.scanned} transaction${_sr2.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.` : 'No sandwich activity detected.';
                   t += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, 'Not sandwiched \u2705', '#14F195');
@@ -2601,7 +2605,7 @@
               if (savingsUsd != null || _mevProt3 != null) t += `<div style="border-top:1px solid rgba(255,255,255,0.06);margin:4px 0 4px 10px"></div>`;
               t += sub('ZendIQ Fee (0.05%)', '<span style="color:#14F195;font-weight:600">FREE · Beta</span>');
               t += sub(`<span title="${h.routeSource === 'pump.fun' ? 'Priority fee baked into pumpportal.fun\'s transaction — not separately charged by ZendIQ.' : 'Compute unit price paid to Solana validators to prioritise your transaction. Baked into the transaction at quote time.'}" style="cursor:help">${h.routeSource === 'raydium' ? 'Priority Fee (via Raydium)' : h.routeSource === 'pump.fun' ? 'Priority fee (pumpportal.fun)' : 'Priority Fee (via Jupiter)'}</span>`, h.routeSource === 'pump.fun' && priFee == null ? 'included' : (priFee != null ? fmt(priFee) : '—'), h.routeSource === 'pump.fun' && priFee == null ? '#9B9BAD' : (priFee != null && priFee > 0 ? '#FFB547' : undefined));
-              t += sub(h.jitoBundle ? `<span title="Tip paid directly to Jito validators as part of an atomic bundle. ZendIQ submits your transaction + this tip together — validators are incentivised to include both atomically, blocking sandwich attacks before they execute." style="cursor:help">Jito Bundle Tip</span>` : `<span title="Tip routed via Jupiter to Jito validators who block sandwich attacks. This is NOT a Jito bundle — Jupiter prevents third-party bundling via a reserved account in every Ultra transaction." style="cursor:help">Jito Tip (via Jupiter)</span>`, h.jitoTipLamports > 0 ? fmt(jitoFee) : 'none', h.jitoTipLamports > 0 ? '#9945FF' : undefined);
+              t += sub((h.jitoBundle || h.routeSource === 'raydium' || h.routeSource === 'pump.fun') ? `<span title="Tip paid directly to Jito validators as part of an atomic bundle. ZendIQ submits your transaction + this tip together — validators are incentivised to include both atomically, blocking sandwich attacks before they execute." style="cursor:help">Jito Bundle Tip</span>` : `<span title="Tip routed via Jupiter to Jito validators who block sandwich attacks. This is NOT a Jito bundle — Jupiter prevents third-party bundling via a reserved account in every Ultra transaction." style="cursor:help">Jito Tip (via Jupiter)</span>`, h.jitoTipLamports > 0 ? fmt(jitoFee) : 'none', h.jitoTipLamports > 0 ? '#9945FF' : undefined);
               if (totalCost > 0) t += `<div style="display:flex;justify-content:space-between;gap:12px;margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.06)"><span style="color:#C2C2D4;padding-left:10px">Total</span><span style="color:#FFB547;font-weight:700">${fmt(totalCost)}</span></div>`;
 
               // Net Benefit — always shown; fall back to token display when USD prices unavailable
@@ -2836,7 +2840,7 @@
           const fmt = v => (v == null || !isFinite(v)) ? '—' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
           const fmtA = (val, sym) => { if (val == null) return '— '+(sym||''); const n=parseFloat(val); if (!isFinite(n)) return String(val)+' '+(sym||''); const abs=Math.abs(n); const p=abs>=1000?2:abs>=1?4:abs>=0.001?6:8; const [ip,dp]=n.toFixed(p).split('.'); return ip.replace(/\B(?=(\d{3})+(?!\d))/g,'.')+(dp?','+dp:'')+' '+(sym||''); };
           const fmtAgo = ts => { const s=Math.round((Date.now()-(ts||0))/1000); return s<60?s+'s ago':s<3600?Math.round(s/60)+'m ago':Math.round(s/3600)+'h ago'; };
-          const exchLbl = h.routeSource === 'pump.fun' ? (h.jitoBundle ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium · AMM + Jito' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':(h.optimized?'ZendIQ · AMM':'Jupiter · AMM');
+          const exchLbl = h.routeSource === 'pump.fun' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'Raydium · AMM + Jito Bundle' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':'Jupiter · AMM';
           const sol = h.solPriceUsd != null ? Number(h.solPriceUsd) : null;
           const SOL_MINT = 'So11111111111111111111111111111111111111112';
           const outputIsSol = h.outputMint === SOL_MINT || h.tokenOut === 'SOL' || h.tokenOut === 'WSOL';
@@ -2898,10 +2902,13 @@
               t += row(`<span title="Block data unavailable \u2014 sandwich check could not complete." style="cursor:help">Sandwich check</span>`, 'unknown', '#9B9BAD');
             } else if (_sr2?.detected) {
               const _tip2 = _sr2.attackerWallet
-                ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr2.attackerWallet)}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`
-                : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr2.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : 'unknown'}.`;
-              const _extV = _sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '\u2248\u00a0$' + _sr2.extractedUsd.toFixed(2) + ' extracted' : 'detected';
-              t += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV, '#FFB547');
+                ? `Detected buy-before / sell-after pattern from wallet ${escapeHtml(_sr2.attackerWallet)}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : '$0 \u2014 your slippage protection absorbed the attack.'}`
+                : `Detected buy-before / sell-after pattern (multi-wallet bot). Signals: ${(_sr2.signals ?? []).filter(s => s !== 'token_flow').map(s => ({'jito_bundle':'Jito bundle correlation','known_program':'known bot program'}[s] ?? s)).join(', ')}. Estimated extraction: ${_sr2.extractedUsd != null && _sr2.extractedUsd > 0.001 ? '~$' + _sr2.extractedUsd.toFixed(2) : '$0 \u2014 your slippage protection absorbed the attack.'}`;
+              const _hasLoss2 = _sr2.extractedUsd != null && _sr2.extractedUsd > 0.001;
+              const _extV = _hasLoss2
+                ? `<span style="color:#FFB547">\u2248\u00a0$${_sr2.extractedUsd.toFixed(2)} extracted</span>`
+                : `<span style="color:#FFB547">\u26a0 detected</span><span style="color:#14F195"> \u00b7 $0 lost</span>`;
+              t += row(`<span title="${_tip2}" style="cursor:help">\u26a0 Sandwiched</span>`, _extV);
             } else if (_sr2 && !_sr2.detected) {
               const _scan2 = _sr2.scanned > 0 ? `Scanned ${_sr2.scanned} transaction${_sr2.scanned !== 1 ? 's' : ''} in the same block for buy-before / sell-after patterns. No attack detected.` : 'No sandwich activity detected.';
               t += row(`<span title="${escapeHtml(_scan2)}" style="cursor:help">Sandwich check</span>`, 'Not sandwiched \u2705', '#14F195');
@@ -2928,7 +2935,7 @@
             if (savingsUsd != null || _mevProt2 != null) t += `<div style="border-top:1px solid rgba(255,255,255,0.06);margin:4px 0 4px 10px"></div>`;
             t += sub('ZendIQ Fee (0.05%)', '<span style="color:#14F195;font-weight:600">FREE · Beta</span>');
             t += sub(`<span title="${h.routeSource === 'pump.fun' ? 'Priority fee baked into pumpportal.fun\'s transaction — not separately charged by ZendIQ.' : 'Priority fee baked into the transaction at quote time.'}" style="cursor:help">${h.routeSource === 'raydium' ? 'Priority Fee (via Raydium)' : h.routeSource === 'pump.fun' ? 'Priority fee (pumpportal.fun)' : 'Priority Fee (via Jupiter)'}</span>`, h.routeSource === 'pump.fun' && priFee == null ? 'included' : (priFee != null ? fmt(priFee) : '—'), h.routeSource === 'pump.fun' && priFee == null ? '#9B9BAD' : (priFee != null && priFee > 0 ? '#FFB547' : undefined));
-            t += sub(h.jitoBundle ? `<span title="Tip paid directly to Jito validators as part of an atomic bundle. ZendIQ submits your transaction + this tip together — validators are incentivised to include both atomically, blocking sandwich attacks before they execute." style="cursor:help">Jito Bundle Tip</span>` : `<span title="Jito tip routed via Jupiter to validators who block sandwich attacks." style="cursor:help">Jito Tip (via Jupiter)</span>`, h.jitoTipLamports > 0 ? fmt(jitoFee) : 'none', h.jitoTipLamports > 0 ? '#9945FF' : undefined);
+            t += sub((h.jitoBundle || h.routeSource === 'raydium' || h.routeSource === 'pump.fun') ? `<span title="Tip paid directly to Jito validators as part of an atomic bundle. ZendIQ submits your transaction + this tip together — validators are incentivised to include both atomically, blocking sandwich attacks before they execute." style="cursor:help">Jito Bundle Tip</span>` : `<span title="Jito tip routed via Jupiter to validators who block sandwich attacks." style="cursor:help">Jito Tip (via Jupiter)</span>`, h.jitoTipLamports > 0 ? fmt(jitoFee) : 'none', h.jitoTipLamports > 0 ? '#9945FF' : undefined);
             if (totalCost > 0) t += `<div style="display:flex;justify-content:space-between;gap:12px;margin-top:4px;padding-top:4px;border-top:1px solid rgba(255,255,255,0.06)"><span style="color:#C2C2D4;padding-left:10px">Total</span><span style="color:#FFB547;font-weight:700">${fmt(totalCost)}</span></div>`;
             // ── Net Benefit / Actual Gain footer ──
             const _confirmed2 = h.quoteAccuracy != null && Number(h.quoteAccuracy) >= 99;
