@@ -2454,17 +2454,18 @@
             }
             // ── Tooltip builder ──────────────────────────────────────────
             function _zqBuildTipHtml(h) {
-              const fmt = v => (v == null || !isFinite(v)) ? '—' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
+              const fmt = v => (v == null || !isFinite(v)) ? '—' : (Math.abs(v) > 0 && Math.abs(v) < 0.0001) ? '< $0.0001' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
               const fmtA = (val, sym) => { if (val == null) return '— '+(sym||''); const n=parseFloat(val); if (!isFinite(n)) return String(val)+' '+(sym||''); const abs=Math.abs(n); const p=abs>=1000?2:abs>=1?4:abs>=0.001?6:8; const [ip,dp]=n.toFixed(p).split('.'); return ip.replace(/\B(?=(\d{3})+(?!\d))/g,'.')+(dp?','+dp:'')+' '+(sym||''); };
               const fmtAgo = ts => { const s=Math.round((Date.now()-(ts||0))/1000); return s<60?s+'s ago':s<3600?Math.round(s/60)+'m ago':Math.round(s/3600)+'h ago'; };
               const exchLbl = h.routeSource === 'pump.fun' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'Raydium · AMM + Jito Bundle' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':'Jupiter · AMM';
               const sol = h.solPriceUsd != null ? Number(h.solPriceUsd) : null;
+              const _solFb = (sol != null && isFinite(sol)) ? sol : 80; // $80 fallback for non-SOL pairs
               const SOL_MINT = 'So11111111111111111111111111111111111111112';
               const outputIsSol = h.outputMint === SOL_MINT || h.tokenOut === 'SOL' || h.tokenOut === 'WSOL';
               const opr = h.outputPriceUsd != null ? Number(h.outputPriceUsd) : (outputIsSol && sol != null ? sol : null);
               const outDec = Number(h.outputDecimals ?? 6);
-              const priFee  = h.priorityFeeUsd != null ? Number(h.priorityFeeUsd) : (h.priorityFeeLamports && sol ? (h.priorityFeeLamports / 1e9) * sol : null);
-              const jitoFee = h.jitoTipUsd != null ? Number(h.jitoTipUsd) : (h.jitoTipLamports && sol ? (h.jitoTipLamports / 1e9) * sol : null);
+              const priFee  = h.priorityFeeUsd != null ? Number(h.priorityFeeUsd) : (h.priorityFeeLamports ? (h.priorityFeeLamports / 1e9) * _solFb : null);
+              const jitoFee = h.jitoTipUsd != null ? Number(h.jitoTipUsd) : (h.jitoTipLamports ? (h.jitoTipLamports / 1e9) * _solFb : null);
               const totalCost = (priFee ?? 0) + (jitoFee ?? 0);
               const mevUsd = h.amountInUsd != null && h.priceImpactPct != null ? Number(h.amountInUsd) * Math.abs(parseFloat(h.priceImpactPct)) : null;
               // Tier 1: actual on-chain vs Jupiter baseline (most honest metric)
@@ -2675,6 +2676,7 @@
                 const outDec   = h.outputDecimals != null ? Number(h.outputDecimals) : 6;
                 let savLabel = 'Actual Gain (est.)', savText = '—', savColor = '#C2C2D4';
                 const sol = h.solPriceUsd != null ? Number(h.solPriceUsd) : null;
+                const _solFb = (sol != null && isFinite(sol)) ? sol : 80; // $80 fallback for non-SOL pairs
                 const SOL_M = 'So11111111111111111111111111111111111111112';
                 const outIsSol = h.outputMint === SOL_M || h.tokenOut === 'SOL';
                 const opr = h.outputPriceUsd != null ? Number(h.outputPriceUsd)
@@ -2682,9 +2684,9 @@
                   : (h.inputPriceUsd != null && Number(h.amountIn) > 0 && Number(h.amountOut) > 0
                       ? h.inputPriceUsd * Number(h.amountIn) / Number(h.amountOut) : null));
                 const priUsd = h.priorityFeeUsd != null ? Number(h.priorityFeeUsd)
-                  : (h.priorityFeeLamports && sol ? (h.priorityFeeLamports / 1e9) * sol : null);
+                  : (h.priorityFeeLamports ? (h.priorityFeeLamports / 1e9) * _solFb : null);
                 const jitoUsd = h.jitoTipUsd != null ? Number(h.jitoTipUsd)
-                  : (h.jitoTipLamports && sol ? (h.jitoTipLamports / 1e9) * sol : null);
+                  : (h.jitoTipLamports ? (h.jitoTipLamports / 1e9) * _solFb : null);
                 let savUsd = null;
                 if (h.baselineRawOut != null && h.rawOutAmount != null && opr != null) {
                   const _zs = Number(h.rawOutAmount), _bs = Number(h.baselineRawOut);
@@ -2837,17 +2839,18 @@
           document.body.appendChild(_t); return _t;
         })();
         function _zqBuildTipHtml(h) {
-          const fmt = v => (v == null || !isFinite(v)) ? '—' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
+          const fmt = v => (v == null || !isFinite(v)) ? '—' : (Math.abs(v) > 0 && Math.abs(v) < 0.0001) ? '< $0.0001' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
           const fmtA = (val, sym) => { if (val == null) return '— '+(sym||''); const n=parseFloat(val); if (!isFinite(n)) return String(val)+' '+(sym||''); const abs=Math.abs(n); const p=abs>=1000?2:abs>=1?4:abs>=0.001?6:8; const [ip,dp]=n.toFixed(p).split('.'); return ip.replace(/\B(?=(\d{3})+(?!\d))/g,'.')+(dp?','+dp:'')+' '+(sym||''); };
           const fmtAgo = ts => { const s=Math.round((Date.now()-(ts||0))/1000); return s<60?s+'s ago':s<3600?Math.round(s/60)+'m ago':Math.round(s/3600)+'h ago'; };
           const exchLbl = h.routeSource === 'pump.fun' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'pump.fun + Jito Bundle' : 'pump.fun') : h.routeSource === 'raydium' ? ((h.jitoBundle || h.jitoTipLamports > 0) ? 'Raydium · AMM + Jito Bundle' : 'Raydium · AMM') : h.swapType==='rfq'?'RFQ · Jupiter':h.swapType==='gasless'?'Gasless · Jupiter':'Jupiter · AMM';
           const sol = h.solPriceUsd != null ? Number(h.solPriceUsd) : null;
+          const _solFb = (sol != null && isFinite(sol)) ? sol : 80; // $80 fallback for non-SOL pairs
           const SOL_MINT = 'So11111111111111111111111111111111111111112';
           const outputIsSol = h.outputMint === SOL_MINT || h.tokenOut === 'SOL' || h.tokenOut === 'WSOL';
           const opr = h.outputPriceUsd != null ? Number(h.outputPriceUsd) : (outputIsSol && sol != null ? sol : null);
           const outDec = Number(h.outputDecimals ?? 6);
-          const priFee  = h.priorityFeeUsd != null ? Number(h.priorityFeeUsd) : (h.priorityFeeLamports && sol ? (h.priorityFeeLamports / 1e9) * sol : null);
-          const jitoFee = h.jitoTipUsd != null ? Number(h.jitoTipUsd) : (h.jitoTipLamports && sol ? (h.jitoTipLamports / 1e9) * sol : null);
+          const priFee  = h.priorityFeeUsd != null ? Number(h.priorityFeeUsd) : (h.priorityFeeLamports ? (h.priorityFeeLamports / 1e9) * _solFb : null);
+          const jitoFee = h.jitoTipUsd != null ? Number(h.jitoTipUsd) : (h.jitoTipLamports ? (h.jitoTipLamports / 1e9) * _solFb : null);
           const totalCost = (priFee ?? 0) + (jitoFee ?? 0);
           const _mevRScore = h.mevRiskScore ?? 0;
           const _mevELP = h.mevEstimatedLossPercent != null ? h.mevEstimatedLossPercent / 100 : (_mevRScore >= 75 ? 0.012 : _mevRScore >= 50 ? 0.006 : _mevRScore >= 25 ? 0.003 : 0);

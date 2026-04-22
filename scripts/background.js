@@ -134,8 +134,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .then(async r => {
         if (!r.ok) {
           const status = r.status;
-          // 429/503 = rate-limit/overload (expected)
-          const _isSilent = status === 429 || status === 503;
+          // 429/503 = rate-limit/overload (expected); 400 from Jito = bundle rejected (expected)
+          const _isSilent = status === 429 || status === 503 || (status === 400 && msg.url.includes('jito.wtf'));
           if (!_isSilent) console.error('[SR bg] FETCH_JSON_POST error: HTTP', status, msg.url);
           sendResponse({ ok: false, error: 'HTTP ' + status, status });
           return;

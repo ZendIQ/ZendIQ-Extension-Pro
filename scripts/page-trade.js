@@ -484,7 +484,7 @@
       // ordering is set by the tip tx amount. Reserve = tip lamports + 906_880 (rent floor).
       // Non-bundling path: reserve for worst-case CU price. Raydium routing can use up to
       // 1.4M CU (7× our 200k assumption), so actual fee can be 7× priorityFeeLamports.
-      const _rdmBundling = (jitoTipLamports ?? 0) >= 1000;
+      const _rdmBundling = (ns.jitoMode ?? 'auto') !== 'never';
       const _rdmFeeReserve = (inputMint === _SOL_MINT)
         ? Math.max(1_000_000, (
             _rdmBundling
@@ -685,7 +685,10 @@
       const _isRdmBundleOrder = order._source === 'raydium' && _rdmBundling;
       ns.widgetLastOrderFees       = {
         priorityFeeLamports: (_isNoFeeRoute || _isRdmBundleOrder) ? 0 : (priorityFeeLamports ?? 0),
-        jitoTipLamports:     _isNoFeeRoute ? 0 : (jitoTipLamports ?? 0),
+        // Raydium bundles always use at least 1 000 lamports (same floor as signWidgetSwap).
+        // Without this, low-risk trades (calcDynamicFees → 0 tip) show no bundle row in
+        // Review & Sign even though a real bundle is submitted at sign time.
+        jitoTipLamports: _isNoFeeRoute ? 0 : _isRdmBundleOrder ? Math.max(jitoTipLamports ?? 0, 1_000) : (jitoTipLamports ?? 0),
       };
 
       // -- Forced AMM re-fetch for MEV protection --------------------------
@@ -1646,13 +1649,100 @@
               let [nAccts, pKeys] = _cu(txBytes, p); p = pKeys + nAccts * 32;
               return { isV0, blockhash: txBytes.slice(p, p + 32) };
             }
+            // Jito sandwich mitigation: inject a jitodontfront read-only account into each
+            // Raydium swap tx BEFORE the user signs. The block engine rejects any bundle that
+            // places another transaction before the tx containing this account, preventing
+            // front-run / sandwich wrapping. Appended as the last static read-only unsigned
+            // account in the V0 message. Jito's block engine scans all account keys directly —
+            // no need to attach it to any instruction's accounts list (and doing so would
+            // corrupt instructions like SetComputeUnitLimit that expect 0 accounts).
+            // Fails open: returns original base64 unmodified on any parse error.
+            function _injectDontFront(txB64) {
+              try {
+                const DF_B58  = 'jitodontfront111111111111111111111111111111';
+                const dfBytes = ns.b58Decode(DF_B58);
+                const raw     = Uint8Array.from(atob(txB64), c => c.charCodeAt(0));
+                const _rcu = (buf, pos) => { let v = buf[pos++]; if (v & 0x80) v = (v & 0x7f) | (buf[pos++] << 7); return [v, pos]; };
+                const _wcu = n => n < 128 ? new Uint8Array([n]) : new Uint8Array([0x80 | (n & 0x7f), n >> 7]);
+                let p = 0;
+                let [nSigs, p2] = _rcu(raw, p); p = p2;
+                const sigSec = raw.slice(0, p + nSigs * 64);
+                p += nSigs * 64;
+                if ((raw[p] & 0x80) === 0) return txB64; // legacy tx — skip
+                p++; // V0 prefix
+                const numReqSigs  = raw[p];
+                const numROSigned = raw[p + 1];
+                const numROUnsig  = raw[p + 2];
+                p += 3;
+                let [numStatic, p3] = _rcu(raw, p); p = p3;
+                const staticBytes = raw.slice(p, p + numStatic * 32);
+                p += numStatic * 32;
+                const blockhash = raw.slice(p, p + 32);
+                p += 32;
+                let [numInstrs, p4] = _rcu(raw, p); p = p4;
+                const instrs = [];
+                for (let i = 0; i < numInstrs; i++) {
+                  const progIdx = raw[p++];
+                  let [nA, p5] = _rcu(raw, p); p = p5;
+                  const accts = Array.from(raw.slice(p, p + nA)); p += nA;
+                  let [dLen, p6] = _rcu(raw, p); p = p6;
+                  const data = raw.slice(p, p + dLen); p += dLen;
+                  instrs.push({ progIdx, accts, data });
+                }
+                const altSec = raw.slice(p);
+                // Already has dontfront? skip
+                for (let i = 0; i < numStatic; i++) {
+                  if (staticBytes.slice(i * 32, i * 32 + 32).every((b, j) => b === dfBytes[j])) return txB64;
+                }
+                // Append DontFront as the last static read-only unsigned account.
+                // All ALT-indexed refs in instructions must be shifted +1 since static table grew.
+                const newNumStatic = numStatic + 1;
+                const newROUnsig   = numROUnsig + 1;
+                const newInstrs = instrs.map(instr => ({
+                  progIdx: instr.progIdx >= numStatic ? instr.progIdx + 1 : instr.progIdx,
+                  accts:   instr.accts.map(idx => idx >= numStatic ? idx + 1 : idx),
+                  data:    instr.data,
+                }));
+                const encInstrs = list => {
+                  const parts = [];
+                  for (const ix of list) {
+                    parts.push(new Uint8Array([ix.progIdx]));
+                    parts.push(_wcu(ix.accts.length));
+                    parts.push(new Uint8Array(ix.accts));
+                    parts.push(_wcu(ix.data.length));
+                    if (ix.data.length) parts.push(new Uint8Array(ix.data));
+                  }
+                  return parts;
+                };
+                const parts = [
+                  new Uint8Array([0x80]),
+                  new Uint8Array([numReqSigs, numROSigned, newROUnsig]),
+                  _wcu(newNumStatic), staticBytes, dfBytes,
+                  blockhash,
+                  _wcu(newInstrs.length), ...encInstrs(newInstrs),
+                  altSec,
+                ];
+                const msgLen = parts.reduce((s, a) => s + a.length, 0);
+                const newMsg = new Uint8Array(msgLen);
+                let off = 0; for (const part of parts) { newMsg.set(part, off); off += part.length; }
+                const fullTx = new Uint8Array(sigSec.length + newMsg.length);
+                fullTx.set(sigSec); fullTx.set(newMsg, sigSec.length);
+                let b64 = ''; for (let i = 0; i < fullTx.length; i++) b64 += String.fromCharCode(fullTx[i]);
+                return btoa(b64);
+              } catch (_e) {
+                console.warn('[ZendIQ] DontFront injection skipped:', _e.message);
+                return txB64; // fail-open — swap proceeds without DontFront
+              }
+            }
             const _lastRdmRaw = Uint8Array.from(atob(_rdmTxsToSign[_rdmTxsToSign.length - 1]), c => c.charCodeAt(0));
             const { isV0: _rdmIsV0, blockhash: _rdmBlockhash } = _parseSwapMeta(_lastRdmRaw);
             const _tipTxRaw = _buildRdmTipTx(_bundleWallet, _rdmBlockhash, _jitoBundleTip, _rdmIsV0);
 
-            // Bundle = all Raydium txs unmodified + tip tx last.
+            // Bundle = [Raydium txs with DontFront injected] + tip tx last.
+            // _injectDontFront rewrites unsigned message bytes before wallet signing.
+            const _dontFrontB64 = _rdmTxsToSign.map(_injectDontFront);
             const _toSignRaw = [
-              ..._rdmTxsToSign.map(b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0))),
+              ..._dontFrontB64.map(b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0))),
               _tipTxRaw,
             ];
 
@@ -1900,8 +1990,8 @@
             }
 
             data = { status: 'Success', signature: rpcSig, jitoTipSig: _jitoTipSig ?? null, bundleId: _bundleId ?? null };
-            // Now that bundle is confirmed, record the actual tip paid in widgetLastOrderFees
-            // so Activity shows the correct cost (0 for low-risk trades that skipped the floor).
+            // Safety: if _jitoBundleTip was somehow raised above what fetchWidgetQuote stored
+            // (e.g. a future code path), record the actual tip paid so Activity stays accurate.
             if (ns.widgetLastOrderFees && _jitoBundleTip > (ns.widgetLastOrderFees.jitoTipLamports ?? 0)) {
               ns.widgetLastOrderFees = { ...ns.widgetLastOrderFees, jitoTipLamports: _jitoBundleTip };
             }

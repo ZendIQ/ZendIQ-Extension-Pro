@@ -165,9 +165,17 @@
         const feePayer = _feePayer(userTx);
         if (!feePayer) return { error: 'unavailable' };
 
-        const _accountKeys = (userTx.transaction?.message?.accountKeys ?? [])
+        const _staticKeys = (userTx.transaction?.message?.accountKeys ?? [])
           .map(k => (typeof k === 'string' ? k : k?.pubkey))
           .filter(Boolean);
+        // For V0 transactions (Raydium CLMM/CPMM) pool vault accounts are ALT-loaded.
+        // preTokenBalances[].accountIndex uses the FULL ordered list:
+        //   [static keys] + [ALT writable] + [ALT readonly]
+        // Without appending these, vault indices beyond staticKeys.length return undefined,
+        // leaving _poolVaults empty and causing 'unavailable' for every CLMM sandwich check.
+        const _altWritable = userTx.meta?.loadedAddresses?.writable ?? [];
+        const _altReadonly = userTx.meta?.loadedAddresses?.readonly ?? [];
+        const _accountKeys = [..._staticKeys, ..._altWritable, ..._altReadonly];
 
         // Pool vault accounts: appear in preTokenBalances with an owner that
         // is NOT the user's fee payer (i.e. owned by the DEX program).

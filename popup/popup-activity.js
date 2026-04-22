@@ -77,7 +77,7 @@ function calcSavingsDisplay(h) {
 // ─── Helpers / per-entry rendering ───────────────────────────────────────────
 // ─── Savings breakdown (USD) for hover tooltip ───────────────────────────────
 function _calcBreakdown(h) {
-  const fmt   = v => (v == null || !isFinite(v)) ? '—' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
+  const fmt   = v => (v == null || !isFinite(v)) ? '—' : (Math.abs(v) > 0 && Math.abs(v) < 0.0001) ? '< $0.0001' : '$' + (Math.abs(v) < 0.01 ? Math.abs(v).toFixed(4) : Math.abs(v).toFixed(3));
   const sol   = h.solPriceUsd    != null ? Number(h.solPriceUsd)    : null;
   const SOL_MINT = 'So11111111111111111111111111111111111111112';
   const outputIsSol = h.outputMint === SOL_MINT || h.tokenOut === 'SOL' || h.tokenOut === 'WSOL';
@@ -87,7 +87,7 @@ function _calcBreakdown(h) {
 
   const serviceFeeUsd  = 0; // Not yet extracted — free during beta
   // Prefer pre-computed values (stored at swap time when SOL price was fresh)
-  const _solForFees    = sol ?? 80; // conservative SOL price floor for non-SOL pairs
+  const _solForFees    = (sol != null && isFinite(sol)) ? sol : 80; // $80 floor; guards NaN for non-SOL pairs
   const priorityFeeUsd = h.priorityFeeUsd != null ? Number(h.priorityFeeUsd)
     : (h.priorityFeeLamports ? (h.priorityFeeLamports / 1e9) * _solForFees : null);
   const jitoTipUsd     = h.jitoTipUsd != null ? Number(h.jitoTipUsd)
