@@ -1476,7 +1476,7 @@
         // mevNetUsd: kept for display logic — only set on the MEV-only fallback path
         const mevNetUsd = _routingNet == null && netUsd != null ? netUsd : null;
         const _effectiveNet = netUsd;
-        const hasUsd = priUsd != null;
+        const hasUsd = priUsd != null || jitoUsd != null;
         // Any negative net means ZendIQ's route costs the user money vs Jupiter.
         // Threshold is -0.00005 (not exactly 0) to absorb floating-point noise on
         // break-even trades — avoids amber button on a true $0.0000 net.
