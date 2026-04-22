@@ -2601,7 +2601,7 @@
                 ? `<span title="RFQ direct fill bypasses the public mempool entirely \u2014 zero sandwich/front-run exposure. ZendIQ routed you to a market maker instead of an AMM pool, eliminating bot attack risk completely (100% coverage vs ~70% with Jito)." style="cursor:help">Bot protection (RFQ \u00b7 100%)</span>`
                 : `<span title="Statistical MEV protection value: estimated bot-attack exposure \xd7 ${Math.round(_mevMult3 * 100)}% coverage rate from Jito routing." style="cursor:help">Bot protection (\xd7${Math.round(_mevMult3 * 100)}%)</span>`;
               t += `<div style="margin:8px 0 4px;color:#C2C2D4;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;cursor:help" title="Routing improvement achieved by ZendIQ\u2019s route vs Jupiter\u2019s concurrent quote, plus statistical MEV protection value, minus all associated costs.">Savings &amp; Costs</div>`;
-              if (savingsUsd != null) { const _absS3 = Math.abs(savingsUsd), _tiny3 = _absS3 < 0.0001; t += sub(`<span title="Extra USD value ZendIQ\u2019s route obtained vs Jupiter\u2019s concurrent live quote at sign time (gross, before costs)." style="cursor:help">Est. Routing improvement</span>`, _tiny3 ? '\u2248\u00a0none' : (savingsUsd >= 0 ? '+' : '\u2212') + fmt(_absS3), _tiny3 ? '#C2C2D4' : (savingsUsd >= 0 ? '#14F195' : '#FF4D4D')); }
+              if (savingsUsd != null) { const _absS3 = Math.abs(savingsUsd), _tiny3 = _absS3 < 0.0001; t += sub((h.routeSource === 'pump.fun' ? `<span title="SOL bots could no longer extract once slippage was reduced to 0.5%, minus the Jito bundle tip. Gross protection value before costs." style="cursor:help">Bot protection savings</span>` : `<span title="Extra USD value ZendIQ\u2019s route obtained vs Jupiter\u2019s concurrent live quote at sign time (gross, before costs)." style="cursor:help">Est. Routing improvement</span>`), _tiny3 ? '\u2248\u00a0none' : (savingsUsd >= 0 ? '+' : '\u2212') + fmt(_absS3), _tiny3 ? '#C2C2D4' : (savingsUsd >= 0 ? '#14F195' : '#FF4D4D')); }
               if (_mevProt3 != null) t += sub(_mevLabel3, '+' + fmt(_mevProt3), '#9945FF');
               if (savingsUsd != null || _mevProt3 != null) t += `<div style="border-top:1px solid rgba(255,255,255,0.06);margin:4px 0 4px 10px"></div>`;
               t += sub('ZendIQ Fee (0.05%)', '<span style="color:#14F195;font-weight:600">FREE · Beta</span>');
@@ -2933,7 +2933,7 @@
               ? h.snapMevProtectionUsd
               : (mevUsd != null && (jitoFee ?? 0) > 0 && mevUsd * _mevMult2 >= 0.0001) ? mevUsd * _mevMult2 : null;
             t += `<div style="margin:8px 0 4px;color:#C2C2D4;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;cursor:help" title="Routing improvement achieved by ZendIQ\u2019s route vs Jupiter\u2019s concurrent quote, plus statistical MEV protection value, minus all associated costs.">Savings &amp; Costs</div>`;
-            if (savingsUsd != null) { const _absS2 = Math.abs(savingsUsd), _tiny2 = _absS2 < 0.0001; t += sub(`<span title="Extra USD value ZendIQ\u2019s route obtained vs Jupiter\u2019s concurrent live quote at sign time (gross, before costs)." style="cursor:help">Est. Routing improvement</span>`, _tiny2 ? '\u2248\u00a0none' : (savingsUsd >= 0 ? '+' : '\u2212') + fmt(_absS2), _tiny2 ? '#C2C2D4' : (savingsUsd >= 0 ? '#14F195' : '#FF4D4D')); }
+            if (savingsUsd != null) { const _absS2 = Math.abs(savingsUsd), _tiny2 = _absS2 < 0.0001; t += sub((h.routeSource === 'pump.fun' ? `<span title="SOL bots could no longer extract once slippage was reduced to 0.5%, minus the Jito bundle tip. Gross protection value before costs." style="cursor:help">Bot protection savings</span>` : `<span title="Extra USD value ZendIQ\u2019s route obtained vs Jupiter\u2019s concurrent live quote at sign time (gross, before costs)." style="cursor:help">Est. Routing improvement</span>`), _tiny2 ? '\u2248\u00a0none' : (savingsUsd >= 0 ? '+' : '\u2212') + fmt(_absS2), _tiny2 ? '#C2C2D4' : (savingsUsd >= 0 ? '#14F195' : '#FF4D4D')); }
             if (_mevProt2 != null) t += sub(`<span title="Statistical MEV protection value: estimated bot-attack exposure \xd7 ${Math.round(_mevMult2 * 100)}% coverage rate from Jito routing. Covers most sandwich attacks before they execute." style="cursor:help">Bot protection (\xd7${Math.round(_mevMult2 * 100)}%)</span>`, '+' + fmt(_mevProt2), '#9945FF');
             if (savingsUsd != null || _mevProt2 != null) t += `<div style="border-top:1px solid rgba(255,255,255,0.06);margin:4px 0 4px 10px"></div>`;
             t += sub('ZendIQ Fee (0.05%)', '<span style="color:#14F195;font-weight:600">FREE · Beta</span>');
@@ -3387,7 +3387,9 @@
       #sr-widget.expanded #sr-pill {
         border-radius: 16px 16px 0 0;
         border-bottom-color: rgba(153,69,255,0.15);
-        background: linear-gradient(135deg, rgba(153,69,255,0.14), rgba(20,241,149,0.07));
+        background: linear-gradient(135deg, #1E1530, #12121E);
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
         cursor: grab;
       }
       #sr-pill-shield { width:20px; height:20px; flex-shrink:0; }
@@ -3459,7 +3461,10 @@
         border-color: rgba(153,69,255,0.25);
         box-shadow:0 12px 40px rgba(0,0,0,0.5);
       }
-      #sr-body-inner { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; padding:0; }
+      #sr-body-inner { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; padding:0; scrollbar-width:thin; scrollbar-color:rgba(153,69,255,0.3) transparent; }
+      #sr-body-inner::-webkit-scrollbar { width:4px; }
+      #sr-body-inner::-webkit-scrollbar-track { background:transparent; }
+      #sr-body-inner::-webkit-scrollbar-thumb { background:rgba(153,69,255,0.3); border-radius:2px; }
       #sr-footer { flex-shrink:0; display:none; padding:6px 14px; border-top:1px solid rgba(255,255,255,0.06); background:#12121E; display:flex; justify-content:space-between; align-items:center; font-size:11px; color:#6B6B8A; font-family:'DM Sans',sans-serif; border-radius:0 0 16px 16px; }
       #sr-widget.expanded #sr-footer { display:flex; }
 

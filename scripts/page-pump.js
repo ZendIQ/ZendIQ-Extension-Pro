@@ -447,7 +447,7 @@
 
   // â”€â”€ Fetch pre-built tx from pumpportal.fun (0.5% slippage) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Returns raw Uint8Array tx bytes or throws.
-  async function _fetchPumpportalTx(mint, solAmount, user) {
+  async function _fetchPumpportalTx(mint, solAmount, user, slippage = 0.5) {
     // Single-object body — pumpportal returns raw binary tx bytes (not JSON, not base58).
     // b58Decode is designed for 32-byte keys; using it on a full tx truncates to 32 bytes.
     const reqBody = JSON.stringify({
@@ -456,7 +456,7 @@
       mint,
       amount:           solAmount,
       denominatedInSol: 'true',
-      slippage:         0.5,       // 0.5% — pumpportal takes percentage, not bps
+      slippage:         slippage,  // percentage — caller-supplied; default 0.5%, up to 1.0% with Jito bundle
       priorityFee:      0.0001,   // SOL — added as compute budget priority fee in the tx
       pool:             'auto',    // 'auto' covers bonding curve + pump-amm + Raydium; 'pump' only targets bonding curve and 400s on migrated tokens
     });
@@ -499,10 +499,71 @@
     return copy;
   }
 
+  // ── Inject jitodontfront account into a pump.fun tx (legacy or v0) ──────────
+  // Appends the DontFront pubkey as the last static read-only unsigned account.
+  // No instruction references it — Jito's block engine scans the account table
+  // directly to recognise the sandwich-protection signal.
+  // Works for both legacy and v0 messages; fail-open on any parse error.
+  function _injectDontFrontPump(txBytes) {
+    const DF_B58 = 'jitodontfront111111111111111111111111111111';
+    if (!ns.b58Decode) return txBytes;
+    try {
+      const dfBytes = ns.b58Decode(DF_B58);
+      if (!dfBytes || dfBytes.length !== 32) return txBytes;
+
+      const _cu    = (buf, p) => { let v = buf[p++]; if (v & 0x80) v = (v & 0x7F) | (buf[p++] << 7); return [v, p]; };
+      const _encCU = (n) => n < 128 ? [n] : [0x80 | (n & 0x7F), n >> 7];
+
+      // Parse envelope
+      let p = 0;
+      const [, p1] = _cu(txBytes, p);
+      const nSigs  = txBytes[0] & 0x7F; // safe: compact-u16, always < 128 for normal txs
+      const sigEnd = p1 + nSigs * 64;
+
+      // Locate message header
+      const msgStart = sigEnd;
+      const isV0     = (txBytes[msgStart] & 0x80) !== 0;
+      const hdrStart = isV0 ? msgStart + 1 : msgStart;
+
+      // Header: [numReqSig, numROSigned, numROUnsigned]
+      const numROUnsigned = txBytes[hdrStart + 2];
+
+      // Static account keys start after the 3-byte header + compact-u16 nAccts
+      let [nAccts, keysStart] = _cu(txBytes, hdrStart + 3);
+
+      // Already injected?
+      for (let i = 0; i < nAccts; i++) {
+        const off = keysStart + i * 32;
+        if (dfBytes.every((b, j) => b === txBytes[off + j])) return txBytes;
+      }
+
+      // Append DontFront as last static key (last readonly-unsigned position).
+      // numROUnsigned++, nAccts++ — no instruction index shifts needed because
+      // no instruction ever references this account.
+      const keysEnd   = keysStart + nAccts * 32;
+      const newNAccts = _encCU(nAccts + 1);
+
+      const out = [];
+      // Sig count + sigs (everything before the message)
+      for (let i = 0; i < msgStart; i++) out.push(txBytes[i]);
+      if (isV0) out.push(0x80);                                        // version byte
+      out.push(txBytes[hdrStart], txBytes[hdrStart + 1], numROUnsigned + 1); // header
+      out.push(...newNAccts);                                          // new nAccts
+      for (let i = keysStart; i < keysEnd; i++) out.push(txBytes[i]); // existing keys
+      for (let i = 0; i < 32; i++) out.push(dfBytes[i]);              // DontFront key
+      for (let i = keysEnd; i < txBytes.length; i++) out.push(txBytes[i]); // rest unchanged
+
+      return new Uint8Array(out);
+    } catch (e) {
+      console.warn('[ZendIQ PUMP] DontFront injection failed:', e.message);
+      return txBytes; // fail-open — swap proceeds without DontFront
+    }
+  }
+
   // â”€â”€ Full sign + submit orchestrator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // Called when user clicks "Sign at 0.5% slippage". Fetches a pre-built tx
-  // from pumpportal.fun (raw binary, 0.5% slippage, priority fee), injects a Jito tip
-  // instruction directly into the tx, signs, and submits as a single-tx Jito bundle.
+  // Called when user clicks "Sign at X% slippage". Fetches a pre-built tx from
+  // pumpportal.fun (optimised slippage: 0.5% default, up to 1.0% when user set ≥1%,
+  // plus priority fee), injects a Jito tip, signs, and submits as a single-tx Jito bundle.
   async function _signAndSubmitPumpTx() {
     const pfc = ns.pumpFunContext;
     if (!pfc) return;
@@ -511,12 +572,15 @@
     if (!mint || !solAmount) return;
     const user = ns.resolveWalletPubkey?.();
     if (!user) return;
+    // Optimised slippage: clamp user's tolerance to [0.5%, 1.0%].
+    // Jito bundle + DontFront protect against bots so 1% fills more often without extra risk.
+    const _ziqSlip = pfc.ziqSlip ?? Math.min(1.0, Math.max(0.5, pfc.slippagePct ?? 1.0));
 
     ns.widgetSwapStatus = 'pump-signing';
     try { ns.renderWidgetPanel?.(); } catch (_) {}
 
     try {
-      // 1. Fetch pre-built tx from pumpportal.fun (0.5% slippage baked in by API)
+      // 1. Fetch pre-built tx from pumpportal.fun (optimised ZendIQ slippage baked in by API)
       //    Use prefetched tx if available and fresh (fetched during panel review time);
       //    otherwise fetch now. Prefetch TTL is 45s — well inside pumpportal's 60s window.
       let rawTxBytes;
@@ -526,7 +590,7 @@
       if (_prefetch?.bytes && _prefetchAge < 45_000) {
         rawTxBytes = _prefetch.bytes;
       } else {
-        rawTxBytes = await _fetchPumpportalTx(mint, solAmount, user);
+        rawTxBytes = await _fetchPumpportalTx(mint, solAmount, user, _ziqSlip);
       }
 
       // 2. Extract expected token output from pumpportal's tx for Activity recording
@@ -534,14 +598,14 @@
       const expectedTokensRaw = _ixData?.tokenAmountRaw ?? 0;
       if (ns.pumpFunContext) ns.pumpFunContext.expectedTokenOutRaw = expectedTokensRaw;
 
-      // 3. Calculate Jito tip — must not exceed the sandwich exposure (0.5% slippage loss).
+      // 3. Calculate Jito tip — must not exceed the sandwich exposure (ZendIQ slippage tolerance).
       //    tip = 80% of exposure → user keeps 20% as net savings from protection.
       //    Below _PUMP_BUNDLE_MIN_SOL the exposure is smaller than any competitive tip — skip bundle.
-      const _sandwichExposureLam = Math.round(solAmount * 1e9 * 0.005);
+      const _sandwichExposureLam = Math.round(solAmount * 1e9 * _ziqSlip / 100);
       if (solAmount < _PUMP_BUNDLE_MIN_SOL) {
         // Trade too small to bundle profitably — submit direct via RPC.
         // Show explanation card while wallet prompt is open.
-        const _expLamDirect = Math.round(solAmount * 1e9 * 0.005);
+        const _expLamDirect = Math.round(solAmount * 1e9 * _ziqSlip / 100);
         ns._pumpDirectExpLam = _expLamDirect; // used by _renderDirectSigning
         ns.widgetSwapStatus = 'pump-direct-signing';
         try { ns.renderWidgetPanel?.(); } catch (_) {}
@@ -581,8 +645,13 @@
       const injectedTxBytes = _injectJitoTip(freshTxBytes, _tipLamports);
       if (!injectedTxBytes) throw new Error('Failed to inject Jito tip — cannot submit bundle');
 
+      // 4b. Inject DontFront account -- signals Jito block engine this tx is
+      // sandwich-protected. Appended as last static read-only unsigned account;
+      // no instruction references it so no index shifts are needed.
+      const _withDontFront = _injectDontFrontPump(injectedTxBytes);
+
       // 5. Sign single tx with wallet (one prompt)
-      const signedBytes = await _wsSignTx(injectedTxBytes);
+      const signedBytes = await _wsSignTx(_withDontFront);
       if (!signedBytes) throw new Error('Wallet returned no signed bytes');
       const _sigFilled = signedBytes.slice(1, 65).some(b => b !== 0);
 
@@ -735,6 +804,23 @@
         ?? null;
       ns._pumpFunCachedExpectedOut = null; // consume
       const _outDec = 6; // pump.fun tokens are always 6 decimals
+
+      // ── Compute slippage-protection savings for Activity Actual Gain ──────────
+      // For ZendIQ-optimized pump trades the "gain" is: the SOL bots could have
+      // extracted at the user's original slippage (vs. ZendIQ's enforced 0.5%)
+      // minus the Jito bundle tip paid for atomic protection.
+      // Formula mirrors the Est. Net Benefit shown on the Review & Sign panel.
+      const _origSlip   = pfc?.slippagePct ?? 1;
+      const _botWindow  = solAmt != null ? solAmt * _origSlip / 100 : null;        // max extractable at orig slippage
+      // Jito bundle + DontFront atomically prevents ALL sandwich extraction within the bot window.
+      // Value = full window when using Jito; slippage-reduction delta only on direct (no bundle) path.
+      const _savSol     = optimized && tipLamports > 0 && _botWindow != null
+        ? _botWindow  // Jito bundle: entire bot window is protected
+        : (_botWindow != null ? Math.max(0, _botWindow - (solAmt ?? 0) * (pfc?.ziqSlip ?? 0.5) / 100) : null);
+      const _snapSavUsd = optimized && _savSol != null ? _savSol * solP : null;
+      const _tipUsdSnap = optimized && tipLamports > 0 ? (tipLamports / 1e9) * solP : 0;
+      const _snapNetUsd = _snapSavUsd != null ? _snapSavUsd - _tipUsdSnap : null;
+
       const entry = {
         signature:   sig,
         tokenIn:     'SOL',
@@ -765,6 +851,10 @@
         inUsdValue:  _inUsd,
         outUsdValue: null, // filled by fetchActualOut
         sandwichResult: null, // placeholder — updated async by sandwich detection below
+        // Slippage-protection savings snapshot (mirrors Est. Net Benefit on Review & Sign panel):
+        // bot extraction window at original vs 0.5% slippage, minus Jito tip cost.
+        snapSavingsUsd: _snapSavUsd,
+        snapNetUsd:     _snapNetUsd,
       };
       window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: entry } }, '*');
       // On-chain output amount + quote accuracy enrichment.
@@ -1458,6 +1548,7 @@
         tokenSymbol: ns.tokenScoreResult?.symbol ?? null,
         solAmount:   solAmt,
         slippagePct: slip,
+        ziqSlip:     Math.min(1.0, Math.max(0.5, slip)),
         risk:        pfRisk ?? null,
         tokenScore:  ns.tokenScoreResult ?? null,
       };
@@ -1482,7 +1573,7 @@
         ns._pumpPrefetchedTx      = null;
         const _prefetchUser = ns.resolveWalletPubkey?.();
         if (_prefetchUser) {
-          _fetchPumpportalTx(ns.pumpFunContext.outputMint, ns.pumpFunContext.solAmount, _prefetchUser)
+          _fetchPumpportalTx(ns.pumpFunContext.outputMint, ns.pumpFunContext.solAmount, _prefetchUser, ns.pumpFunContext.ziqSlip)
             .then(bytes => { ns._pumpPrefetchedTx = { bytes, fetchedAt: Date.now() }; })
             .catch(() => {}); // silent — _signAndSubmitPumpTx will re-fetch on failure
         }
@@ -1628,6 +1719,7 @@
 
       const pfc  = ns.pumpFunContext;
       const slip = pfc.slippagePct ?? 1;
+      const _ziqSl = pfc.ziqSlip ?? Math.min(1.0, Math.max(0.5, slip));
       const solP = ns.widgetLastPriceData?.solPriceUsd ?? 80;
       const ts   = (ns.tokenScoreResult?.mint === pfc.outputMint && ns.tokenScoreResult?.loaded)
         ? ns.tokenScoreResult : pfc.tokenScore;
@@ -1650,7 +1742,11 @@
       const fmtU      = v => v < 0.001 ? `~$${v.toFixed(4)}` : v < 0.01 ? `~$${v.toFixed(3)}` : `~$${v.toFixed(2)}`;
       const botWin    = pfc.solAmount > 0 ? pfc.solAmount * (slip / 100) : null;
       const botWinU   = botWin != null ? botWin * solP : null;
-      const savSol    = (botWin != null && slip > 0.5) ? (botWin - pfc.solAmount * 0.005) : null;
+      // Jito bundle: protect the full bot window; direct path: show slippage-reduction delta only.
+      const _monDirect = pfc.solAmount < _PUMP_BUNDLE_MIN_SOL;
+      const savSol    = botWin != null
+        ? (_monDirect ? Math.max(0, botWin - pfc.solAmount * _ziqSl / 100) : botWin)
+        : null;
       const savUsd    = savSol != null ? savSol * solP : null;
       const mevR      = risk?.mev ?? null;
       const slipBadge = isAdv ? `${slip.toFixed(1)}% \u00b7 ${slipLv}` : _rl(slipLv);
@@ -1719,6 +1815,7 @@
 
       const pfc    = ns.pumpFunContext;
       const slip   = pfc.slippagePct ?? 1;
+      const _ziqSl = pfc.ziqSlip ?? Math.min(1.0, Math.max(0.5, slip));
       const solP   = ns.widgetLastPriceData?.solPriceUsd ?? 80;
       const pfRisk = ns.lastRiskResult ?? pfc.risk;
       const mevR   = pfRisk?.mev ?? null;
@@ -1730,11 +1827,14 @@
       const fmtU = v => v < 0.001 ? `~$${v.toFixed(4)}` : v < 0.01 ? `~$${v.toFixed(3)}` : `~$${v.toFixed(2)}`;
       const slipLv  = slip > 3 ? 'CRITICAL' : slip > 1 ? 'HIGH' : slip > 0.5 ? 'MEDIUM' : 'LOW';
       const origExp = pfc.solAmount > 0 ? pfc.solAmount * slip / 100 : null;
-      const savSol  = origExp != null ? Math.max(0, origExp - pfc.solAmount * 0.005) : null;
+      const _isDirectPath = pfc.solAmount < _PUMP_BUNDLE_MIN_SOL;
+      // Jito bundle protects the entire bot window; direct path only saves the slippage-reduction delta.
+      const savSol  = origExp != null
+        ? (_isDirectPath ? Math.max(0, origExp - pfc.solAmount * _ziqSl / 100) : origExp)
+        : null;
       const savUsd  = savSol != null ? savSol * solP : null;
 
-      const _isDirectPath = pfc.solAmount < _PUMP_BUNDLE_MIN_SOL;
-      const _expLam  = Math.round(pfc.solAmount * 1e9 * 0.005);
+      const _expLam  = Math.round(pfc.solAmount * 1e9 * _ziqSl / 100);
       const _expSol  = (_expLam / 1e9).toFixed(5);
       const _minTipSol = (_PUMP_TIP_FLOOR / 1e9).toFixed(5);
       const _tipLam  = _isDirectPath ? 0 : Math.min(_PUMP_TIP_CAP, Math.max(_PUMP_TIP_FLOOR, Math.round(_expLam * 0.8)));
@@ -1745,7 +1845,7 @@
       const orderRows = [
         ...(pfc.solAmount > 0 ? [{ label: 'Spending', value: `${pfc.solAmount.toFixed(4)} SOL`, tooltip: 'The amount of SOL you are spending on this bonding curve buy.' }] : []),
         { label: 'Your slippage',       value: `${slip.toFixed(1)}%`,       valueColor: _sc(slipLv),   tooltip: 'The slippage tolerance set in pump.fun. Bots can profitably sandwich your buy up to this amount.' },
-        { label: 'ZendIQ optimised to', value: '0.5%',                       valueColor: '#14F195',     tooltip: 'ZendIQ patches maxSolCost to enforce 0.5% tolerance \u2014 no new transaction is created.' },
+        { label: 'ZendIQ optimised to', value: `${_ziqSl.toFixed(1)}%`,      valueColor: '#14F195',     tooltip: `ZendIQ patches maxSolCost to enforce ${_ziqSl.toFixed(1)}% tolerance \u2014 no new transaction is created.` },
         { label: 'Route',               value: 'pump.fun bonding curve',      valueColor: '#9945FF',     tooltip: 'ZendIQ modifies only the maxSolCost field. Buy amount is unchanged.' },
       ];
 
@@ -1838,11 +1938,11 @@
         : '';
 
       const _note = _isDirectPath
-        ? 'ZendIQ enforces 0.5% slippage and sends direct. No Jito tip \u2014 the trade is profitable without it.'
-        : 'ZendIQ patches <code style="color:#9945FF;font-size:9px">maxSolCost</code> only. Buy amount unchanged. If the price moves &gt;0.5% the tx reverts safely \u2014 retry immediately.';
+        ? `ZendIQ enforces ${_ziqSl.toFixed(1)}% slippage and sends direct. No Jito tip \u2014 the trade is profitable without it.`
+        : `ZendIQ patches <code style="color:#9945FF;font-size:9px">maxSolCost</code> only. Buy amount unchanged. If the price moves &gt;${_ziqSl.toFixed(1)}% the tx reverts safely \u2014 retry immediately.`;
 
       const _primaryBtn = { id: 'sr-btn-pump-optimise',
-        label: _isDirectPath ? '\u2713 Continue with original order' : '\u2736 Sign at 0.5% + Jito bundle' };
+        label: _isDirectPath ? '\u2713 Continue with original order' : `\u2736 Sign at ${_ziqSl.toFixed(1)}% + Jito bundle` };
       const _secondaryBtns = [
         { id: 'sr-btn-pump-proceed', label: `\u21a9 Proceed at ${slip.toFixed(1)}% (original)`, tooltip: `Proceed with your original ${slip.toFixed(1)}% slippage \u2014 ZendIQ will not modify the transaction` },
         { id: 'sr-btn-pump-cancel',  label: '\u2715 Cancel', tooltip: 'Cancel this swap entirely. Nothing will be sent to your wallet \u2014 click Buy again to retry.' },
@@ -1863,10 +1963,11 @@
 
     _renderDirectSigning() {
       const pfc    = ns.pumpFunContext ?? {};
+      const _ziqSl = pfc.ziqSlip ?? 0.5;
       const _sym   = pfc.tokenSymbol ?? ns.tokenScoreCache?.get(pfc.outputMint)?.result?.symbol ?? '?';
       const _sOut  = (pfc.expectedTokenOutRaw ?? 0) > 0 ? (pfc.expectedTokenOutRaw / 1e6).toFixed(4) : null;
       const _sol   = pfc.solAmount ?? 0;
-      const _expLam = ns._pumpDirectExpLam ?? Math.round(_sol * 1e9 * 0.005);
+      const _expLam = ns._pumpDirectExpLam ?? Math.round(_sol * 1e9 * _ziqSl / 100);
       const _expSol = (_expLam / 1e9).toFixed(5);
       const _minTipSol = (_PUMP_TIP_FLOOR / 1e9).toFixed(5);
       return `<div style="padding:14px 16px">
@@ -1879,7 +1980,7 @@
           ${_sOut ? `<div style="display:flex;justify-content:space-between;margin-bottom:5px"><span style="font-size:13px;color:#C2C2D4">Buying (est.)</span><span style="font-size:13px;color:#14F195;font-weight:700">${_sOut} ${_sym}</span></div>` : ''}
           <div style="display:flex;justify-content:space-between;margin-bottom:5px">
             <span style="font-size:13px;color:#C2C2D4">Slippage</span>
-            <span style="font-size:12px;color:#14F195;font-weight:700">0.5% (ZendIQ)</span>
+            <span style="font-size:12px;color:#14F195;font-weight:700">${_ziqSl.toFixed(1)}% (ZendIQ)</span>
           </div>
           <div style="display:flex;justify-content:space-between;padding-top:5px;border-top:1px solid rgba(255,255,255,0.06)">
             <span style="font-size:13px;color:#C2C2D4">Route</span>
@@ -1895,9 +1996,10 @@
     },
 
     _renderSigning() {
-      const pfc  = ns.pumpFunContext ?? {};
-      const _sym = pfc.tokenSymbol ?? ns.tokenScoreCache?.get(pfc.outputMint)?.result?.symbol ?? '?';
-      const _sOut = (pfc.expectedTokenOutRaw ?? 0) > 0
+      const pfc    = ns.pumpFunContext ?? {};
+      const _ziqSl = pfc.ziqSlip ?? 0.5;
+      const _sym   = pfc.tokenSymbol ?? ns.tokenScoreCache?.get(pfc.outputMint)?.result?.symbol ?? '?';
+      const _sOut  = (pfc.expectedTokenOutRaw ?? 0) > 0
         ? (pfc.expectedTokenOutRaw / 1e6).toFixed(4) : null;
       return `<div style="padding:14px 16px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -1909,7 +2011,7 @@
           ${_sOut ? `<div style="display:flex;justify-content:space-between;margin-bottom:5px"><span style="font-size:13px;color:#C2C2D4">Buying (est.)</span><span style="font-size:13px;color:#14F195;font-weight:700">${_sOut} ${_sym}</span></div>` : ''}
           <div style="display:flex;justify-content:space-between;margin-bottom:5px">
             <span style="font-size:13px;color:#C2C2D4">Slippage</span>
-            <span style="font-size:12px;color:#14F195;font-weight:700">0.5% (ZendIQ)</span>
+            <span style="font-size:12px;color:#14F195;font-weight:700">${_ziqSl.toFixed(1)}% (ZendIQ)</span>
           </div>
           <div style="display:flex;justify-content:space-between;padding-top:5px;border-top:1px solid rgba(255,255,255,0.06)">
             <span style="font-size:13px;color:#C2C2D4">Route</span>
@@ -1944,7 +2046,7 @@
         ? `<div style="font-size:13px;color:#C2C2D4;margin:4px 0 0">${Number(pfc.solAmount).toFixed(4)} SOL \u2192 ${_sOut} ${_sym}</div>`
         : '';
       const _subtitle = _isPatched
-        ? `<div style="font-size:12px;color:#C2C2D4;margin-bottom:2px">Slippage optimized to 0.5%</div>`
+        ? `<div style="font-size:12px;color:#C2C2D4;margin-bottom:2px">Slippage optimized to ${(pfc.ziqSlip ?? 0.5).toFixed(1)}%</div>`
         : `<div style="font-size:12px;color:#FFB547;margin-bottom:2px">Original slippage \u2014 not modified</div>`;
       const _sigLink = _solUrl
         ? `<a href="${_solUrl}" target="_blank" rel="noopener" style="display:block;margin:8px 0 14px;font-size:12px;color:#9945FF;text-decoration:none;font-family:monospace" title="View on Solscan">${_shortSig} \u2197</a>`
