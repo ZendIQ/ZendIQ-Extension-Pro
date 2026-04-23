@@ -23,6 +23,9 @@
     const status = document.getElementById('sr-pill-status');
     if (status) {
       status.textContent = newStatus;
+      // Re-render the expanded panel so wallet-connected state is reflected immediately
+      // (detectAndHookWallet resolves asynchronously — panel may have rendered before it)
+      try { ns.renderWidgetPanel?.(); } catch (_) {}
     } else {
       setTimeout(() => updateWidgetStatus(newStatus), 500);
     }
@@ -444,7 +447,9 @@
       const _sc  = _r.score ?? null;
       const _dsc = _sc == null ? null : Math.max(0, _sc - (_rev ? 0 : _ad));
       const _scColor = _dsc == null ? '#C2C2D4' : _dsc === 100 ? '#14F195' : _dsc >= 80 ? '#FFB547' : _dsc >= 60 ? '#FF6B00' : '#FF4444';
-      const _scLabel = _dsc == null ? 'Unknown' : _dsc === 100 ? 'Secure' : _dsc >= 80 ? 'Review' : _dsc >= 60 ? 'At Risk' : 'Critical';
+      const _wtn = _r.walletType && _r.walletType !== 'unknown' ? _r.walletType.charAt(0).toUpperCase() + _r.walletType.slice(1) : 'your wallet';
+      const _openAct = (_r.findings??[]).filter(f => ['CRITICAL','HIGH','WARN'].includes(f.severity) && !(f.reviewable && _rev)).length;
+      const _scSubline = _openAct === 0 ? 'All checks passed' : _openAct === 1 ? '1 action required' : `${_openAct} actions required`;
       const _age = _r.checkedAt ? Math.round((Date.now()-_r.checkedAt)/1000) : null;
       const _ageStr = _age == null ? '' : _age < 60 ? `${_age}s ago` : _age < 3600 ? `${Math.round(_age/60)}m ago` : `${Math.round(_age/3600)}h ago`;
       const _svc = { CRITICAL:'#FF4444', HIGH:'#FF6B00', WARN:'#FFB547', OK:'#14F195' };
@@ -464,25 +469,34 @@
           </label>
         </div>`;
         const _stepsHtml = f.steps
-          ? `<div style="margin-top:6px;padding:7px 10px;border-radius:6px;background:rgba(153,69,255,0.07);border:1px solid rgba(153,69,255,0.18)">
-              <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.7px;color:#9945FF;font-weight:700;margin-bottom:4px">Steps inside your wallet</div>
-              <div style="font-size:12px;color:#E8E8F0;line-height:1.55">${_esc(f.steps)}</div>
-            </div>` : '';
+          ? `<div style="margin-top:6px"><div style="font-size:12px;font-weight:700;color:#9945FF;text-transform:uppercase;letter-spacing:0.6px;margin-bottom:3px">Steps inside your wallet:</div><div style="font-size:13px;color:#E8E8F0;line-height:1.55">${_esc(f.steps)}</div></div>`
+          : '';
         const _toggleHtml = f.reviewable
-          ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding:6px 10px;border-radius:7px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06)">
-              <span style="font-size:12px;font-weight:600;color:#FFB547">I've disabled unsafe wallet settings</span>
+          ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:7px;margin-top:8px;border-top:1px solid rgba(255,255,255,0.06)">
+              <span style="font-size:12px;font-weight:600;color:#FFB547">I\u2019ve disabled ${_wtn}\u2019s auto-approve setting</span>
               <label style="position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;flex-shrink:0">
                 <input type="checkbox" id="sr-sec-reviewed-toggle" style="position:absolute;opacity:0;width:0;height:0">
                 <span style="position:absolute;inset:0;border-radius:10px;background:rgba(26,26,46,1);border:1px solid rgba(255,181,71,0.4);transition:all 0.2s"></span>
                 <span style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#FFB547;transition:left 0.2s,background 0.2s"></span>
               </label>
             </div>` : '';
+        if (f.reviewable) {
+          const _brdC = f.severity === 'CRITICAL' ? 'rgba(255,68,68,0.2)' : f.severity === 'HIGH' ? 'rgba(255,107,0,0.2)' : 'rgba(255,181,71,0.2)';
+          const _bgC  = f.severity === 'CRITICAL' ? 'rgba(255,68,68,0.05)' : f.severity === 'HIGH' ? 'rgba(255,107,0,0.05)' : 'rgba(255,181,71,0.04)';
+          return `<div style="margin-bottom:8px;padding:10px 12px;border-radius:9px;background:${_bgC};border:1px solid ${_brdC}">
+            <div style="display:flex;align-items:center;gap:7px;margin-bottom:${f.detail || f.steps ? '4px' : '0'}">
+              <span style="color:${_svc[f.severity]??'#C2C2D4'};font-size:12px">${_svi[f.severity]??'&bull;'}</span>
+              <span style="font-size:13px;font-weight:600;color:${_svc[f.severity]??'#E8E8F0'}">${_esc(f.text)}</span>
+            </div>
+            ${f.detail?`<div style="font-size:13px;color:#C2C2D4;margin-bottom:6px">${_esc(f.detail)}</div>`:''}
+            ${_stepsHtml}${_toggleHtml}
+          </div>`;
+        }
         return `<div style="display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.04)">
           <span style="color:${_svc[f.severity]??'#C2C2D4'};font-size:12px;flex-shrink:0;line-height:1.6">${_svi[f.severity]??'&bull;'}</span>
           <div style="flex:1">
             <div style="font-size:13px;font-weight:600;color:${_svc[f.severity]??'#E8E8F0'}">${_esc(f.text)}</div>
             ${f.detail?`<div style="font-size:12px;color:#C2C2D4;margin-top:2px">${_esc(f.detail)}</div>`:''}
-            ${_stepsHtml}${_toggleHtml}
           </div>
         </div>`;
       };
@@ -493,9 +507,11 @@
       return `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px">
           <div title="Score starts at 100. Deductions: −30 per known drainer contract (max −60), −20 per unlimited approval (max −40), −20 if wallet settings not reviewed." style="cursor:help">
             <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.8px;color:#C2C2D4;margin-bottom:4px">Wallet Security Score</div>
-            <div style="display:flex;align-items:baseline;gap:5px"><span style="font-size:32px;font-weight:900;color:${_scColor};font-family:'Space Mono',monospace;line-height:1">${_dsc??'&mdash;'}</span><span style="font-size:13px;font-weight:700;color:${_scColor}">${_scLabel}</span></div>
+            <div style="display:flex;align-items:baseline;gap:4px"><span style="font-size:32px;font-weight:900;color:${_scColor};font-family:'Space Mono',monospace;line-height:1">${_dsc??'&mdash;'}</span><span style="font-size:13px;font-weight:700;color:#6B6B8A">&thinsp;/ 100</span></div>
+            <div style="font-size:13px;color:${_openAct===0?'#14F195':'#FFB547'};font-weight:600;margin-top:2px">${_scSubline}</div>
+            ${_ageStr ? `<div style="font-size:12px;color:#6B6B8A;margin-top:1px">Last scanned: ${_ageStr}</div>` : ''}
           </div>
-          <button id="sr-sec-recheck" style="padding:7px 12px;border:1px solid rgba(153,69,255,0.25);border-radius:7px;background:transparent;color:#9945FF;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;flex-shrink:0;margin-top:2px">&circlearrowleft; Re-check</button>
+          <button id="sr-sec-recheck" style="padding:7px 12px;border:1px solid rgba(153,69,255,0.25);border-radius:7px;background:transparent;color:#9945FF;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;flex-shrink:0;margin-top:2px">&circlearrowleft; Re-scan</button>
         </div>
         ${_reviewableHtml}
         ${_otherFindings.length > 0 ? `<div style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#C2C2D4;font-weight:700;margin:8px 0 4px">Other Findings</div>` : ''}
@@ -1119,13 +1135,16 @@
           : (_outM ? `<div style="font-size:12px;color:#9B9BAD;text-align:center;padding:4px 0">Scanning token risk&hellip;</div>` : '');
         const _isPump = window.location.hostname.includes('pump.fun');
         const _isRdm  = window.location.hostname.includes('raydium');
-        const _idleHint = _isPump ? 'Start a swap on pump.fun to see risk analysis here.'
-          : _isRdm ? 'Swap on <a href="https://raydium.io" style="color:#9945FF;text-decoration:none">raydium.io</a> to see risk analysis here.'
-          : 'Swap on <a href="https://jup.ag" style="color:#9945FF;text-decoration:none">jup.ag</a> to see risk analysis here.';
+        const _dexName = _isPump ? 'pump.fun' : _isRdm ? 'Raydium' : 'jup.ag';
+        const _dexUrl  = _isPump ? 'https://pump.fun' : _isRdm ? 'https://raydium.io' : 'https://jup.ag';
+        const _dexLink = `<a href="${_dexUrl}" style="color:#9945FF;text-decoration:none">${_dexName}</a>`;
+        const _idleHint = ns.walletHooked
+          ? `Monitoring active.<br>Start a swap on ${_dexLink} to see ZendIQ\u2019s route check and risk analysis.`
+          : `Connect your wallet on ${_dexLink} to get started.<br>Once connected, ZendIQ will check every swap for a better route and flag any risks \u2014 before you sign.`;
         monitorContent = `
           <div style="padding:14px 16px;">
-            <div style="font-size:12px;color:#C2C2D4;text-align:center;padding:12px 0;line-height:1.6">
-              Monitoring active.<br>${_idleHint}
+            <div style="font-size:13px;color:#C2C2D4;text-align:center;padding:12px 0;line-height:1.6">
+              ${_idleHint}
             </div>
             ${_tsIdleHtml}
           </div>`;
@@ -1919,54 +1938,6 @@
       ['fetching','ready','signing','signing-original','sending','done','done-original','error'].includes(ns.widgetSwapStatus);
 
     // ── First-launch welcome card — shown until user dismisses (synced with popup)
-    // Note: dismissing in the widget does NOT count as the popup having been
-    // opened. We track a transient `_widgetDismissed` flag so we can hide the
-    // welcome card locally while still prompting the user to open the popup
-    // when needed (the popup bootstraps shared state used for the wallet scan).
-    if (ns.onboarded === false && !ns._widgetDismissed) {
-      bodyInner.innerHTML = `
-        <div style="padding:18px 16px 14px;font-family:'DM Sans',sans-serif">
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#9945FF" stroke-width="2"><path d="M12 3L4 7v5c0 4.4 3.4 8.5 8 9.5 4.6-1 8-5.1 8-9.5V7l-8-4z" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span style="font-size:15px;font-weight:700;color:#E8E8F0">Welcome to ZendIQ</span>
-          </div>
-          <p style="font-size:13px;color:#C2C2D4;line-height:1.55;margin-bottom:12px"><strong style="color:#E8E8F0">Swap on jup.ag as you normally would.</strong> When you click Swap, ZendIQ quietly intercepts the transaction, checks for a better route and bot risks, then shows you the result — before you sign anything. You stay in control the whole time.</p>
-          <ol style="margin:0 0 12px;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px">
-            <li style="display:flex;align-items:flex-start;gap:8px;font-size:13px;color:#C2C2D4">
-              <span style="flex-shrink:0;width:18px;height:18px;border-radius:50%;background:rgba(153,69,255,0.15);border:1px solid rgba(153,69,255,0.35);color:#9945FF;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center">1</span>
-              <span>Open <strong style="color:#E8E8F0">jup.ag</strong>, connect your wallet, and set up a swap</span>
-            </li>
-            <li style="display:flex;align-items:flex-start;gap:8px;font-size:13px;color:#C2C2D4">
-              <span style="flex-shrink:0;width:18px;height:18px;border-radius:50%;background:rgba(153,69,255,0.15);border:1px solid rgba(153,69,255,0.35);color:#9945FF;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center">2</span>
-              <span>Click Swap — ZendIQ intercepts and runs a risk + savings check</span>
-            </li>
-            <li style="display:flex;align-items:flex-start;gap:8px;font-size:13px;color:#C2C2D4">
-              <span style="flex-shrink:0;width:18px;height:18px;border-radius:50%;background:rgba(153,69,255,0.15);border:1px solid rgba(153,69,255,0.35);color:#9945FF;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center">3</span>
-              <span>Approve ZendIQ's optimised route, or proceed with the original swap</span>
-            </li>
-          </ol>
-          <p style="font-size:12px;color:#C2C2D4;text-align:center;margin-bottom:14px;line-height:1.55">
-            <strong style="color:#E8E8F0">ZendIQ never has access to your private keys or seed phrase.</strong><br>
-            We only read your public address — you sign using your wallet every time.
-          </p>
-          <button id="sr-ob-dismiss" style="width:100%;padding:11px;border:none;border-radius:8px;background:linear-gradient(135deg,#14F195,#0cc97a);color:#061a10;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;box-shadow:0 3px 12px rgba(20,241,149,0.3)">&#10003; Got it &mdash; show my security score</button>
-        </div>`;
-      const _obBtn = bodyInner.querySelector('#sr-ob-dismiss');
-      if (_obBtn) _obBtn.onclick = () => {
-        // Hide the welcome card locally but do NOT mark the extension as
-        // globally onboarded — only the popup should broadcast that state.
-        ns._widgetDismissed = true;
-        // Persist the shared key so other surfaces know onboarding happened,
-        // but don't assume the popup was opened in this tab.
-        window.postMessage({ type: 'ZENDIQ_SET_ONBOARDED' }, '*');
-        ns.widgetActiveTab = 'wallet';
-        renderWidgetPanel();
-        // Do NOT auto-run the security scan here; wait for the popup-originated
-        // broadcast or an explicit user action to run the scan.
-      };
-      return;
-    }
-
     // Full panel HTML
     // Save scroll position of the monitor panel so live ticks don't reset the view
     const _monScrollTop = bodyInner.querySelector('#sr-monitor-scroll')?.scrollTop ?? 0;

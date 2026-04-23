@@ -158,6 +158,18 @@ window.addEventListener('message', (e) => {
     return;
   }
 
+  // ZendIQ: first DEX page visit — auto-expand widget once, then never again
+  if (e.data.type === 'ZENDIQ_GET_FIRST_DEX_VISIT') {
+    chrome.storage.local.get(['sendiq_firstDexVisitCompleted'], ({ sendiq_firstDexVisitCompleted }) => {
+      try { window.postMessage({ type: 'ZENDIQ_FIRST_DEX_VISIT_RESPONSE', completed: !!sendiq_firstDexVisitCompleted }, '*'); } catch (_) {}
+    });
+    return;
+  }
+  if (e.data.type === 'ZENDIQ_SET_FIRST_DEX_VISIT') {
+    chrome.storage.local.set({ sendiq_firstDexVisitCompleted: true });
+    return;
+  }
+
   // ZendIQ: request background to open the extension popup (from widget)
   if (e.data.type === 'ZENDIQ_OPEN_POPUP') {
     // Record which tab the popup should open to (Wallet/Security tab)

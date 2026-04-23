@@ -75,18 +75,15 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
     if (!sendiq_onboarded) {
-      document.getElementById('onboarding-card').classList.add('show');
-      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      // First launch — show slim welcome banner, land on Monitor
+      document.getElementById('welcome-banner').style.display = 'block';
+      chrome.storage.local.set({ sendiq_onboarded: true });
+      chrome.runtime.sendMessage({ type: 'PUSH_ONBOARDED' });
+      showTab('monitor');
     }
   });
-  document.getElementById('ob-dismiss').addEventListener('click', () => {
-    chrome.storage.local.set({ sendiq_onboarded: true });
-    // Notify open jup.ag tabs so widget welcome card hides immediately
-    chrome.runtime.sendMessage({ type: 'PUSH_ONBOARDED' });
-    document.getElementById('onboarding-card').classList.remove('show');
-    showTab('security');
-    loadSecurity();
+  document.getElementById('welcome-dismiss').addEventListener('click', () => {
+    document.getElementById('welcome-banner').style.display = 'none';
   });
 
   // ── Tab navigation ─────────────────────────────────────────────────────

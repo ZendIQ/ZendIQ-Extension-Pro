@@ -341,11 +341,11 @@
 
       return `
         <div style="padding:14px 16px">
-          <div style="font-size:12px;color:#9B9BAD;text-align:center;padding:12px 0;line-height:1.6">
-            Monitoring active.<br>
-            <a href="https://raydium.io/swap/" target="_blank" rel="noopener"
-               style="color:#14F195;font-weight:600;text-decoration:none">Swap on Raydium</a>
-            to see risk analysis here.
+          <div style="font-size:13px;color:#C2C2D4;text-align:center;padding:12px 0;line-height:1.6">
+            ${ns.walletHooked
+              ? `Monitoring active.<br>Start a swap on <a href="https://raydium.io/swap/" target="_blank" rel="noopener" style="color:#9945FF;text-decoration:none">Raydium</a> to see ZendIQ\u2019s route check and risk analysis.`
+              : `Connect your wallet on <a href="https://raydium.io/swap/" target="_blank" rel="noopener" style="color:#9945FF;text-decoration:none">Raydium</a> to get started.<br>Once connected, ZendIQ will check every swap for a better route and flag any risks \u2014 before you sign.`
+            }
           </div>
           ${ns._rdmSwapAttempted ? (tsLoaded ? `
           <div style="display:flex;justify-content:space-between;align-items:center;

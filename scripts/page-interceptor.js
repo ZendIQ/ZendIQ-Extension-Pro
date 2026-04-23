@@ -178,27 +178,25 @@
     if (e.data?.type === 'ZENDIQ_ONBOARDED_RESPONSE') {
       ns.onboarded = !!e.data.value;
       try { ns.renderWidgetPanel?.(); } catch (_) {}
-      // Auto-expand so the welcome card is visible immediately on first install.
-      // Retry until the widget DOM exists — it may still be injecting if body
-      // wasn't ready when page-widget.js first ran.
-      if (!e.data.value) {
-        const _tryExpand = () => {
-          try {
-            const _w = document.getElementById('sr-widget');
-            if (_w) {
-              if (!_w.classList.contains('expanded')) {
-                _w.style.display = '';
-                _w.classList.add('expanded');
-                if (ns._fitBodyHeight) ns._fitBodyHeight(_w);
-                try { ns.renderWidgetPanel?.(); } catch (_) {}
-              }
-            } else {
-              setTimeout(_tryExpand, 100);
-            }
-          } catch (_) {}
-        };
-        _tryExpand();
-      }
+    }
+    // First DEX visit — auto-expand to Monitor tab once, then flip flag so it never repeats.
+    if (e.data?.type === 'ZENDIQ_FIRST_DEX_VISIT_RESPONSE' && !e.data.completed) {
+      window.postMessage({ type: 'ZENDIQ_SET_FIRST_DEX_VISIT' }, '*');
+      ns.widgetActiveTab = 'monitor';
+      const _tryExpandFirst = () => {
+        try {
+          const _w = document.getElementById('sr-widget');
+          if (_w) {
+            _w.style.display = '';
+            if (!_w.classList.contains('expanded')) _w.classList.add('expanded');
+            if (ns._fitBodyHeight) ns._fitBodyHeight(_w);
+            try { ns.renderWidgetPanel?.(); } catch (_) {}
+          } else {
+            setTimeout(_tryExpandFirst, 100);
+          }
+        } catch (_) {}
+      };
+      _tryExpandFirst();
     }
   });
   window.postMessage({ type: 'ZENDIQ_GET_SETTINGS' }, '*');
@@ -206,8 +204,10 @@
   window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'GET_HISTORY' } }, '*');
   // Load prior wallet security scan (shared with popup — same secLastResult key)
   window.postMessage({ type: 'ZENDIQ_GET_SEC_RESULT' }, '*');
-  // Load onboarded flag so widget welcome card shows/hides correctly
+  // Load onboarded flag (controls ns.onboarded state)
   window.postMessage({ type: 'ZENDIQ_GET_ONBOARDED' }, '*');
+  // Auto-expand widget on first-ever DEX visit
+  window.postMessage({ type: 'ZENDIQ_GET_FIRST_DEX_VISIT' }, '*');
 
   // ── Listen for history updates forwarded from background (bridge)
   window.addEventListener('message', (e) => {

@@ -121,7 +121,7 @@ function renderSecurityPanel() {
         ${!walletPubkey ? `
         <div style="margin-top:12px;padding:10px 12px;border-radius:8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);font-size:13px;color:var(--muted);line-height:1.7">
           <div style="font-weight:700;color:var(--text);margin-bottom:5px">How to enable the wallet scan:</div>
-          <div style="margin-bottom:4px">1. Open <a href="https://jup.ag" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">jup.ag</a> in this browser and connect your wallet to Jupiter there.</div>
+          <div style="margin-bottom:4px">1. Open <a href="https://jup.ag" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">jup.ag</a>, <a href="https://raydium.io/swap/" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">Raydium</a>, or <a href="https://pump.fun" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">pump.fun</a> in this browser and connect your wallet there.</div>
           <div style="margin-bottom:4px">2. ZendIQ automatically reads your <strong style="color:var(--text)">public address</strong> from the page — no wallet is added to ZendIQ itself.</div>
           <div>3. Return here and click <strong style="color:var(--text)">Run Security Check</strong>.</div>
           <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);font-size:13px;color:var(--text)">
@@ -142,11 +142,11 @@ function renderSecurityPanel() {
     : displayScore >= 80   ? 'var(--orange)'
     : displayScore >= 60   ? '#FF6B00'
     : 'var(--danger)';
-  const scoreLabel = displayScore == null ? 'Unknown'
-    : displayScore === 100  ? 'Secure'
-    : displayScore >= 80   ? 'Review'
-    : displayScore >= 60   ? 'At Risk'
-    : 'Critical';
+  const openActions = findings.filter(f =>
+    ['CRITICAL', 'HIGH', 'WARN'].includes(f.severity) &&
+    !(f.reviewable && _reviewedAutoApprove)).length;
+  const scoreSubline = openActions === 0 ? 'All checks passed'
+    : openActions === 1 ? '1 action required' : `${openActions} actions required`;
 
   const _s = checkedAt ? Math.round((Date.now() - checkedAt) / 1000) : null;
   const timeAgo = _s == null ? '' : _s < 60 ? `${_s}s ago` : _s < 3600 ? `${Math.round(_s / 60)}m ago` : `${Math.round(_s / 3600)}h ago`;
@@ -175,8 +175,8 @@ function renderSecurityPanel() {
       : (sevColor[f.severity] ?? 'var(--text)');
 
     const reviewToggle = f.reviewable
-      ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;padding:6px 10px;border-radius:7px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06)">
-          <span style="font-size:13px;font-weight:600;color:${_reviewedAutoApprove ? 'var(--green)' : 'var(--orange)'}">I've disabled unsafe wallet settings</span>
+      ? `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:7px;margin-top:8px;border-top:1px solid rgba(255,255,255,0.06)">
+          <span style="font-size:13px;font-weight:600;color:${_reviewedAutoApprove ? 'var(--green)' : 'var(--orange)'}">I\u2019ve disabled ${walletTypeFmt}\u2019s auto-approve setting</span>
           <label class="switch" title="${_reviewedAutoApprove ? 'Click to un-mark' : 'Check this once you have disabled auto-approve and removed unrecognised connected apps — this protects your wallet from silent transaction signing'}" style="flex-shrink:0">
             <input type="checkbox" id="sec-reviewed-toggle" ${_reviewedAutoApprove ? 'checked' : ''}>
             <span class="slider slider-amber"></span>
@@ -199,20 +199,29 @@ function renderSecurityPanel() {
     const tipCursor = f.tooltip ? ' style="cursor:help"' : '';
 
     const stepsHtml = f.steps
-      ? `<div style="margin-top:6px;padding:7px 10px;border-radius:6px;background:rgba(153,69,255,0.07);border:1px solid rgba(153,69,255,0.18)">
-          <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.7px;color:var(--purple);font-weight:700;margin-bottom:4px">Steps inside your wallet</div>
-          <div style="font-size:13px;color:var(--text);line-height:1.55">${esc(f.steps)}</div>
-        </div>`
+      ? `<div style="margin-top:6px"><div style="font-size:12px;font-weight:700;color:var(--purple);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:3px">Steps inside your wallet:</div><div style="font-size:13px;color:var(--text);line-height:1.55">${esc(f.steps)}</div></div>`
       : '';
 
+    if (f.reviewable) {
+      const bordC = f.severity === 'CRITICAL' ? 'rgba(255,68,68,0.2)' : f.severity === 'HIGH' ? 'rgba(255,107,0,0.2)' : 'rgba(255,181,71,0.2)';
+      const bgC   = f.severity === 'CRITICAL' ? 'rgba(255,68,68,0.05)' : f.severity === 'HIGH' ? 'rgba(255,107,0,0.05)' : 'rgba(255,181,71,0.04)';
+      return `
+      <div${tipAttr}${tipCursor} style="margin-bottom:8px;padding:10px 12px;border-radius:9px;background:${bgC};border:1px solid ${bordC}">
+        <div style="display:flex;align-items:center;gap:7px;margin-bottom:${f.detail || f.steps ? '4px' : '0'}">
+          <span style="color:${sevColor[f.severity] ?? 'var(--muted)'}">${sevIcon[f.severity] ?? '·'}</span>
+          <span style="font-size:13px;font-weight:600;color:${textColor}">${esc(f.text)}</span>
+        </div>
+        ${f.detail ? `<div style="font-size:13px;color:var(--muted);margin-bottom:6px">${esc(f.detail)}</div>` : ''}
+        ${stepsHtml}
+        ${reviewToggle}
+      </div>`;
+    }
     return `
     <div class="sec-finding"${tipAttr}${tipCursor}>
       <span class="sec-finding-icon" style="color:${sevColor[f.severity] ?? 'var(--muted)'}">${sevIcon[f.severity] ?? '·'}</span>
       <div style="flex:1">
         <div style="font-size:13px;font-weight:600;color:${textColor}">${esc(f.text)}</div>
         ${f.detail ? `<div style="font-size:13px;color:var(--muted);margin-top:2px">${esc(f.detail)}</div>` : ''}
-        ${stepsHtml}
-        ${reviewToggle}
       </div>
     </div>`;
   };
@@ -223,21 +232,23 @@ function renderSecurityPanel() {
   panel.innerHTML = `
     ${_secWalletMissing ? `
     <div style="margin:8px 12px 0;padding:8px 12px;border-radius:7px;background:rgba(255,181,71,0.08);border:1px solid rgba(255,181,71,0.25);font-size:13px;color:var(--orange);line-height:1.6">
-      ⚠ Open <a href="https://jup.ag" target="_blank" rel="noopener" style="color:var(--orange);font-weight:700;text-decoration:underline">jup.ag</a> and connect your wallet, then click Re-check to refresh this scan.
+      ⚠ Open <a href="https://jup.ag" target="_blank" rel="noopener" style="color:var(--orange);font-weight:700;text-decoration:underline">jup.ag</a> and connect your wallet, then click Re-scan to refresh this scan.
     </div>` : ''}
     <div class="section">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px">
         <div>
           <div class="section-title" title="Score = 100 minus deductions: −30 per known drainer (max −60), −20 per unknown unlimited approval (max −40), −20 if wallet auto-approve settings have not been reviewed. 80–100 = Secure, 60–79 = Review, 40–59 = At Risk, 0–39 = Critical." style="cursor:help">Wallet Security Score</div>
-          <div class="sec-score-hover-wrap" style="cursor:help" data-tip="Score starts at 100. Deductions: −30 per known drainer contract (max −60), −20 per unlimited approval (max −40), −20 if wallet settings not reviewed. 100 = Secure · 80–99 = Review · 60–79 = At Risk · below 60 = Critical.">
-            <div style="display:flex;align-items:baseline;gap:5px">
+          <div class="sec-score-hover-wrap" style="cursor:help" data-tip="Score starts at 100. Deductions: −30 per known drainer contract (max −60), −20 per unlimited approval (max −40), −20 if wallet settings not reviewed.">
+            <div style="display:flex;align-items:baseline;gap:4px">
               <span style="font-size:32px;font-weight:900;color:${scoreColor};font-family:'Space Mono',monospace;line-height:1">${displayScore ?? '—'}</span>
-              <span style="font-size:13px;font-weight:700;color:${scoreColor}">${scoreLabel}</span>
+              <span style="font-size:13px;font-weight:700;color:var(--muted)">&thinsp;/ 100</span>
             </div>
+            <div style="font-size:13px;color:${openActions === 0 ? 'var(--green)' : 'var(--orange)'};font-weight:600;margin-top:2px">${scoreSubline}</div>
+            ${timeAgo ? `<div style="font-size:12px;color:var(--muted);margin-top:1px">Last scanned: ${timeAgo}</div>` : ''}
           </div>
         </div>
         <button id="sec-run-btn" class="btn-q" title="Re-scan all token accounts on-chain for active unlimited approvals and known drainer contracts" style="width:auto;padding:7px 12px;margin:0;font-size:13px;flex-shrink:0" ${_secChecking ? 'disabled' : ''}>
-          ${_secChecking ? 'Scanning…' : '↺ Re-check'}
+          ${_secChecking ? 'Scanning…' : '↺ Re-scan'}
         </button>
       </div>
 
