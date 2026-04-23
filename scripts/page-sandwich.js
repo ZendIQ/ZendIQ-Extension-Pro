@@ -143,14 +143,32 @@
     ns._sandwichPending.add(sig);
 
     try {
+      // ── Step 0: wait for on-chain confirmation ───────────────────────────
+      // detectSandwich fires immediately after /execute returns, but the tx may
+      // not be confirmed yet.  Poll getTransaction (same pattern as fetchActualOut)
+      // for up to 30 s before starting the scan. The scan timeout (TIMEOUT_MS)
+      // only covers the actual block-scan work once the tx is visible.
+      let _confirmedTx = null;
+      for (let _att = 0; _att < 10; _att++) {
+        await new Promise(r => setTimeout(r, _att === 0 ? 4000 : 3000));
+        try {
+          const _r = await ns.rpcCall('getTransaction', [
+            sig,
+            { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' },
+          ]);
+          if (_r?.result) { _confirmedTx = _r; break; }
+        } catch (_) {}
+      }
+      if (!_confirmedTx) {
+        ns._sandwichPending.delete(sig);
+        return { error: 'unavailable' };
+      }
+
       const result = await _withTimeout(TIMEOUT_MS, async () => {
 
         // ── Step 1: resolve slot from the user's tx ───────────────────────
-        const txRes = await ns.rpcCall('getTransaction', [
-          sig,
-          { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' },
-        ]);
-        if (!txRes?.result) return { error: 'unavailable' };
+        // Reuse the already-confirmed tx from the polling step above.
+        const txRes = _confirmedTx;
         const slot = txRes.result.slot;
 
         // ── Step 2: find adjacent signatures in the same block ───────────────
