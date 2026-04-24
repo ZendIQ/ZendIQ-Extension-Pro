@@ -137,6 +137,23 @@
             if (ns._fitBodyHeight) ns._fitBodyHeight(widget);
           }
         }
+        // Analytics: swap intercepted on autoProtect / balanced-profile path
+        try { if (ns.logProEvent) {
+          const _r   = risk;
+          const _ssh = window.location.hostname;
+          ns.logProEvent('swap_intercepted', {
+            site:        _ssh.includes('raydium') ? 'raydium.io' : _ssh.includes('pump') ? 'pump.fun' : 'jup.ag',
+            risk_level:  _r?.level  ?? null,
+            mev_level:   _r?.mev?.riskLevel ?? null,
+            token_level: ns.tokenScoreResult?.level ?? null,
+            profile:     ns.settingsProfile ?? 'unknown',
+            trade_usd:   _r?.swapAmountUsd != null ? Math.min(Number(_r.swapAmountUsd), 50000) : null,
+          });
+        } } catch (_) {}
+        try { if (ns.logFunnel) {
+          const _fSite = window.location.hostname;
+          ns.logFunnel('widget_shown', { dex: _fSite.includes('raydium') ? 'raydium.io' : _fSite.includes('pump') ? 'pump.fun' : 'jup.ag' });
+        } } catch (_) {}
         // Fire handleOptimiseTrade after this microtask so the promise is fully set up
         Promise.resolve().then(() => ns.handleOptimiseTrade?.());
         return;
@@ -152,6 +169,23 @@
 
       ns.pendingTransaction     = txInfo;
       ns.pendingDecisionResolve = resolve;
+
+      // Analytics: swap intercepted on always-ask-me path (passed threshold filter)
+      try { if (ns.logProEvent) {
+        const _ssh2 = window.location.hostname;
+        ns.logProEvent('swap_intercepted', {
+          site:        _ssh2.includes('raydium') ? 'raydium.io' : _ssh2.includes('pump') ? 'pump.fun' : 'jup.ag',
+          risk_level:  risk?.level  ?? null,
+          mev_level:   risk?.mev?.riskLevel ?? null,
+          token_level: ns.tokenScoreResult?.level ?? null,
+          profile:     ns.settingsProfile ?? 'unknown',
+          trade_usd:   risk?.swapAmountUsd != null ? Math.min(Number(risk.swapAmountUsd), 50000) : null,
+        });
+      } } catch (_) {}
+      try { if (ns.logFunnel) {
+        const _fSite2 = window.location.hostname;
+        ns.logFunnel('widget_shown', { dex: _fSite2.includes('raydium') ? 'raydium.io' : _fSite2.includes('pump') ? 'pump.fun' : 'jup.ag' });
+      } } catch (_) {}
 
       // Clear any stale optimise-flow state from a previous interception so
       // old errors and quotes don't bleed into the new risk overlay.

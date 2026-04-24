@@ -175,6 +175,34 @@
         // Only record trades that actually landed on-chain (signature present + not Failed)
         if (!sig || data?.status === 'Failed' || data?.error) return;
         try { window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: entry } }, '*'); } catch (_) {}
+        // Analytics: swap proceeded via Jupiter's original route
+        try { if (ns.logProEvent) {
+          const _sshCon = window.location.hostname;
+          ns.logProEvent('swap_proceeded', {
+            site:      _sshCon.includes('raydium') ? 'raydium.io' : _sshCon.includes('pump') ? 'pump.fun' : 'jup.ag',
+            trade_usd: entry.inUsdValue != null ? Math.min(Number(entry.inUsdValue), 50000) : null,
+            profile:   ns.settingsProfile ?? 'unknown',
+            reason:    null,
+          });
+        } } catch (_) {}
+        // Structured trade record (routes to trades DB table)
+        try { if (ns.logTrade) {
+          const _sshCon2 = window.location.hostname;
+          ns.logTrade({
+            user_action:  'proceeded',
+            dex:          _sshCon2.includes('raydium') ? 'raydium.io' : _sshCon2.includes('pump') ? 'pump.fun' : 'jup.ag',
+            exec_path:    'direct',
+            tx_sig:       sig,
+            input_mint:   inMint ?? null,
+            output_mint:  outMint ?? null,
+            success:      1,
+            trade_usd:    entry.inUsdValue != null ? Math.min(Number(entry.inUsdValue), 50000) : null,
+            profile:      ns.settingsProfile ?? 'unknown',
+            bot_risk_score:    risk?.score ?? null,
+            token_risk_score:  ns.tokenScoreResult?.score ?? null,
+            tx_classification: (function (lv) { return lv === 'LOW' ? 'safe' : lv === 'MEDIUM' ? 'caution' : lv ? 'danger' : null; })(risk?.level),
+          });
+        } } catch (_) {}
         if (sig && outMint && ns.fetchActualOut) {
           (async () => {
             try {
@@ -206,6 +234,16 @@
               window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
                 signature: sig, sandwichResult: result,
               }}}, '*');
+              if (ns.logMev) {
+                const _atkH = result.attackerWallet && ns.hashAddr
+                  ? await ns.hashAddr(result.attackerWallet).catch(() => null) : null;
+                const _mevM = result.signals?.includes('bonding_curve_pda') ? 'bonding_curve_pda'
+                            : result.signals?.some(s => String(s).includes('vault')) ? 'vault_neighbor'
+                            : result.method === 'front-run' ? 'front_run_only' : 'unknown';
+                ns.logMev({ tx_sig: sig, detected: !!result.detected, loss_usd: result.extractedUsd ?? null,
+                  loss_bps: result.extractedUsd && _inUsd ? Math.round(result.extractedUsd / _inUsd * 10000) : null,
+                  attacker_hash: _atkH, method: _mevM, prevented_count: result.detected ? 1 : 0 });
+              }
             } catch (_) {}
           })();
         }
@@ -504,6 +542,32 @@
                   outUsdValue:    _rdmLq?.outUsdValue ?? null,
                 };
                 try { window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: entry } }, '*'); } catch (_) {}
+                // Analytics: Raydium swap proceeded via original route
+                try { if (ns.logProEvent) {
+                  ns.logProEvent('swap_proceeded', {
+                    site:      'raydium.io',
+                    trade_usd: entry.inUsdValue != null ? Math.min(Number(entry.inUsdValue), 50000) : null,
+                    profile:   ns.settingsProfile ?? 'unknown',
+                    reason:    null,
+                  });
+                } } catch (_) {}
+                // Structured trade record (routes to trades DB table)
+                try { if (ns.logTrade) {
+                  ns.logTrade({
+                    user_action:  'proceeded',
+                    dex:          'raydium.io',
+                    exec_path:    'direct',
+                    tx_sig:       sig,
+                    input_mint:   _rdmInMint ?? null,
+                    output_mint:  _rdmOutMint ?? null,
+                    success:      1,
+                    trade_usd:    entry.inUsdValue != null ? Math.min(Number(entry.inUsdValue), 50000) : null,
+                    profile:      ns.settingsProfile ?? 'unknown',
+                    bot_risk_score:    _rdmRisk?.score ?? null,
+                    token_risk_score:  ns.tokenScoreResult?.score ?? null,
+                    tx_classification: (function (lv) { return lv === 'LOW' ? 'safe' : lv === 'MEDIUM' ? 'caution' : lv ? 'danger' : null; })(_rdmRisk?.level),
+                  });
+                } } catch (_) {}
                 ns.widgetOriginalTxSig = sig;
                 ns.widgetLastTxSig     = sig;
                 ns.widgetSwapStatus    = 'done-original';
@@ -543,6 +607,17 @@
                       window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
                         signature: sig, sandwichResult: result,
                       }}}, '*');
+                      if (ns.logMev) {
+                        const _iu = _rdmLq?.inUsdValue ?? null;
+                        const _atkH = result.attackerWallet && ns.hashAddr
+                          ? await ns.hashAddr(result.attackerWallet).catch(() => null) : null;
+                        const _mevM = result.signals?.includes('bonding_curve_pda') ? 'bonding_curve_pda'
+                                    : result.signals?.some(s => String(s).includes('vault')) ? 'vault_neighbor'
+                                    : result.method === 'front-run' ? 'front_run_only' : 'unknown';
+                        ns.logMev({ tx_sig: sig, detected: !!result.detected, loss_usd: result.extractedUsd ?? null,
+                          loss_bps: result.extractedUsd && _iu ? Math.round(result.extractedUsd / _iu * 10000) : null,
+                          attacker_hash: _atkH, method: _mevM, prevented_count: result.detected ? 1 : 0 });
+                      }
                     } catch (_) {}
                   })();
                 }

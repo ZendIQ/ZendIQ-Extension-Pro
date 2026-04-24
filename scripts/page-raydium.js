@@ -311,6 +311,16 @@
                 window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
                   signature: _sig, sandwichResult: result,
                 }}}, '*');
+                if (ns.logMev) {
+                  const _atkH = result.attackerWallet && ns.hashAddr
+                    ? await ns.hashAddr(result.attackerWallet).catch(() => null) : null;
+                  const _mevM = result.signals?.includes('bonding_curve_pda') ? 'bonding_curve_pda'
+                              : result.signals?.some(s => String(s).includes('vault')) ? 'vault_neighbor'
+                              : result.method === 'front-run' ? 'front_run_only' : 'unknown';
+                  ns.logMev({ tx_sig: _sig, detected: !!result.detected, loss_usd: result.extractedUsd ?? null,
+                    loss_bps: result.extractedUsd && _inUsd ? Math.round(result.extractedUsd / _inUsd * 10000) : null,
+                    attacker_hash: _atkH, method: _mevM, prevented_count: result.detected ? 1 : 0 });
+                }
               } catch (_) {}
             })();
           }

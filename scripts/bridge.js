@@ -104,7 +104,7 @@ window.addEventListener('message', (e) => {
 
   // Legacy bridge messages — only forward whitelisted types
   if (e.data.sr_bridge_to_ext) {
-    const ALLOWED_FROM_PAGE = new Set(['GET_HISTORY', 'HISTORY_UPDATE']);
+    const ALLOWED_FROM_PAGE = new Set(['GET_HISTORY', 'HISTORY_UPDATE', 'LOG_PRO_EVENT']);
     if (!e.data.msg || !ALLOWED_FROM_PAGE.has(e.data.msg.type)) return;
     try {
       chrome.runtime.sendMessage(e.data.msg);

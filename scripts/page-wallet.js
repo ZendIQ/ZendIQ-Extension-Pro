@@ -30,6 +30,7 @@
         });
       } catch (e) {
         console.warn('[ZendIQ] Could not hook signAndSendTransaction:', e.message);
+        if ((ns._ec = (ns._ec ?? 0) + 1) <= 20) ns.logError?.('wallet_hook', { detail: e.message?.slice(0, 120) });
       }
 
       try {
@@ -43,6 +44,7 @@
         });
       } catch (e) {
         console.warn('[ZendIQ] Could not hook signTransaction:', e.message);
+        if ((ns._ec = (ns._ec ?? 0) + 1) <= 20) ns.logError?.('wallet_hook', { detail: e.message?.slice(0, 120) });
       }
 
       try {
@@ -51,6 +53,7 @@
         };
       } catch (e) {
         console.warn('[ZendIQ] Could not hook sendTransaction:', e.message);
+        if ((ns._ec = (ns._ec ?? 0) + 1) <= 20) ns.logError?.('wallet_hook', { detail: e.message?.slice(0, 120) });
       }
 
       ns.updateWidgetStatus('Active');
@@ -58,7 +61,18 @@
       // can't run (e.g. pump.fun homepage with no network requests yet).
       try {
         const _pk = resolveWalletPubkey();
-        if (_pk) window.postMessage({ type: 'ZENDIQ_SAVE_WALLET_PUBKEY', pubkey: _pk }, '*');
+        if (_pk) {
+          window.postMessage({ type: 'ZENDIQ_SAVE_WALLET_PUBKEY', pubkey: _pk }, '*');
+          if (ns.setWalletForSession) {
+            const _wn = window.solana?.isPhantom  ? 'phantom'
+                      : window.solana?.isSolflare ? 'solflare'
+                      : window.solana?.isGlow     ? 'glow'
+                      : window.solana?.isBrave    ? 'brave'
+                      : window.solana?.isCoin98   ? 'coin98'
+                      : 'unknown';
+            ns.setWalletForSession(_pk, _wn);
+          }
+        }
       } catch (_) {}
       return;
     }
@@ -735,6 +749,12 @@
     } catch (e) {
       console.warn('[ZendIQ] Could not hook WS signTransaction:', e.message);
     }
+
+    // Wire session analytics — set wallet for session using WS account address + wallet name
+    try {
+      const _addr = _acc?.address;
+      if (_addr && ns.setWalletForSession) ns.setWalletForSession(String(_addr), w?.name ?? 'unknown');
+    } catch (_) {}
   }
 
   // ── handleTransaction ────────────────────────────────────────────────────
@@ -870,6 +890,13 @@
       throw e;
     }
   }
+  // Emit session-end event when the page unloads
+  window.addEventListener('beforeunload', () => {
+    const _site = window.location.hostname.includes('raydium') ? 'raydium.io'
+                : window.location.hostname.includes('pump')    ? 'pump.fun' : 'jup.ag';
+    try { ns.logSession?.('end', { type: 'end', wallet: ns.walletAdapter ?? 'unknown', wallet_hash: ns.walletHash ?? null, dex: _site }); } catch (_) {}
+  });
+
   Object.assign(ns, {
     detectAndHookWallet,
     scheduleWsProbe,

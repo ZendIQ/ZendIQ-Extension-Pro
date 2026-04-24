@@ -136,6 +136,7 @@
         // 'cancel': do nothing
       } catch (err) {
         console.error('[ZendIQ] Swap click overlay error — failing open:', err?.message);
+        if ((ns._ec = (ns._ec ?? 0) + 1) <= 20) ns.logError?.('injection', { detail: err?.message?.slice(0, 120) });
         window.__zendiq_swap_bypass = true;
         btn.click();
         window.__zendiq_swap_bypass = false;

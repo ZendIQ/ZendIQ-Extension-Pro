@@ -240,6 +240,17 @@
       // Persist scan result to the shared secLastResult key so popup and widget stay in sync
       const _r = ns.walletSecurityResult;
       if (_r) window.postMessage({ type: 'ZENDIQ_SAVE_SEC_RESULT', result: _r }, '*');
+      // Analytics: wallet security scan completed
+      try { if (_r && ns.logProEvent) {
+        const _sc = _r.score;
+        const _st = _sc != null ? (_sc >= 100 ? 100 : _sc >= 80 ? 80 : _sc >= 60 ? 60 : 0) : null;
+        ns.logProEvent('wallet_security_scanned', {
+          wallet_type:     _r.walletType ?? 'unknown',
+          score_tier:      _st,
+          unlimited_count: (_r.unlimitedApprovals?.length ?? 0),
+          contract_count:  (_r.badContracts?.length ?? 0),
+        });
+      } } catch (_) {}
       // Load the reviewed-state for this wallet type from chrome.storage via bridge
       const _wt = _r?.walletType;
       if (_wt && _wt !== 'unknown') window.postMessage({ type: 'ZENDIQ_GET_SEC_REVIEWED', walletType: _wt }, '*');

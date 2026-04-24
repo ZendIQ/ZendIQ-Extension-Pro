@@ -4,8 +4,27 @@
  * Popup cannot fetch cross-origin in MV3 — everything routes through here.
  */
 
+// Analytics backend — Pro extension telemetry (anonymous aggregate events only)
+const PRO_BACKEND_URL = 'https://zendiq-backend.onrender.com';
+
+// ── Anonymous install identifier ────────────────────────────────────────────
+// UUID generated once per browser profile; injected into every analytics POST.
+const _PRO_IID_KEY  = 'sendiq_pro_install_id';
+let   _cachedProIid = null;
+async function _getProInstallId() {
+  if (_cachedProIid) return _cachedProIid;
+  return new Promise(resolve => {
+    chrome.storage.local.get([_PRO_IID_KEY], r => {
+      if (r[_PRO_IID_KEY]) { _cachedProIid = r[_PRO_IID_KEY]; return resolve(r[_PRO_IID_KEY]); }
+      const id = crypto.randomUUID();
+      chrome.storage.local.set({ [_PRO_IID_KEY]: id }, () => { _cachedProIid = id; resolve(id); });
+    });
+  });
+}
+
 // Allowed origins for FETCH_JSON to prevent SSRF
 const FETCH_JSON_ALLOWED = [
+  PRO_BACKEND_URL,   // https://zendiq-backend.onrender.com (shared)
   'https://api.jup.ag',
   'https://lite-api.jup.ag',
   'https://ultra-api.jup.ag',
@@ -30,6 +49,35 @@ const FETCH_JSON_ALLOWED = [
   'https://singapore.mainnet.block-engine.jito.wtf',
   'https://pumpportal.fun',
 ];
+
+// ── Extension lifecycle events ───────────────────────────────────────────────
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason !== 'install' && details.reason !== 'update') return;
+  const ua      = navigator.userAgent;
+  const locale  = navigator.language ?? '';
+  const country = locale.includes('-') ? locale.split('-').pop() : locale.toUpperCase();
+  const os      = ua.includes('Windows') ? 'windows' : ua.includes('Mac OS X') ? 'mac' : ua.includes('Linux') ? 'linux' : 'other';
+  const browser = ua.includes('Brave') ? 'brave' : 'chrome';
+  _getProInstallId().then(install_id => {
+    fetch(PRO_BACKEND_URL + '/api/events', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        type:       'extension_installed',
+        category:   'install',
+        source:     'pro',
+        install_id,
+        data: {
+          reason:       details.reason,
+          prev_version: details.previousVersion ?? null,
+          browser, os, locale: locale.slice(0, 10),
+          country: (typeof country === 'string' && country.length === 2) ? country : null,
+        },
+        v: chrome.runtime.getManifest().version,
+      }),
+    }).catch(() => {});
+  });
+});
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
@@ -217,6 +265,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } catch (e) { console.warn('[SR bg] GET_HISTORY forward failed', e); }
       sendResponse({ ok: true });
     });
+    return true;
+  }
+
+  // ── Anonymous telemetry — fire-and-forget POST to Pro analytics backend ──────────
+  if (msg.type === 'LOG_PRO_EVENT') {
+    const eventType = String(msg.eventType ?? '').slice(0, 40);
+    const data      = (msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data)) ? msg.data : {};
+    const v         = typeof msg.v === 'string' ? msg.v : '';
+    const category  = typeof msg.category === 'string' ? msg.category : null;
+    const _doPost   = (install_id) => {
+      fetch(PRO_BACKEND_URL + '/api/events', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          type: eventType, source: 'pro', install_id, data, v,
+          ...(category ? { category } : {}),
+        }),
+      }).catch(() => {});
+    };
+    // daily_active: deduplicate — only post once per calendar day
+    if (eventType === 'daily_active') {
+      const today = (data.day ?? new Date().toISOString().slice(0, 10));
+      chrome.storage.local.get(['sendiq_pro_last_active_day'], (result) => {
+        if (result.sendiq_pro_last_active_day !== today) {
+          chrome.storage.local.set({ sendiq_pro_last_active_day: today }, () => {
+            _getProInstallId().then(_doPost);
+          });
+        }
+      });
+    } else {
+      _getProInstallId().then(_doPost);
+    }
+    sendResponse({ ok: true });
     return true;
   }
 

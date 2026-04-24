@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ZendIQ \u2013 Smart Trade Routing",
-  "version": "0.7.9",
+  "version": "0.7.10",
   "description": "Solana swap optimiser. Real-time token score, MEV bot detection, and route optimisation on Jupiter \u0026 Raydium \u2014 before you sign.",
   "homepage_url": "https://zendiq.ai",
   "permissions": [
@@ -29,7 +29,8 @@
     "https://frontend-api-v2.pump.fun/*",
     "https://frontend-api-v3.pump.fun/*",
     "https://*.block-engine.jito.wtf/*",
-    "https://pumpportal.fun/*"
+    "https://pumpportal.fun/*",
+    "https://zendiq-pro-backend.onrender.com/*"
   ],
   "content_scripts": [
     {
@@ -58,6 +59,7 @@
       ],
       "js": [
         "scripts/page-config.js",
+        "scripts/page-analytics.js",
         "scripts/page-utils.js",
         "scripts/page-sandwich.js",
         "scripts/page-decoders.js",

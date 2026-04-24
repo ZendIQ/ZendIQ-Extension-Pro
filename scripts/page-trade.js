@@ -1473,6 +1473,52 @@
         };
         ns.widgetLastTxFromSwapTab = _cap?.fromSwapTab ?? false;
         ns.widgetSwapStatus    = 'done';
+        // Analytics: swap completed (skippedExecute — wallet signed+sent directly)
+        try { if (ns.logProEvent) {
+          const _feesSkip = ns.widgetLastOrderFees ?? {};
+          const _lpSkip   = ns.widgetLastPriceData ?? {};
+          const _solSkip  = _lpSkip.solPriceUsd ?? 80;
+          const _sshSkip  = window.location.hostname;
+          ns.logProEvent('swap_optimised', {
+            site:             _cap?.source === 'raydium' ? 'raydium.io' : _sshSkip.includes('pump') ? 'pump.fun' : 'jup.ag',
+            net_benefit_usd:  ns.widgetSnapNetUsd ?? null,
+            routing_gain_usd: ns.widgetSnapSavingsUsd ?? null,
+            mev_value_usd:    ns.widgetSnapMevProtectionUsd != null ? Math.min(ns.widgetSnapMevProtectionUsd, 5000) : null,
+            fees_usd:         ((_feesSkip.priorityFeeLamports ?? 0) + (_feesSkip.jitoTipLamports ?? 0)) / 1e9 * _solSkip || null,
+            trade_usd:        _lpSkip.inUsdValue != null ? Math.min(Number(_lpSkip.inUsdValue), 50000) : null,
+            route_type:       _lo.swapType === 'rfq' ? 'rfq' : _lo.swapType === 'gasless' ? 'gasless' : _cap?.source === 'raydium' ? 'raydium' : _lo.swapType ? 'amm' : 'unknown',
+            jito_used:        (_cap?.source === 'raydium' && (_feesSkip.jitoTipLamports ?? 0) >= 1000),
+            profile:          ns.settingsProfile ?? 'unknown',
+            auto_sign:        !!ns.autoAccept,
+          });
+          // Structured trade record (routes to trades DB table)
+          try { if (ns.logTrade) {
+            const _rSkip  = ns.lastRiskResult;
+            const _lv2s   = (lv) => lv === 'LOW' ? 'safe' : lv === 'MEDIUM' ? 'caution' : lv ? 'danger' : null;
+            const _rt     = _lo.swapType === 'rfq' ? 'rfq' : _lo.swapType === 'gasless' ? 'gasless' : _cap?.source === 'raydium' ? 'raydium' : 'amm';
+            ns.logTrade({
+              user_action:      'optimised',
+              dex:              _cap?.source === 'raydium' ? 'raydium.io' : _sshSkip.includes('pump') ? 'pump.fun' : 'jup.ag',
+              exec_path:        _rt === 'amm' ? ((_feesSkip.jitoTipLamports ?? 0) >= 1000 ? 'jito' : 'direct') : _rt,
+              tx_sig:           ns.widgetLastTxSig ?? null,
+              input_mint:       _cap?.inputMint  ?? null,
+              output_mint:      _cap?.outputMint ?? null,
+              success:          1,
+              trade_usd:        _lpSkip.inUsdValue != null ? Math.min(Number(_lpSkip.inUsdValue), 50000) : null,
+              net_benefit_usd:  ns.widgetSnapNetUsd ?? null,
+              routing_gain_usd: ns.widgetSnapSavingsUsd ?? null,
+              mev_value_usd:    ns.widgetSnapMevProtectionUsd != null ? Math.min(ns.widgetSnapMevProtectionUsd, 5000) : null,
+              fees_usd:         ((_feesSkip.priorityFeeLamports ?? 0) + (_feesSkip.jitoTipLamports ?? 0)) / 1e9 * _solSkip || null,
+              jito_tip_lamports: _feesSkip.jitoTipLamports ?? null,
+              route_chosen:     _rt,
+              bot_risk_score:   _rSkip?.score  ?? null,
+              token_risk_score: ns.tokenScoreResult?.score ?? null,
+              tx_classification: _lv2s(_rSkip?.level),
+              profile:          ns.settingsProfile ?? 'unknown',
+              auto_sign:        !!ns.autoAccept,
+            });
+          } } catch (_) {}
+        } } catch (_) {}
         ns._signCooldownUntil  = Date.now() + 4000;
         if (ns.widgetCapturedTrade?.source === 'raydium') ns._rdmPostSwapIdle = true;
         ns.widgetLastOrder     = null;
@@ -2082,6 +2128,53 @@
         };
         try { window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: entry } }, '*'); } catch (e) {}
 
+        // Analytics: swap completed via ZendIQ's route
+        try { if (ns.logProEvent) {
+          const _feesMain = ns.widgetLastOrderFees ?? {};
+          const _lpMain   = ns.widgetLastPriceData ?? {};
+          const _solMain  = _lpMain.solPriceUsd ?? 80;
+          const _sshMain  = window.location.hostname;
+          ns.logProEvent('swap_optimised', {
+            site:             entry.routeSource === 'raydium' ? 'raydium.io' : _sshMain.includes('pump') ? 'pump.fun' : 'jup.ag',
+            net_benefit_usd:  entry.snapNetUsd ?? null,
+            routing_gain_usd: entry.snapSavingsUsd ?? null,
+            mev_value_usd:    entry.snapMevProtectionUsd != null ? Math.min(entry.snapMevProtectionUsd, 5000) : null,
+            fees_usd:         ((_feesMain.priorityFeeLamports ?? 0) + (_feesMain.jitoTipLamports ?? 0)) / 1e9 * _solMain || null,
+            trade_usd:        entry.inUsdValue != null ? Math.min(Number(entry.inUsdValue), 50000) : null,
+            route_type:       entry.swapType === 'rfq' ? 'rfq' : entry.swapType === 'gasless' ? 'gasless' : entry.routeSource === 'raydium' ? 'raydium' : entry.swapType ? 'amm' : 'unknown',
+            jito_used:        !!(entry.jitoBundle),
+            profile:          ns.settingsProfile ?? 'unknown',
+            auto_sign:        !!ns.autoAccept,
+          });
+          // Structured trade record (routes to trades DB table)
+          try { if (ns.logTrade) {
+            const _rMain  = ns.lastRiskResult;
+            const _lv2s2  = (lv) => lv === 'LOW' ? 'safe' : lv === 'MEDIUM' ? 'caution' : lv ? 'danger' : null;
+            const _rtMain = entry.swapType === 'rfq' ? 'rfq' : entry.swapType === 'gasless' ? 'gasless' : entry.routeSource === 'raydium' ? 'raydium' : 'amm';
+            ns.logTrade({
+              user_action:      'optimised',
+              dex:              entry.routeSource === 'raydium' ? 'raydium.io' : _sshMain.includes('pump') ? 'pump.fun' : 'jup.ag',
+              exec_path:        _rtMain === 'amm' ? (!!(entry.jitoBundle) ? 'jito' : 'direct') : _rtMain,
+              tx_sig:           sig ?? null,
+              input_mint:       entry.inputMint  ?? null,
+              output_mint:      entry.outputMint ?? null,
+              success:          1,
+              trade_usd:        entry.inUsdValue != null ? Math.min(Number(entry.inUsdValue), 50000) : null,
+              net_benefit_usd:  entry.snapNetUsd ?? null,
+              routing_gain_usd: entry.snapSavingsUsd ?? null,
+              mev_value_usd:    entry.snapMevProtectionUsd != null ? Math.min(entry.snapMevProtectionUsd, 5000) : null,
+              fees_usd:         ((_feesMain.priorityFeeLamports ?? 0) + (_feesMain.jitoTipLamports ?? 0)) / 1e9 * _solMain || null,
+              jito_tip_lamports: _feesMain.jitoTipLamports ?? null,
+              route_chosen:     _rtMain,
+              bot_risk_score:   _rMain?.score  ?? null,
+              token_risk_score: ns.tokenScoreResult?.score ?? null,
+              tx_classification: _lv2s2(_rMain?.level),
+              profile:          ns.settingsProfile ?? 'unknown',
+              auto_sign:        !!ns.autoAccept,
+            });
+          } } catch (_) {}
+        } } catch (_) {}
+
         // Fire-and-forget: poll Solana RPC for actual on-chain output and update the entry
         if (sig && captured?.outputMint) {
           (async () => {
@@ -2126,6 +2219,16 @@
                 signature: sig,
                 sandwichResult: result,
               }}}, '*');
+              if (ns.logMev) {
+                const _atkH = result.attackerWallet && ns.hashAddr
+                  ? await ns.hashAddr(result.attackerWallet).catch(() => null) : null;
+                const _mevM = result.signals?.includes('bonding_curve_pda') ? 'bonding_curve_pda'
+                            : result.signals?.some(s => String(s).includes('vault')) ? 'vault_neighbor'
+                            : result.method === 'front-run' ? 'front_run_only' : 'unknown';
+                ns.logMev({ tx_sig: sig, detected: !!result.detected, loss_usd: result.extractedUsd ?? null,
+                  loss_bps: result.extractedUsd && _inUsdVal ? Math.round(result.extractedUsd / _inUsdVal * 10000) : null,
+                  attacker_hash: _atkH, method: _mevM, prevented_count: result.detected ? 1 : 0 });
+              }
             } catch (_) {}
           })();
         }
