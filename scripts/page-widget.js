@@ -3451,22 +3451,7 @@
     el.id = 'sr-widget';
     el.innerHTML = `
       <div id="sr-pill">
-        <svg id="sr-pill-shield" viewBox="0 0 128 128" style="width:26px;height:26px;flex-shrink:0">
-          <defs>
-            <linearGradient id="zr_ring" x1="20%" y1="0%" x2="80%" y2="100%">
-              <stop offset="0%" stop-color="#00e5ff"/>
-              <stop offset="35%" stop-color="#5566ff"/>
-              <stop offset="65%" stop-color="#9922ff"/>
-              <stop offset="100%" stop-color="#cc44ff"/>
-            </linearGradient>
-            <linearGradient id="zr_iq" x1="0%" y1="0%" x2="40%" y2="100%">
-              <stop offset="0%" stop-color="#aa44ff"/>
-              <stop offset="100%" stop-color="#cc22ff"/>
-            </linearGradient>
-          </defs>
-          <path d="M 64 15 C 91 14, 113 35, 113 63 C 113 90, 93 112, 65 113 C 37 114, 15 93, 15 65 C 15 39, 33 18, 57 15" fill="none" stroke="url(#zr_ring)" stroke-width="9" stroke-linecap="round"/>
-          <text x="65" y="70" font-family="'Arial Black', Arial, sans-serif" font-weight="900" font-size="56" fill="url(#zr_iq)" text-anchor="middle" dominant-baseline="middle" letter-spacing="-2">IQ</text>
-        </svg>
+        <img id="sr-pill-shield" src="${document.documentElement.dataset.zendiqIcon || ''}" style="width:26px;height:26px;flex-shrink:0;border-radius:4px" alt="ZendIQ">
         <div id="sr-pill-dot"></div>
         <div id="sr-pill-label">ZendIQ <span id="sr-pill-status">Connecting...</span></div>
         <button id="sr-pill-toggle" title="Expand / Collapse ZendIQ">

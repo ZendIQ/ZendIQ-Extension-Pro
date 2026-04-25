@@ -6,6 +6,7 @@
 // can read it. Both worlds share the same document, making this the simplest
 // cross-world data transfer at document_start — no messaging needed.
 try { document.documentElement.dataset.zendiqVersion = chrome.runtime.getManifest().version; } catch (_) {}
+try { document.documentElement.dataset.zendiqIcon = chrome.runtime.getURL('assets/icon-48.png'); } catch (_) {}
 
 // ── background → page ─────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
