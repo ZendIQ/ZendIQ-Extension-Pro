@@ -1962,7 +1962,7 @@
           <div style="width:6px;height:6px;border-radius:50%;background:#C2C2D4"></div>
           <span>Wallet not detected</span>
         `}
-        ${walletAddr ? `<span id="sr-wallet-addr" style="font-family:'Space Mono',monospace;font-size:9px;margin-left:auto;display:inline-flex;align-items:center;gap:8px">${walletAddr}<button id="sr-copy-wallet" title="Copy address"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/><rect x="9" y="9" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/></svg></button><span id="sr-copy-feedback" style="display:none;color:#14F195;font-size:13px">Copied</span></span>` : ''}
+        ${walletAddr ? `<span id="sr-wallet-addr" style="font-family:'Space Mono',monospace;font-size:9px;margin-left:auto;display:inline-flex;align-items:center;gap:8px">${escapeHtml(walletAddr)}<button id="sr-copy-wallet" title="Copy address"><svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/><rect x="9" y="9" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.6"/></svg></button><span id="sr-copy-feedback" style="display:none;color:#14F195;font-size:13px">Copied</span></span>` : ''}
       </div>
 
       <div style="display:flex;border-bottom:1px solid rgba(153,69,255,0.2);background:rgba(0,0,0,0.15);">

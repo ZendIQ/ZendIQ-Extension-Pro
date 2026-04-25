@@ -101,16 +101,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // ── Push onboarded flag to jup.ag tabs (popup dismissed → widget hides card) ─
+  // ── Push onboarded flag to all DEX tabs (popup dismissed → widget hides card) ─
   if (msg.type === 'PUSH_ONBOARDED') {
-    chrome.tabs.query({ url: '*://*.jup.ag/*' }, (tabs) => {
-      if (tabs?.length) {
-        tabs.forEach(t => chrome.tabs.sendMessage(
-          t.id,
-          { type: 'PUSH_ONBOARDED' },
-          () => void chrome.runtime.lastError
-        ));
-      }
+    const DEX_URLS = [
+      '*://*.jup.ag/*',
+      '*://*.raydium.io/*',
+      '*://raydium.io/*',
+      '*://pump.fun/*',
+      '*://*.pump.fun/*',
+    ];
+    DEX_URLS.forEach(pattern => {
+      chrome.tabs.query({ url: pattern }, (tabs) => {
+        if (tabs?.length) {
+          tabs.forEach(t => chrome.tabs.sendMessage(
+            t.id,
+            { type: 'PUSH_ONBOARDED' },
+            () => void chrome.runtime.lastError
+          ));
+        }
+      });
     });
     sendResponse({ ok: true });
     return true;

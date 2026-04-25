@@ -326,12 +326,25 @@
 
   // Extract a base58 signature from a wallet response object (Wallet Standard / legacy).
   // Returns null if the result is a signed-tx object rather than a sent-tx response.
+  // Jupiter Wallet (Wallet Standard) may return signature as a base64 string when the
+  // Uint8Array crosses a JS messaging boundary — detect and re-encode to base58.
+  const _B58_RE = /^[1-9A-HJ-NP-Za-km-z]{64,90}$/;
   function _extractSig(result) {
     try {
       const item = Array.isArray(result) ? result[0] : result;
       const raw  = item?.signature ?? null;
       if (!raw) return null;
-      if (typeof raw === 'string')    return raw;
+      if (typeof raw === 'string') {
+        // Already valid base58 — return as-is.
+        if (_B58_RE.test(raw)) return raw;
+        // Looks like base64 (contains chars outside base58 alphabet such as +, /, =).
+        // Decode and re-encode as base58 so the backend SIG_RE validator accepts it.
+        try {
+          const bytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0));
+          if (bytes.length >= 32) return ns.b58Encode?.(bytes) ?? null;
+        } catch (_) {}
+        return null; // unrecognised string format — discard rather than send invalid data
+      }
       if (raw instanceof Uint8Array)  return ns.b58Encode?.(raw) ?? null;
       if (typeof raw === 'object') {
         const bytes = new Uint8Array(Object.keys(raw).length);
@@ -750,10 +763,13 @@
       console.warn('[ZendIQ] Could not hook WS signTransaction:', e.message);
     }
 
-    // Wire session analytics — set wallet for session using WS account address + wallet name
+    // Wire session analytics — only once per page load.
+    // hookWsWallet is called on every resolveWalletPubkey() fallback path (via patchCustomEvent),
+    // which fires on every Jupiter tick (~1/s). Guard with _sessionLogged to avoid flooding.
+    // Lowercase w?.name so e.g. "Jupiter" matches VALID_WALLETS entry 'jupiter'.
     try {
       const _addr = _acc?.address;
-      if (_addr && ns.setWalletForSession) ns.setWalletForSession(String(_addr), w?.name ?? 'unknown');
+      if (_addr && ns.setWalletForSession && !ns._sessionLogged) ns.setWalletForSession(String(_addr), (w?.name ?? 'unknown').toLowerCase());
     } catch (_) {}
   }
 

@@ -60,7 +60,12 @@
 
   // Called from page-wallet.js after a wallet successfully hooks.
   // Caches wallet hash on ns so trade events can reference it.
+  // Guard: only fires session:start once per page load — resolveWalletPubkey() is called
+  // on every Jupiter tick (~1/s) and can trigger hookWsWallet via patchCustomEvent fallback,
+  // which would flood the backend with session:start events.
   ns.setWalletForSession = async function (walletAddr, walletName) {
+    if (ns._sessionLogged) return;
+    ns._sessionLogged = true;
     ns.walletHash    = await _hashAddr(walletAddr);
     ns.walletAdapter = walletName;
     try {

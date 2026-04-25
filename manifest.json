@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ZendIQ \u2013 Smart Trade Routing",
-  "version": "0.7.10",
+  "version": "0.7.11",
+  "minimum_chrome_version": "104",
   "description": "Solana swap optimiser. Real-time token score, MEV bot detection, and route optimisation on Jupiter \u0026 Raydium \u2014 before you sign.",
   "homepage_url": "https://zendiq.ai",
   "permissions": [
@@ -12,25 +13,19 @@
   ],
   "host_permissions": [
     "https://*.jup.ag/*",
+    "https://jup.ag/*",
     "https://*.raydium.io/*",
-    "https://api.jup.ag/*",
+    "https://raydium.io/*",
     "https://api.mainnet-beta.solana.com/*",
     "https://solana.publicnode.com/*",
-    "https://jup.ag/*",
-    "https://lite-api.jup.ag/*",
-    "https://raydium.io/*",
-    "https://ultra-api.jup.ag/*",
     "https://api.rugcheck.xyz/*",
     "https://api.dexscreener.com/*",
     "https://api.geckoterminal.com/*",
     "https://pump.fun/*",
     "https://*.pump.fun/*",
-    "https://frontend-api.pump.fun/*",
-    "https://frontend-api-v2.pump.fun/*",
-    "https://frontend-api-v3.pump.fun/*",
     "https://*.block-engine.jito.wtf/*",
     "https://pumpportal.fun/*",
-    "https://zendiq-pro-backend.onrender.com/*"
+    "https://zendiq-backend.onrender.com/*"
   ],
   "content_scripts": [
     {

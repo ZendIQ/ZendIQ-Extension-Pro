@@ -36,9 +36,10 @@
     JITO_AUTO_THRESHOLD: 40,
 
     // ── Mutable shared state ────────────────────────────────────────────
-    walletHooked: false,
-    _wsWallet:    null,   // Wallet Standard wallet object
-    _wsAccount:   null,   // Wallet Standard account for active pubkey
+    walletHooked:    false,
+    _sessionLogged:  false,  // true after first session:start — prevents repeat firing
+    _wsWallet:       null,   // Wallet Standard wallet object
+    _wsAccount:      null,   // Wallet Standard account for active pubkey
 
     // Priority fee mode — synced from popup settings
     jitoMode:          'auto',  // 'always' = high priority | 'auto' = high when risky | 'never' = standard
