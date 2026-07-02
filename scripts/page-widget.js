@@ -442,6 +442,7 @@
     const _wsResult = ns.walletSecurityResult;
     const _wsChecking = ns.walletSecurityChecking;
     const _shieldColor = (() => {
+      if (ns.axiomVerifyOnly) return ''; // no scan on Axiom — keep the shield neutral, not amber
       if (_wsChecking && ns._lastWalletShieldColor) return ns._lastWalletShieldColor; // no flash
       if (!_wsResult) return ns._lastWalletShieldColor || '#FFB547'; // amber until first scan
       const raw = _wsResult.score ?? null;
@@ -456,6 +457,25 @@
     const walletSecHtml = (() => {
       const _esc = s => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
       const _wp  = fullWalletPubkey || '';   // use the already-resolved pubkey (same source as wallet bar)
+      // On Axiom, trades execute through Axiom's built-in session wallet (server-side
+      // custody), not the user's own browser wallet — so ZendIQ's approval scan (which
+      // targets self-custody wallets like Phantom/Backpack) can't run here. Show a clear
+      // explanation instead of an inert "Run" button so nothing looks broken.
+      if (ns.axiomVerifyOnly) {
+        return `
+          <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.8px;color:#C2C2D4;margin-bottom:10px">Wallet Security Check</div>
+          <div style="margin-top:4px;padding:12px;border-radius:8px;background:rgba(153,69,255,0.06);border:1px solid rgba(153,69,255,0.18);font-size:12px;color:#C0C0D8;line-height:1.65">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <svg viewBox="0 0 24 24" width="16" height="16" style="flex-shrink:0;fill:none;stroke:#9945FF;stroke-width:1.6"><path d="M12 3L4 7v5c0 4.4 3.4 8.5 8 9.5 4.6-1 8-5.1 8-9.5V7l-8-4z" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 12l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span style="font-weight:700;color:#E8E8F0;font-size:13px">Runs on your own wallet</span>
+            </div>
+            <div style="margin-bottom:8px">Axiom trades go through its own built-in wallet, so ZendIQ can\u2019t check your personal wallet\u2019s approvals from here.</div>
+            <div style="margin-bottom:8px">The wallet scan looks at your self-custody wallet (Phantom, Backpack, Solflare, and others) for <strong style="color:#E8E8F0">unlimited token approvals</strong> and known drain contracts. Open <a href="https://jup.ag" target="_blank" rel="noopener" style="color:#9945FF;font-weight:700;text-decoration:none">jup.ag</a>, <a href="https://raydium.io/swap/" target="_blank" rel="noopener" style="color:#9945FF;font-weight:700;text-decoration:none">Raydium</a>, or <a href="https://pump.fun" target="_blank" rel="noopener" style="color:#9945FF;font-weight:700;text-decoration:none">pump.fun</a> with your wallet connected to run it there.</div>
+            <div style="padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);font-size:12px;color:#E8E8F0">
+              <span style="color:#14F195">&#x2713;</span> Your private key and seed phrase are never read or stored by ZendIQ.
+            </div>
+          </div>`;
+      }
       if (ns.walletSecurityChecking) {
         return `<div style="text-align:center;padding:28px 16px">
           <div style="font-size:12px;color:#C2C2D4;margin-bottom:6px">Scanning on-chain approvals&hellip;</div>

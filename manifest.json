@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ZendIQ Pro \u2013 Smart Trade Routing",
-  "version": "0.7.36",
+  "version": "0.7.37",
   "minimum_chrome_version": "104",
   "description": "Solana swap optimiser with MEV protection. Real-time risk scoring on Jupiter, Raydium, Pump.fun \u0026 Axiom \u2014 before you sign.",
   "homepage_url": "https://zendiq.ai",
