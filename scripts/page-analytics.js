@@ -14,9 +14,15 @@
   if (!ns) return;
 
   const _pyVer  = document.documentElement.dataset.zendiqVersion ?? '';
-  const _daSite = window.location.hostname.includes('raydium') ? 'raydium.io'
-                : window.location.hostname.includes('pump')    ? 'pump.fun'
-                : 'jup.ag';
+  // An unrecognised host must fall through to 'unknown', never to jup.ag: the old
+  // default silently folded every new surface into the jup.ag baseline, and a
+  // mislabelled event returns 200, so nothing downstream ever flags it.
+  const _daHost = window.location.hostname;
+  const _daSite = _daHost.includes('raydium') ? 'raydium.io'
+                : _daHost.includes('pump')    ? 'pump.fun'
+                : _daHost.includes('axiom')   ? 'axiom.trade'
+                : _daHost.includes('jup.ag')  ? 'jup.ag'
+                : 'unknown';
 
   // ── Internal send helper ──────────────────────────────────────────────────
   // category = null  → legacy events table (backward compat for existing callsites)
@@ -52,7 +58,17 @@
   ns.logDynSlip  = (data)        => _send('slippage', 'dyn_slip', data);
 
   // ── Wallet hash helper ────────────────────────────────────────────────────
-  // SHA-256 of wallet address, first 12 hex chars. Non-reversible dedup token.
+  // SHA-256 of an address, first 12 hex chars (48 bits).
+  //
+  // This is a DEDUP TOKEN, NOT ANONYMISATION. The hash is unsalted and the input space
+  // (Solana addresses) is public and fully enumerable, so anyone holding a candidate list
+  // can hash it and match the prefix. Treat the output as pseudonymous at best, and as
+  // equivalent to the address itself whenever the plausible candidate set is small —
+  // which is exactly the case for known MEV bots.
+  //
+  // Consequence: safe for server-side dedup and distinct counts; NEVER safe to publish
+  // on a public endpoint or to attribute behaviour to a specific actor. See OPS-178 and
+  // the guard comment in backend/src/api/routes.js (/stats/pro, mev_summary).
   async function _hashAddr(addr) {
     if (!addr || typeof addr !== 'string') return null;
     try {

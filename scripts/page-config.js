@@ -135,8 +135,10 @@
     axiomRiskAcknowledged: false,  // true after user clicks "Got it"; cleared on token change or new buy
     // ── Axiom preset-optimization (snapshot + restore) ───────────────────
     axiomOptimizeEnabled: true,    // master flag for the Optimize & Buy flow
-    axiomSettingsSnapshot: null,   // JSON string of the user's original settings, restored after the optimized trade
+    axiomObligation:    null,      // OPS-181 restore obligation — see page-axiom.js _applyOptimizationAndBuy
+    axiomApiHost:       null,      // Axiom's settings API host, learned from live traffic (sharded: api10, api3, …)
     axiomOptimizing:    false,     // true between applying safe settings and restoring the original
+    axiomOptimizeAbandoned: null,  // { at, why } when an optimize was skipped and settings left untouched
     axiomLastOptimization: null,   // { slipFrom, slipTo, mevFrom, mevTo, estSavingsUsd, changes[] } — last applied breakdown
     _axiomRestoreTimer: null,      // fallback setTimeout id that restores settings if no settlement signal arrives
 

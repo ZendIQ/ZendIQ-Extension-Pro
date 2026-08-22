@@ -35,6 +35,20 @@
   let _axiomBuyAmountSol = null;   // last SOL amount the user entered in the amount field
   const _AXIOM_SOL_FALLBACK = 150; // USD per SOL when no live price is available
 
+  // ── Analytics session state ──────────────────────────────────────────────
+  // Axiom never loads page-wallet.js, so the session lifecycle that file owns on
+  // the other DEXes has to be driven from here instead.
+  const _AX_SITE       = 'axiom.trade';
+  const _axSessionAt   = Date.now();
+  let   _axTradeCount  = 0;
+  let   _axEngaged     = false;   // one widget_engaged per intercept, not per code path
+  const _axLvl2Class   = function (lv) { return lv === 'LOW' ? 'safe' : lv === 'MEDIUM' ? 'caution' : lv ? 'danger' : null; };
+  function _axEngage() {
+    if (_axEngaged) return;
+    _axEngaged = true;
+    try { ns?.logFunnel?.('widget_engaged', { dex: _AX_SITE }); } catch (_) {}
+  }
+
   // ── Axiom-only widget mode ───────────────────────────────────────────────
   // Flag pages throughout page-widget.js to hide routing UX and show risk-only
   // content. Also exposes resolveWalletPubkey so the widget can display the address.
@@ -48,6 +62,7 @@
     ns.axiomProceedTrade = function () {
       ns.axiomConfirmPending = false;
       ns.axiomPendingBtnRef  = null;
+      _axEngage();
       // Immediately re-render Monitor so confirm panel disappears before the
       // trade fires — prevents the panel staying up through settlement.
       try { ns.renderWidgetPanel?.(); } catch (_) {}
@@ -143,6 +158,7 @@
       console.log('[ZQ:AXIOM] wallet switch (' + source + '):', ns.axiomSessionPubkey.slice(0, 8) + '…', '→', pubkey.slice(0, 8) + '…');
     }
     ns.axiomSessionPubkey = pubkey;    // Update the pill status — same 'Active' label as Jupiter once wallet is known.
+    try { ns.setWalletForSession?.(pubkey, 'axiom'); } catch (_) {}
     try { ns.updateWidgetStatus?.('Active'); } catch (_) {}  }
 
   // Recursively find a Solana pubkey in a parsed JSON object.
@@ -158,6 +174,27 @@
         if (found) return found;
       }
     }
+    return null;
+  }
+
+  // Typed read of Axiom's own wallet list, which lives in the localStorage 'settings'
+  // object (H.12: that object is Axiom's source of truth). Read by field name rather than
+  // via _deepFindPubkey — the same blob holds token mints, which share the base58 shape and
+  // would resolve as a wallet. 'settings' is also not matched by _STORE_KEY_RE below.
+  function _readFromAxiomSettings() {
+    try {
+      const raw = localStorage.getItem('settings');
+      if (!raw) return null;
+      const list = JSON.parse(raw)?.solWalletsAndGroups;
+      if (!Array.isArray(list)) return null;
+      // Entries are wallets or groups, so filter on type rather than taking [0]. A multi-wallet
+      // account resolves to its first wallet-typed entry until a trade signal names the actual one.
+      for (const entry of list) {
+        if (entry?.type !== 'wallet') continue;
+        const addr = typeof entry.address === 'string' ? entry.address.trim() : '';
+        if (_PUBKEY_RE.test(addr)) return addr;
+      }
+    } catch (_) {}
     return null;
   }
 
@@ -182,8 +219,8 @@
 
   // Scan DOM attributes and text nodes for a wallet pubkey.
   // Not called at document_start (DOM empty then) — deferred to DOMContentLoaded.
-  // NOTE: if Axiom uses a specific selector, refine _DOM_ATTRS or the zone query
-  // after DevTools inspection to improve reliability before step 5.
+  // Last resort: _readFromAxiomSettings supersedes this wherever Axiom has written its
+  // wallet list. No stable pubkey-bearing DOM attribute exists (confirmed 22 Aug 2026).
   const _DOM_ATTRS = ['data-pubkey', 'data-wallet', 'data-address', 'data-wallet-address'];
   function _readFromDom() {
     for (const attr of _DOM_ATTRS) {
@@ -213,7 +250,9 @@
       if (ns?.axiomSessionPubkey || Date.now() > deadline) {
         _domObserver.disconnect(); _domObserver = null; return;
       }
-      const found = _readFromDom();
+      // Re-checked here because Axiom writes 'settings' after auth resolves, which can land
+      // later than document_start — the early read misses it on a fresh login.
+      const found = _readFromAxiomSettings() ?? _readFromDom();
       if (found) { _setPubkey(found, 'dom-observer'); _domObserver.disconnect(); _domObserver = null; }
     });
     _domObserver.observe(document.documentElement, { childList: true, subtree: true });
@@ -314,6 +353,50 @@
       try {
         window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: _entry } }, '*');
       } catch (_) {}
+
+      // Analytics: structured trade record, plus the legacy swap_* event the
+      // /stats/pro swap_funnel still reads. Both, so the Axiom cohort appears in
+      // the same two places every other DEX does.
+      _axTradeCount++;
+      const _axSlipBps = ev.slippage != null ? Math.min(10000, Math.round(ev.slippage * 100)) : null;
+      const _axUsd     = _axiomBuyAmountSol != null ? _axiomBuyAmountSol * _AXIOM_SOL_FALLBACK : null;
+      const _axFeesSol = (ev.priorityFeeSol ?? 0) + (ev.bribeFeeSol ?? 0);
+      try { ns.logTrade?.({
+        user_action:       _wasOptimized ? 'optimised' : 'proceeded',
+        dex:               _AX_SITE,
+        exec_path:         (ev.enhancedMev || ev.mevProtection) ? 'axiom_mev' : 'axiom_direct',
+        tx_sig:            ev.signature,
+        input_mint:        _SOL,
+        output_mint:       _token,
+        success:           ev.success == null ? null : (ev.success ? 1 : 0),
+        trade_usd:         _axUsd != null ? Math.min(_axUsd, 500000) : null,
+        trade_sol:         _axiomBuyAmountSol ?? null,
+        quoted_slippage:   ev.slippage ?? null,
+        fees_usd:          _axFeesSol > 0 ? Math.min(_axFeesSol * _AXIOM_SOL_FALLBACK, 5000) : null,
+        slot_latency_ms:   ev.timeTakenMs != null ? Math.min(300000, Math.round(ev.timeTakenMs)) : null,
+        bot_risk_score:    ns.axiomMevRisk?.riskScore ?? null,
+        token_risk_score:  _risk?.score ?? null,
+        tx_classification: _axLvl2Class(_risk?.level),
+        auto_sign:         false,
+        // Unvalidated extras land in trades.data_json — Axiom's sender attribution.
+        provider:          ev.provider ?? null,
+        region:            ev.region   ?? null,
+        // Sent separately because fees_usd sums them: H.4's floor-vs-scaling question
+        // can only be answered by comparing bribe_fee_sol against trade_sol.
+        priority_fee_sol:  ev.priorityFeeSol ?? null,
+        bribe_fee_sol:     ev.bribeFeeSol    ?? null,
+      }); } catch (_) {}
+      try { ns.logProEvent?.(_wasOptimized ? 'swap_optimised' : 'swap_proceeded', {
+        site:         _AX_SITE,
+        token_level:  _risk?.level ?? null,
+        mev_level:    ns.axiomMevRisk?.riskLevel ?? null,
+        trade_usd:    _axUsd != null ? Math.min(_axUsd, 50000) : null,
+        trade_sol:    _axiomBuyAmountSol ?? null,
+        input_mint:   _SOL,
+        output_mint:  _token,
+        amount_in:    _axiomBuyAmountSol ?? null,
+        slippage_bps: _axSlipBps,
+      }); } catch (_) {}
 
       // Restore the user's original preset now that the optimized trade has settled.
       if (_wasOptimized) { _restoreSettings('settled'); }
@@ -449,9 +532,25 @@
   // lever is to temporarily tighten the user's active buy preset (lower slippage,
   // force MEV Secure) before the trade, then restore the original afterwards so
   // the change is completely seamless. Endpoint + recipe verified live:
-  //   POST https://api.axiom.trade/update-settings  body {settings:<full object>}
-  //   requires an actual diff + bumped lastUpdatedAt; cookie auth (credentials:include).
-  const _SETTINGS_URL = 'https://api.axiom.trade/update-settings';
+  //   POST {apiHost}/update-settings  body {settings:<full object>}  → requires an
+  //     actual diff + bumped lastUpdatedAt; cookie auth (credentials:include).
+  //   GET  {apiHost}/get-settings     → the same object UNWRAPPED; cookie auth.
+  // The wrap asymmetry is the API's, not ours: read unwrapped, write wrapped.
+  //
+  // The host is sharded (api10, api3, …) and both endpoints share it, so a
+  // hardcoded shard would break the read and the write together and silently.
+  // Learn it from live traffic. The unnumbered alias is the fallback and also
+  // serves both endpoints — /get-settings verified 200 on it, 22 Aug 2026.
+  let _apiHost = null;
+  function _noteApiHost(url) {
+    try {
+      const h = new URL(url, location.href).hostname;
+      if (/^api\d*\.axiom\.trade$/.test(h)) { _apiHost = h; if (ns) ns.axiomApiHost = h; }
+    } catch (_) {}
+  }
+  function _apiBase()          { return 'https://' + (_apiHost ?? ns?.axiomApiHost ?? 'api.axiom.trade'); }
+  function _updateSettingsUrl() { return _apiBase() + '/update-settings'; }
+  function _getSettingsUrl()    { return _apiBase() + '/get-settings'; }
 
   function _readSettings() {
     try {
@@ -519,75 +618,275 @@
     return { settings, key, preset, slipFrom, slipTo, mevFrom, mevTo: 'Secure', changes, estSavingsUsd };
   }
 
-  // POST a full settings object to Axiom; also mirror to localStorage so the
-  // app's in-memory state stays consistent. Returns true on HTTP 2xx.
+  // POST a settings object to Axiom. Returns true on HTTP 2xx.
+  // Callers must build the body from a fresh read of the server copy — never from
+  // a snapshot and never from the local mirror, which can hold different values.
+  let _serverCache = null; // last object seen from get-settings, for the unload path
   async function _postSettings(s) {
     try {
-      const res = await window.fetch(_SETTINGS_URL, {
+      const res = await window.fetch(_updateSettingsUrl(), {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ settings: s }),
       });
-      // Mirror to localStorage only on success, so the client never drifts
-      // ahead of what the server actually accepted.
-      if (res.ok) { try { localStorage.setItem('settings', JSON.stringify(s)); } catch (_) {} }
+      if (res.ok) _serverCache = s;
       return res.ok;
     } catch (_) { return false; }
   }
 
-  // Restore the user's original preset. Idempotent — clears snapshot + flags.
+  // ── OPS-181: restore obligation ──────────────────────────────────────────
+  // Axiom's settings live on three independent surfaces — the server copy, the
+  // localStorage mirror, and in-memory React state (H.11). A mutation we fail to
+  // undo is a third-party account left changed without the user's knowledge, so
+  // the obligation to restore is recorded before the mutation and cleared only by
+  // observation. `update-settings` cannot confirm state (H.10); `get-settings` can.
+
+  function _presetBuy(settings, key) { return settings?.solPresets?.[key]?.buy ?? null; }
+
+  // Crude ceiling until the designed expiry rule lands. A permanently-failing
+  // obligation otherwise retries on every load forever, each retry a POST to a
+  // third party from the user's authenticated session.
+  const _RESTORE_ATTEMPT_CEILING = 5;
+
+  // Only the fields we actually changed, each with the value to put back.
+  function _diffFields(before, after) {
+    const fields = {};
+    for (const k of Object.keys(after)) {
+      if (String(before[k]) !== String(after[k])) fields[k] = { from: before[k], to: after[k] };
+    }
+    return fields;
+  }
+
+  // What a live preset says about our obligation:
+  //   'from'  — already restored, nothing owed
+  //   'to'    — our mutation is still in place
+  //   'other' — the user has since set something else; their intent supersedes ours
+  function _verdict(buy, fields) {
+    if (!buy) return null;
+    let allFrom = true, allTo = true;
+    for (const k of Object.keys(fields)) {
+      if (String(buy[k]) !== String(fields[k].from)) allFrom = false;
+      if (String(buy[k]) !== String(fields[k].to))   allTo   = false;
+    }
+    return allFrom ? 'from' : allTo ? 'to' : 'other';
+  }
+
+  function _persistObligation(ob) {
+    if (ns) ns.axiomObligation = ob;
+    try { window.postMessage({ type: 'ZENDIQ_SAVE_AXIOM_OBLIGATION', obligation: ob }, '*'); } catch (_) {}
+  }
+
+  // Same write, but resolves only once the bridge confirms storage accepted it.
+  // The MAIN-world hop is a task-queue message racing a network round trip, so
+  // fire-and-forget is a hope, not a sequence. Resolves false on reject, storage
+  // failure, or no answer — never assume a record we have not been told exists.
+  function _persistObligationAcked(ob, timeoutMs) {
+    if (ns) ns.axiomObligation = ob;
+    return new Promise(function (resolve) {
+      const token = 'ob' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      let settled = false;
+      const finish = function (v) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        resolve(v);
+      };
+      const onMsg = function (e) {
+        if (e.origin !== window.location.origin) return;
+        if (e.data?.type !== 'ZENDIQ_AXIOM_OBLIGATION_SAVED' || e.data.token !== token) return;
+        if (!e.data.ok) console.warn('[ZQ:AXIOM] obligation persist rejected (' + e.data.why + ')');
+        finish(!!e.data.ok);
+      };
+      window.addEventListener('message', onMsg);
+      const timer = setTimeout(function () { finish(false); }, timeoutMs ?? 2000);
+      try { window.postMessage({ type: 'ZENDIQ_SAVE_AXIOM_OBLIGATION', obligation: ob, token: token }, '*'); }
+      catch (_) { finish(false); }
+    });
+  }
+
+  async function _fetchServerSettings() {
+    try {
+      const res = await window.fetch(_getSettingsUrl(), { credentials: 'include' });
+      if (!res.ok) return null;
+      const j = await res.json();
+      const s = j?.settings ?? j; // GET is unwrapped today; tolerate either
+      if (!s || typeof s !== 'object') return null;
+      _serverCache = s;
+      return s;
+    } catch (_) { return null; }
+  }
+
+  // Read-modify-write on the local mirror, touching only the named fields.
+  // `dir` is 'to' or 'from'. The read happens here, at write time, so anything
+  // Axiom's own UI changed meanwhile survives — a whole-snapshot write would not.
+  function _writeLocalFields(presetKey, fields, dir) {
+    try {
+      const keys = Object.keys(fields);
+      if (!keys.length) return true;
+      const s = _readSettings();
+      const buy = _presetBuy(s, presetKey);
+      if (!buy) return false;
+      for (const k of keys) buy[k] = fields[k][dir];
+      localStorage.setItem('settings', JSON.stringify(s));
+      return true;
+    } catch (_) { return false; }
+  }
+
+  // → true when nothing is owed on the local mirror any more.
+  function _settleLocal(ob) {
+    try {
+      const v = _verdict(_presetBuy(_readSettings(), ob.presetKey), ob.fields);
+      if (v == null)  return false; // unreadable — still owed
+      if (v !== 'to') return true;  // already restored, or the user changed it here
+      if (!_writeLocalFields(ob.presetKey, ob.fields, 'from')) return false;
+      return _verdict(_presetBuy(_readSettings(), ob.presetKey), ob.fields) === 'from';
+    } catch (_) { return false; }
+  }
+
+  // → true when nothing is owed on the server copy any more.
+  async function _settleServer(ob) {
+    const f = ob.serverFields ?? ob.fields; // the server's own before-values, not the mirror's
+    const server = await _fetchServerSettings();
+    if (!server) return false; // cannot observe — assume still owed
+    const v = _verdict(_presetBuy(server, ob.presetKey), f);
+    if (v == null)  return false;
+    if (v !== 'to') return true; // already restored, or superseded by the user
+    const buy = _presetBuy(server, ob.presetKey);
+    for (const k of Object.keys(f)) buy[k] = f[k].from;
+    server.lastUpdatedAt = Date.now(); // force a real diff so the write is accepted
+    const ok = await _postSettings(server);
+    const after = await _fetchServerSettings();
+    const done = _verdict(_presetBuy(after, ob.presetKey), f) === 'from';
+    if (ok && !done) console.warn('[ZQ:AXIOM] restore POST accepted but server still reads the mutated preset');
+    return done;
+  }
+
+  // Restore the user's original preset. Safe to call repeatedly.
   async function _restoreSettings(reason) {
-    const snap = ns?.axiomSettingsSnapshot;
+    const ob = ns?.axiomObligation;
     if (ns) {
-      ns.axiomSettingsSnapshot = null;
       ns.axiomOptimizing = false;
       if (ns._axiomRestoreTimer) { clearTimeout(ns._axiomRestoreTimer); ns._axiomRestoreTimer = null; }
     }
-    if (!snap) return;
-    try {
-      const s = JSON.parse(snap);
-      s.lastUpdatedAt = Date.now(); // force a real diff so the write is accepted
-      await _postSettings(s);
-      console.log('[ZQ:AXIOM] settings restored (' + reason + ')');
-    } catch (_) {}
+    if (!ob) return;
+
+    // Ceiling reached: stop attempting, but keep the record. The obligation is
+    // still owed — it is handed to healing, not abandoned.
+    if ((ob.attempts ?? 0) >= _RESTORE_ATTEMPT_CEILING) {
+      console.warn('[ZQ:AXIOM] restore attempt ceiling reached (' + ob.attempts + ') — obligation left outstanding');
+      return;
+    }
+
+    // Server first. Axiom may rewrite the local mirror from server state on a path
+    // we have not characterised, which would silently undo a local-only restore.
+    if (!ob.serverRestored) ob.serverRestored = await _settleServer(ob);
+    if (!ob.localRestored)  ob.localRestored  = _settleLocal(ob);
+    ob.attempts++;
+
+    const done = ob.localRestored && ob.serverRestored;
+    _persistObligation(done ? null : ob);
+    console.log('[ZQ:AXIOM] restore (' + reason + ') local=' + ob.localRestored + ' server=' + ob.serverRestored);
   }
 
-  // Optimize & Buy: snapshot → write safe preset → re-fire Buy → schedule restore.
+  // Optimize & Buy: patch safe values → re-fire Buy → schedule restore.
   // Exposed as ns.axiomOptimizeTrade for the widget button. No auto-sign — the
   // user still approves the buy through Axiom's own flow.
+  // Returns false when the optimization was abandoned and nothing was changed.
   async function _applyOptimizationAndBuy() {
     const opt = _computeOptimization();
     if (!opt || !ns) { ns?.axiomProceedTrade?.(); return; }
 
-    // Snapshot the original (deep clone via the raw object we just read).
-    ns.axiomSettingsSnapshot = JSON.stringify(opt.settings);
+    const _abandon = function (why) {
+      console.warn('[ZQ:AXIOM] optimization abandoned (' + why + ') — Axiom settings untouched');
+      ns.axiomObligation = null;
+      ns.axiomLastOptimization = null;
+      ns.axiomOptimizeAbandoned = { at: Date.now(), why: why };
+      ns.axiomProceedTrade?.();
+      return false;
+    };
+
+    ns.axiomOptimizeAbandoned = null;
+    _axEngage();
     ns.axiomLastOptimization = {
       slipFrom: opt.slipFrom, slipTo: opt.slipTo,
       mevFrom: opt.mevFrom, mevTo: opt.mevTo,
       estSavingsUsd: opt.estSavingsUsd, changes: opt.changes,
     };
 
-    // Build the modified settings from a fresh clone.
-    const s = JSON.parse(JSON.stringify(opt.settings));
-    const buy = s.solPresets[opt.key].buy;
-    buy.slippage = String(opt.slipTo);
-    buy.enhancedMevProtection = true;   // Secure
-    buy.mevProtection = false;          // Secure is the enhanced flag only
-    s.lastUpdatedAt = Date.now();
+    // The three fields this optimization touches, and nothing else.
+    const intended = {
+      slippage: String(opt.slipTo),
+      enhancedMevProtection: true,   // Secure
+      mevProtection: false,          // Secure is the enhanced flag only
+    };
 
-    ns.axiomOptimizing = true;
-    const ok = await _postSettings(s);
-    if (!ok) {
-      // Write failed — abandon optimization, fall back to the plain trade.
-      ns.axiomOptimizing = false;
-      ns.axiomSettingsSnapshot = null;
-      ns.axiomLastOptimization = null;
-      ns.axiomProceedTrade?.();
-      return;
+    // Each surface is diffed against its own fresh read. The mirror and the server
+    // can legitimately hold different values, so a single shared before-value would
+    // put the wrong one back on one of them.
+    const localBuy  = _presetBuy(_readSettings(), opt.key);
+    const server    = await _fetchServerSettings();
+    const serverBuy = _presetBuy(server, opt.key);
+    if (!localBuy || !serverBuy) return _abandon('settings-unreadable');
+
+    // A field with no readable before-value cannot be put back faithfully, and
+    // the bridge would drop it from the record — leaving a half-undoable change.
+    for (const k of Object.keys(intended)) {
+      if (!(k in localBuy) || !(k in serverBuy)) return _abandon('unknown-field');
     }
 
-    // Settings are safe server-side. Fire the original Buy click.
+    const fields       = _diffFields(localBuy,  intended);
+    const serverFields = _diffFields(serverBuy, intended);
+    if (!Object.keys(fields).length && !Object.keys(serverFields).length) { ns.axiomProceedTrade?.(); return; }
+
+    // Write-ahead: the obligation is recorded before the mutation, so a crash
+    // between the two leaves a record to heal from rather than a silent change.
+    const ob = {
+      v: 1,
+      createdAt: Date.now(),
+      host: _apiHost,
+      presetKey: opt.key,
+      fields,
+      serverFields,
+      localRestored: false,
+      serverRestored: false,
+      attempts: 0,
+    };
+
+    // Abandon rather than mutate: without a confirmed undo record, an optimized
+    // trade is a third-party setting we might never be able to put back.
+    if (!(await _persistObligationAcked(ob))) return _abandon('no-undo-record');
+
+    ns.axiomOptimizing = true;
+    for (const k of Object.keys(serverFields)) serverBuy[k] = serverFields[k].to;
+    server.lastUpdatedAt = Date.now();
+    const ok = await _postSettings(server);
+    if (!ok) {
+      // Write failed — but "failed" here cannot be trusted (H.10), so read the
+      // server rather than assuming nothing landed. Only an observed 'from'
+      // clears the obligation; an unreadable server leaves it outstanding.
+      ns.axiomOptimizing = false;
+      ns.axiomLastOptimization = null;
+      const v = _verdict(_presetBuy(await _fetchServerSettings(), opt.key), serverFields);
+      if (v === 'from') _persistObligation(null);
+      else              await _restoreSettings('write-failed');
+      ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'settings-write-failed' };
+      ns.axiomProceedTrade?.();
+      return false;
+    }
+
+    if (!_writeLocalFields(opt.key, fields, 'to')) {
+      // The mirror is what Axiom actually reads (H.11), so a server-only write
+      // protects nothing. Put the server back rather than claim a protected trade.
+      ns.axiomLastOptimization = null;
+      ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'mirror-unwritable' };
+      await _restoreSettings('mirror-write-failed');
+      ns.axiomProceedTrade?.();
+      return false;
+    }
+
+    // Settings are safe on both surfaces. Fire the original Buy click.
     ns.axiomProceedTrade?.();
 
     // Fallback restore if the settlement signal is missed (e.g. failed/cancelled).
@@ -596,14 +895,41 @@
 
   // Best-effort restore if the user closes the tab mid-trade — sendBeacon carries
   // same-site cookies so the write still authenticates without awaiting a promise.
+  // Opportunistic only: it never clears the obligation, because it cannot observe
+  // the outcome. The next load confirms by reading.
   window.addEventListener('beforeunload', function () {
-    if (!ns?.axiomSettingsSnapshot) return;
+    const ob = ns?.axiomObligation;
+    if (!ob || (ob.localRestored && ob.serverRestored)) return;
+    if ((ob.attempts ?? 0) >= _RESTORE_ATTEMPT_CEILING) return;
     try {
-      const s = JSON.parse(ns.axiomSettingsSnapshot);
+      _writeLocalFields(ob.presetKey, ob.fields, 'from');
+      // No GET is possible at unload, so patch the last object the server itself
+      // gave us. Falling back to the mirror here would post its values to the
+      // server and overwrite anything that only ever existed there.
+      const f = ob.serverFields ?? ob.fields;
+      const s = _serverCache;
+      const buy = _presetBuy(s, ob.presetKey);
+      if (!buy || _verdict(buy, f) !== 'to') return;
+      for (const k of Object.keys(f)) buy[k] = f[k].from;
       s.lastUpdatedAt = Date.now();
       const blob = new Blob([JSON.stringify({ settings: s })], { type: 'application/json' });
-      navigator.sendBeacon(_SETTINGS_URL, blob);
-      localStorage.setItem('settings', JSON.stringify(s));
+      navigator.sendBeacon(_updateSettingsUrl(), blob);
+    } catch (_) {}
+  });
+
+  // Separate listener from the restore beacon above: that one returns early on
+  // several conditions and must not gate the session record.
+  window.addEventListener('beforeunload', function () {
+    if (!ns?._sessionLogged) return;
+    try {
+      ns.logSession?.('end', {
+        type:         'end',
+        wallet:       'axiom',
+        wallet_hash:  ns.walletHash ?? null,
+        dex:          _AX_SITE,
+        duration_s:   Math.min(86400, Math.round((Date.now() - _axSessionAt) / 1000)),
+        trades_count: _axTradeCount,
+      });
     } catch (_) {}
   });
 
@@ -661,9 +987,11 @@
 
   // ── Step 3a: early session wallet pubkey read ────────────────────────────
   // Storage is available immediately at document_start; DOM is not.
-  // Falls back through: storage → DOMContentLoaded DOM scan → MutationObserver.
-  // Signal-path (_dispatchSignal) fills the gap if all DOM strategies miss.
+  // Falls back through: axiom settings → generic storage scan → DOM scan → MutationObserver.
+  // Signal-path (_dispatchSignal) wins over all of these — it names the wallet that actually traded.
   (function _earlyPubkeyRead() {
+    const fromSettings = _readFromAxiomSettings();
+    if (fromSettings) { _setPubkey(fromSettings, 'axiom-settings'); return; }
     const fromStorage = _readFromStorage();
     if (fromStorage) { _setPubkey(fromStorage, 'storage'); return; }
     function _domRead() {
@@ -679,12 +1007,24 @@
     }
   })();
 
+  // ── OPS-181: load any outstanding restore obligation ─────────────────────
+  // Step 1 only reinstates the record so a reload does not lose it. Acting on it
+  // (load-time healing) is step 4.
+  window.addEventListener('message', function (e) {
+    if (e.origin !== window.location.origin) return;
+    if (e.data?.type !== 'ZENDIQ_AXIOM_OBLIGATION_RESPONSE') return;
+    const ob = e.data.obligation;
+    if (ns && ob && ob.v === 1 && ob.fields) ns.axiomObligation = ob;
+  });
+  try { window.postMessage({ type: 'ZENDIQ_GET_AXIOM_OBLIGATION' }, '*'); } catch (_) {}
+
   // ── fetch observer ──────────────────────────────────────────────────────────────────
   // Installed at document_start before Axiom's JS bundles load.
   const _origFetch = window.fetch;
   window.fetch = async function (resource, init) {
     try {
       const url = typeof resource === 'string' ? resource : (resource?.url ?? '');
+      _noteApiHost(url);
       if (_isAxiomSignal(url)) {
         const body = init?.body ?? null;
         if (typeof body === 'string' && body) _dispatchSignal(url, body);
@@ -700,6 +1040,7 @@
 
   XMLHttpRequest.prototype.open = function (_method, url) {
     this.__zq_ax_url = typeof url === 'string' ? url : '';
+    try { _noteApiHost(this.__zq_ax_url); } catch (_) {}
     return _origOpen.apply(this, arguments);
   };
 
@@ -822,6 +1163,19 @@
         ns.axiomConfirmPending = true;
         ns.axiomPendingBtnRef  = btn;
         ns.axiomRiskAcknowledged = false; // new buy intercept — reset acknowledgement
+        ns.axiomOptimizeAbandoned = null; // last trade's notice no longer applies
+        _axEngaged = false;
+        const _iUsd = _axiomBuyAmountSol != null ? _axiomBuyAmountSol * _AXIOM_SOL_FALLBACK : null;
+        try { ns.logProEvent?.('swap_intercepted', {
+          site:         _AX_SITE,
+          token_level:  ns.tokenScoreResult?.level ?? null,
+          mev_level:    ns.axiomMevRisk?.riskLevel ?? null,
+          trade_usd:    _iUsd != null ? Math.min(_iUsd, 50000) : null,
+          trade_sol:    _axiomBuyAmountSol ?? null,
+          output_mint:  ns._tokenScoreMint ?? null,
+          amount_in:    _axiomBuyAmountSol ?? null,
+        }); } catch (_) {}
+        try { ns.logFunnel?.('widget_shown', { dex: _AX_SITE }); } catch (_) {}
       }
       const _w = document.getElementById('sr-widget');
       if (_w) {
@@ -863,20 +1217,45 @@
   // ── Amount input watcher ─────────────────────────────────────────────────
   // Re-scores bot attack risk whenever the user changes the SOL amount.
   // Listens for native 'input' events (covers typed values) and watches the
-  // buy button text ("Buy TOKEN 買X.XX") for preset-button clicks via
-  // MutationObserver, since preset buttons update React state without a native
-  // input event on the amount field.
-  // Reads the actual SOL buy amount from Axiom's Buy button text (e.g.
-  // "Buy SYM 買0.001"). This is authoritative — it reflects exactly what the
-  // trade will execute, so it cannot be confused with the slippage input that
-  // the generic 'input' listener would otherwise pick up.
+  // buy button text for preset-button clicks via MutationObserver, since preset
+  // buttons update React state without a native input event on the amount field.
+
+  // True when a visible input holds this value. Used only to corroborate an
+  // otherwise-ambiguous bare integer read off the buy button.
+  function _amountInputHas(v) {
+    const inputs = document.querySelectorAll('input');
+    for (let i = 0; i < inputs.length; i++) {
+      const r = inputs[i].getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && parseFloat(inputs[i].value) === v) return true;
+    }
+    return false;
+  }
+
+  // Extracts the SOL amount from one Buy button's text. Authoritative over the
+  // amount field, which the generic 'input' listener confuses with slippage.
+  function _amountFromButtonText(txt) {
+    if (!/^\s*buy\s/i.test(txt)) return null;
+    let m = /[\u8CB7]\s*([0-9]+(?:\.[0-9]+)?)/.exec(txt)         // Buy SYM 買X.XX
+         ?? /buy\s+\S+\s+([0-9]+(?:\.[0-9]+)?)/i.exec(txt);      // Buy SYM X.XX
+    let ambiguous = false;
+    if (!m) {
+      // Live layout renders 買 as an icon, so it never reaches textContent and the
+      // amount abuts the symbol: "Buy catalyst0.001". A bare trailing integer is
+      // then indistinguishable from a symbol ending in a digit ("Buy CAT3").
+      m = /([0-9]+(?:\.[0-9]+)?)\s*$/.exec(txt);
+      ambiguous = !!m && !m[1].includes('.');
+    }
+    if (!m) return null;
+    const v = parseFloat(m[1]);
+    if (isNaN(v) || v <= 0 || v >= 100000) return null;
+    return (ambiguous && !_amountInputHas(v)) ? null : v;
+  }
+
   function _readBuyAmountFromButton() {
     const btns = document.querySelectorAll('button');
     for (let i = 0; i < btns.length; i++) {
-      const txt = btns[i].textContent ?? '';
-      const m = /[\u8CB7]([0-9]+(?:\.[0-9]+)?)/.exec(txt)        // 買X.XX
-             ?? /buy\s+\S+\s+([0-9]+(?:\.[0-9]+)?)/i.exec(txt);  // Buy SYM X.XX
-      if (m) { const v = parseFloat(m[1]); if (!isNaN(v) && v > 0) return v; }
+      const v = _amountFromButtonText(btns[i].textContent ?? '');
+      if (v != null) return v;
     }
     return null;
   }
@@ -909,21 +1288,10 @@
     // Preset buttons update the buy-button text — watch for that change.
     function _startBtnObserver() {
       const obs = new MutationObserver(function () {
-        // The buy button text contains the amount: e.g. "Buy NOPA 買0.01".
-        const btns = document.querySelectorAll('button');
-        for (let i = 0; i < btns.length; i++) {
-          const txt = btns[i].textContent ?? '';
-          const m = /[\u8CB7\u8CB7]([0-9]+(?:\.[0-9]+)?)/.exec(txt) // 買X.XX
-                 ?? /buy\s+\S+\s+([0-9]+(?:\.[0-9]+)?)/i.exec(txt); // Buy SYM X.XX
-          if (m) {
-            const v = parseFloat(m[1]);
-            if (!isNaN(v) && v > 0) {
-              clearTimeout(_debounce);
-              _debounce = setTimeout(function () { _rescore(v); }, 200);
-            }
-            break;
-          }
-        }
+        const v = _readBuyAmountFromButton();
+        if (v == null) return;
+        clearTimeout(_debounce);
+        _debounce = setTimeout(function () { _rescore(v); }, 200);
       });
       obs.observe(document.body, { subtree: true, characterData: true, childList: true });
     }
@@ -1102,6 +1470,26 @@
         ? (ns._buildExecutionRiskCard(execRisk ?? null, _isSimple) || '<div style="background:rgba(255,181,71,0.06);border:1px solid rgba(255,181,71,0.2);border-radius:10px;padding:10px 12px;margin-bottom:10px"><div style="color:#FFB547;font-size:12px">Execution Risk — scanning\u2026</div></div>')
         : '';
 
+      // ── Optimization abandoned — settings were left untouched ─────────────
+      // Deliberately has no dismiss timer and survives re-render: the user asked
+      // for protection and did not get it, and a notice that expires is one the
+      // settlement re-render would erase before it was read.
+      const _abWhy = {
+        'no-undo-record':       'ZendIQ could not save the record it needs to undo the change.',
+        'settings-unreadable':  'ZendIQ could not read your Axiom settings safely.',
+        'settings-write-failed':'Axiom rejected the settings change.',
+        'mirror-unwritable':    'The change could not be applied to this browser, so it was undone.',
+        'unknown-field':        'A setting ZendIQ needed to change was not in the expected format.',
+      };
+      const _abandonHtml = ns.axiomOptimizeAbandoned
+        ? '<div style="background:rgba(255,181,71,0.10);border:1px solid rgba(255,181,71,0.45);border-radius:8px;padding:9px 12px;margin-bottom:10px">'
+          + '<div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:3px">\u26a0 Traded without optimizing</div>'
+          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.5">'
+          +   _esc(_abWhy[ns.axiomOptimizeAbandoned.why] ?? 'ZendIQ could not apply the safer preset.')
+          +   ' Your Axiom settings were left exactly as they were.</div>'
+          + '</div>'
+        : '';
+
       // ── Impact warning for HIGH / CRITICAL combined risk ─────────────────
       const _warnLvl = _hasAnyRisk && (_comp >= 40 || _botSc >= 40)
         ? (_comp >= 70 || _botSc >= 70 ? 'CRITICAL' : 'HIGH')
@@ -1168,6 +1556,7 @@
 
       return '<div style="padding:14px 16px">'
         + (_token ? '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.7px;color:#6B6B8A;margin-bottom:10px">TOKEN RISK \u00b7 ' + _sym + '</div>' : '')
+        + _abandonHtml
         + _overallCard
         + _tokenRiskCard
         + _botCard

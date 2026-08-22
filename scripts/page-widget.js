@@ -2514,7 +2514,20 @@
         _axOptimize.disabled = true;
         _axOptimize.style.opacity = '0.7';
         _axOptimize.textContent = '\u23f3 Applying safe settings\u2026';
-        try { await ns.axiomOptimizeTrade?.(); } catch (_) {}
+        let _axRes;
+        try { _axRes = await ns.axiomOptimizeTrade?.(); } catch (_) {}
+        if (_axRes === false) {
+          // Every other terminal state here collapses the panel. This one must not:
+          // the user asked for protection and did not get it, so the notice stays
+          // until the next intercept clears ns.axiomOptimizeAbandoned. The panel
+          // re-renders it, so this in-place text is only the immediate feedback.
+          _axOptimize.style.opacity    = '1';
+          _axOptimize.style.background = 'rgba(255,181,71,0.15)';
+          _axOptimize.style.border     = '1px solid #FFB547';
+          _axOptimize.style.color      = '#FFB547';
+          _axOptimize.textContent      = '\u26a0 Couldn\u2019t optimize \u2014 your settings were left unchanged';
+          return;
+        }
         const _el = document.getElementById('sr-widget');
         if (_el) { _el.classList.remove('expanded', 'alert'); savePillState(_el); }
       };

@@ -22,6 +22,86 @@ async function _getProInstallId() {
   });
 }
 
+// ── Telemetry send reliability ───────────────────────────────────────
+// OPS-169. fetch() only rejects on network failure, so an HTTP 403/400 resolves
+// normally — the previous `.catch(() => {})` discarded every server-side rejection
+// without either end noticing. That is how a structured-ingest path can return zero
+// rows for months while looking healthy.
+//
+// Two surfaces, deliberately:
+//   1. a local ring buffer, for live debugging in the service-worker console;
+//   2. `prior_failures` attached to the next SUCCESSFUL send, so the server learns
+//      about an outage on recovery even if nobody ever opens that console.
+// (1) alone would recreate the original defect one level up: an unread failure log
+// is as silent as a swallowed 4xx.
+const _PRO_FAIL_KEY = 'sendiq_pro_telemetry_failures';
+const _PRO_FAIL_MAX = 20;
+
+function _recordProSendFailure(status, type, detail) {
+  try {
+    chrome.storage.local.get([_PRO_FAIL_KEY], (r) => {
+      const arr = Array.isArray(r?.[_PRO_FAIL_KEY]) ? r[_PRO_FAIL_KEY] : [];
+      arr.push({ t: Date.now(), status, type, detail: String(detail ?? '').slice(0, 200) });
+      chrome.storage.local.set({ [_PRO_FAIL_KEY]: arr.slice(-_PRO_FAIL_MAX) });
+    });
+  } catch (_) {}
+}
+
+// Summarise buffered failures so they can ride along on the next request.
+function _peekProFailures() {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get([_PRO_FAIL_KEY], (r) => {
+        const arr = Array.isArray(r?.[_PRO_FAIL_KEY]) ? r[_PRO_FAIL_KEY] : [];
+        if (!arr.length) return resolve(null);
+        resolve({
+          reported: arr.length,
+          summary: {
+            count:       arr.length,
+            oldest_ts:   arr[0].t,
+            last_status: arr[arr.length - 1].status,
+          },
+        });
+      });
+    } catch (_) { resolve(null); }
+  });
+}
+
+// Drop only the entries we actually reported — failures logged while the reporting
+// request was in flight must survive.
+function _clearReportedProFailures(n) {
+  try {
+    chrome.storage.local.get([_PRO_FAIL_KEY], (r) => {
+      const arr = Array.isArray(r?.[_PRO_FAIL_KEY]) ? r[_PRO_FAIL_KEY] : [];
+      chrome.storage.local.set({ [_PRO_FAIL_KEY]: arr.slice(n) });
+    });
+  } catch (_) {}
+}
+
+// Single exit point for every analytics POST. Never throws; always resolves.
+async function _postProEvent(payload) {
+  const pending = await _peekProFailures();
+  try {
+    const r = await fetch(PRO_BACKEND_URL + '/api/events', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(pending ? { ...payload, prior_failures: pending.summary } : payload),
+    });
+    if (r.ok) {
+      if (pending) _clearReportedProFailures(pending.reported);
+      return;
+    }
+    let detail = '';
+    try { detail = (await r.text()).slice(0, 200); } catch (_) {}
+    console.warn('[ZendIQ] telemetry rejected', r.status, payload?.type, detail);
+    _recordProSendFailure(r.status, payload?.type, detail);
+  } catch (err) {
+    const m = err?.message ?? String(err);
+    console.warn('[ZendIQ] telemetry send failed', payload?.type, m);
+    _recordProSendFailure(0, payload?.type, m);
+  }
+}
+
 // Allowed origins for FETCH_JSON to prevent SSRF
 const FETCH_JSON_ALLOWED = [
   PRO_BACKEND_URL,   // https://zendiq-backend.onrender.com (shared)
@@ -109,25 +189,19 @@ chrome.runtime.onInstalled.addListener((details) => {
   const country = locale.includes('-') ? locale.split('-').pop() : locale.toUpperCase();
   const os      = ua.includes('Windows') ? 'windows' : ua.includes('Mac OS X') ? 'mac' : ua.includes('Linux') ? 'linux' : 'other';
   const browser = ua.includes('Brave') ? 'brave' : 'chrome';
-  _getProInstallId().then(install_id => {
-    fetch(PRO_BACKEND_URL + '/api/events', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        type:       'extension_installed',
-        category:   'install',
-        source:     'pro',
-        install_id,
-        data: {
-          reason:       details.reason,
-          prev_version: details.previousVersion ?? null,
-          browser, os, locale: locale.slice(0, 10),
-          country: (typeof country === 'string' && country.length === 2) ? country : null,
-        },
-        v: chrome.runtime.getManifest().version,
-      }),
-    }).catch(() => {});
-  });
+  _getProInstallId().then(install_id => _postProEvent({
+    type:       'extension_installed',
+    category:   'install',
+    source:     'pro',
+    install_id,
+    data: {
+      reason:       details.reason,
+      prev_version: details.previousVersion ?? null,
+      browser, os, locale: locale.slice(0, 10),
+      country: (typeof country === 'string' && country.length === 2) ? country : null,
+    },
+    v: chrome.runtime.getManifest().version,
+  }));
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -420,16 +494,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const data      = (msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data)) ? msg.data : {};
     const v         = typeof msg.v === 'string' ? msg.v : '';
     const category  = typeof msg.category === 'string' ? msg.category : null;
-    const _doPost   = (install_id) => {
-      fetch(PRO_BACKEND_URL + '/api/events', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          type: eventType, source: 'pro', install_id, data, v,
-          ...(category ? { category } : {}),
-        }),
-      }).catch(() => {});
-    };
+    const _doPost   = (install_id) => _postProEvent({
+      type: eventType, source: 'pro', install_id, data, v,
+      ...(category ? { category } : {}),
+    });
     // daily_active: deduplicate — only post once per calendar day
     if (eventType === 'daily_active') {
       const today = (data.day ?? new Date().toISOString().slice(0, 10));

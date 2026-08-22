@@ -297,6 +297,69 @@ window.addEventListener('message', (e) => {
     return;
   }
 
+  // ZendIQ (OPS-181): persist the outstanding Axiom settings-restore obligation.
+  // Written before the mutating POST so a crash mid-trade still leaves a record.
+  // A null obligation clears it — only sent once both surfaces verify as restored.
+  if (e.data.type === 'ZENDIQ_SAVE_AXIOM_OBLIGATION') {
+    const tok = typeof e.data.token === 'string' && /^[A-Za-z0-9]{1,40}$/.test(e.data.token) ? e.data.token : null;
+    // Every exit answers, rejections included. The caller blocks a third-party
+    // mutation on this reply, and fail-closed must not also mean fail-slow — a
+    // silent reject would cost it the full timeout for an answer known instantly.
+    const ack = (ok, why) => {
+      if (!tok) return;
+      try { window.postMessage({ type: 'ZENDIQ_AXIOM_OBLIGATION_SAVED', token: tok, ok: ok, why: why ?? null }, '*'); } catch (_) {}
+    };
+    const raw = e.data.obligation;
+    if (raw == null) { chrome.storage.local.remove('sendiq_axiom_obligation', () => ack(!chrome.runtime.lastError, 'clear')); return; }
+    if (typeof raw !== 'object' || raw.v !== 1) return ack(false, 'shape');
+    if (typeof raw.presetKey !== 'string' || !/^[A-Za-z0-9_]{1,32}$/.test(raw.presetKey)) return ack(false, 'presetKey');
+    if (!raw.fields || typeof raw.fields !== 'object') return ack(false, 'fields');
+    const okVal = (v) => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+    const clean = (src) => {
+      const out = {};
+      if (!src || typeof src !== 'object') return out;
+      for (const k of Object.keys(src)) {
+        if (!/^[A-Za-z0-9_]{1,40}$/.test(k)) continue;
+        const f = src[k];
+        if (!f || typeof f !== 'object' || !('from' in f) || !('to' in f)) continue;
+        if (!okVal(f.from) || !okVal(f.to)) continue;
+        out[k] = { from: f.from, to: f.to };
+      }
+      return out;
+    };
+    const fields = clean(raw.fields);
+    const serverFields = clean(raw.serverFields);
+    if (!Object.keys(fields).length && !Object.keys(serverFields).length) return ack(false, 'fields-empty');
+    chrome.storage.local.set({
+      sendiq_axiom_obligation: {
+        v: 1,
+        createdAt: Number(raw.createdAt) || Date.now(),
+        host: typeof raw.host === 'string' && /^api\d*\.axiom\.trade$/.test(raw.host) ? raw.host : null,
+        presetKey: raw.presetKey,
+        fields,
+        serverFields,
+        localRestored:  !!raw.localRestored,
+        serverRestored: !!raw.serverRestored,
+        attempts: Math.min(Number(raw.attempts) || 0, 999),
+      },
+    }, () => {
+      const err = chrome.runtime.lastError;
+      // A discarded failure here is an untracked third-party mutation, which is
+      // the defect OPS-181 exists to prevent — never swallow it silently.
+      if (err) console.warn('[ZendIQ][bridge] obligation persist failed', err.message);
+      ack(!err, err ? 'set' : null);
+    });
+    return;
+  }
+
+  // ZendIQ (OPS-181): load the outstanding obligation on page start
+  if (e.data.type === 'ZENDIQ_GET_AXIOM_OBLIGATION') {
+    chrome.storage.local.get(['sendiq_axiom_obligation'], ({ sendiq_axiom_obligation }) => {
+      try { window.postMessage({ type: 'ZENDIQ_AXIOM_OBLIGATION_RESPONSE', obligation: sendiq_axiom_obligation ?? null }, '*'); } catch (_) {}
+    });
+    return;
+  }
+
   // ZendIQ: save updated settings from widget panel
   if (e.data.type === 'ZENDIQ_SAVE_SETTINGS') {
     try {
