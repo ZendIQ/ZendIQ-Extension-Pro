@@ -542,6 +542,7 @@
   // Learn it from live traffic. The unnumbered alias is the fallback and also
   // serves both endpoints — /get-settings verified 200 on it, 22 Aug 2026.
   let _apiHost = null;
+  let _healingOnLoad = false;  // a Buy clicked during this is skipped, not failed
   function _noteApiHost(url) {
     try {
       const h = new URL(url, location.href).hostname;
@@ -559,6 +560,17 @@
       const obj = JSON.parse(raw);
       return (obj && typeof obj === 'object') ? obj : null;
     } catch (_) { return null; }
+  }
+
+  // A cleared site and an unparseable mirror both make _readSettings return null,
+  // but they mean opposite things: nothing local holds our value vs. we cannot tell.
+  function _localState() {
+    try {
+      const raw = localStorage.getItem('settings');
+      if (raw == null || raw === '') return 'absent';
+      const obj = JSON.parse(raw);
+      return (obj && typeof obj === 'object') ? 'ok' : 'unreadable';
+    } catch (_) { return 'unreadable'; }
   }
 
   function _mevModeLabel(buy) {
@@ -644,10 +656,92 @@
 
   function _presetBuy(settings, key) { return settings?.solPresets?.[key]?.buy ?? null; }
 
-  // Crude ceiling until the designed expiry rule lands. A permanently-failing
-  // obligation otherwise retries on every load forever, each retry a POST to a
-  // third party from the user's authenticated session.
+  // A permanently-failing obligation would otherwise retry on every load forever,
+  // each retry a POST to a third party from the user's authenticated session.
   const _RESTORE_ATTEMPT_CEILING = 5;
+
+  // How long we keep restoring silently. Past this we ask instead of writing.
+  // Our targets are 10/15/20 — exactly the round numbers a human types — so a
+  // preset reading `to` is weak evidence we were the one who wrote it. If the user
+  // set 20 themselves and we "restore" 30, we have raised their slippage and left
+  // them less safe than we found them: the worst direction for this product to be
+  // wrong in. Asking costs one prompt, so the window is short rather than generous.
+  // Once ob.serverStamp is verified (see below) this bound relaxes — an untouched
+  // stamp proves authorship better than any amount of elapsed time.
+  const _OBLIGATION_EXPIRY_MS = 48 * 60 * 60 * 1000;
+
+  function _isExpired(ob) {
+    return (Date.now() - (Number(ob.createdAt) || 0)) > _OBLIGATION_EXPIRY_MS
+        || (ob.attempts ?? 0) >= _RESTORE_ATTEMPT_CEILING;
+  }
+
+  // ── OPS-181: settings lock ───────────────────────────────────────────────
+  // Required for the restore as well as the mutation. Both are read-modify-write
+  // over the same two surfaces, and a restore racing another tab's mutation can
+  // put back a value that tab has already moved on from.
+  // Heartbeat rather than a plain flag: a tab that crashes cannot release, so the
+  // lock has to age out on its own or the account wedges until storage is cleared.
+  // The staleness window is the cost of that — a tab throttled by the browser for
+  // longer than this loses the lock while still believing it holds it, which is
+  // why 'refresh' reports the loss instead of silently re-taking it.
+  const _LOCK_BEAT_MS = 5000;   // must stay well under the worker's 15s staleness
+  const _lockOwner = 'lk' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  let _lockBeat = null;
+  let _lockHeld = false;
+
+  function _lockRpc(op, timeoutMs) {
+    return new Promise(function (resolve) {
+      const id = 'lk' + Math.random().toString(36).slice(2, 10);
+      let settled = false;
+      const finish = function (v) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        resolve(v);
+      };
+      const onMsg = function (ev) {
+        if (ev.source !== window || ev.origin !== window.location.origin) return;
+        const m = ev.data?.sr_bridge ? ev.data.msg : null;
+        if (m?.type !== 'AXIOM_LOCK_RESPONSE' || m._id !== id) return;
+        finish(m.result ?? { ok: false });
+      };
+      window.addEventListener('message', onMsg);
+      // No answer means no lock. Treating a timeout as success would mutate
+      // exactly when we have least evidence we are the only writer.
+      const timer = setTimeout(function () { finish({ ok: false, error: 'timeout' }); }, timeoutMs ?? 2000);
+      try { window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'AXIOM_LOCK', op: op, owner: _lockOwner, _id: id } }, '*'); }
+      catch (_) { finish({ ok: false, error: 'post' }); }
+    });
+  }
+
+  function _stopLockBeat() {
+    if (_lockBeat) { clearInterval(_lockBeat); _lockBeat = null; }
+  }
+
+  async function _acquireLock() {
+    const r = await _lockRpc('acquire');
+    _lockHeld = !!r?.ok;
+    if (!_lockHeld) return false;
+    if (!_lockBeat) {
+      _lockBeat = setInterval(function () {
+        _lockRpc('refresh').then(function (rr) {
+          if (rr?.ok) return;
+          _lockHeld = false;
+          _stopLockBeat();
+          console.warn('[ZQ:AXIOM] settings lock lost — another tab took over');
+        });
+      }, _LOCK_BEAT_MS);
+    }
+    return true;
+  }
+
+  function _releaseLock() {
+    _stopLockBeat();
+    if (!_lockHeld) return Promise.resolve();
+    _lockHeld = false;
+    return _lockRpc('release');
+  }
 
   // Only the fields we actually changed, each with the value to put back.
   function _diffFields(before, after) {
@@ -706,6 +800,34 @@
     });
   }
 
+  // The obligation as storage holds it, not as this tab remembers it. ns.axiomObligation
+  // is filled at page load, so a tab opened before another tab mutated has no record of
+  // that mutation and would read its result as the user's own setting.
+  // `ok:false` means we could not tell, which is not the same as nothing outstanding.
+  function _fetchObligation(timeoutMs) {
+    return new Promise(function (resolve) {
+      const token = 'og' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      let settled = false;
+      const finish = function (v) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        resolve(v);
+      };
+      const onMsg = function (e) {
+        if (e.origin !== window.location.origin) return;
+        if (e.data?.type !== 'ZENDIQ_AXIOM_OBLIGATION_RESPONSE' || e.data.token !== token) return;
+        const ob = e.data.obligation;
+        finish({ ok: e.data.ok !== false, obligation: (ob && ob.v === 1 && ob.fields) ? ob : null });
+      };
+      window.addEventListener('message', onMsg);
+      const timer = setTimeout(function () { finish({ ok: false, obligation: null }); }, timeoutMs ?? 2000);
+      try { window.postMessage({ type: 'ZENDIQ_GET_AXIOM_OBLIGATION', token: token }, '*'); }
+      catch (_) { finish({ ok: false, obligation: null }); }
+    });
+  }
+
   async function _fetchServerSettings() {
     try {
       const res = await window.fetch(_getSettingsUrl(), { credentials: 'include' });
@@ -735,24 +857,48 @@
   }
 
   // → true when nothing is owed on the local mirror any more.
-  function _settleLocal(ob) {
+  // Three branches on what the preset actually reads, per surface: 'to' is ours to
+  // undo, 'from' is already done, anything else is the user's own later choice —
+  // and writing over that would be the very thing this whole mechanism exists to
+  // prevent, so uncertainty abandons rather than writes.
+  function _settleLocal(ob, serverSettled, readOnly) {
     try {
+      const state = _localState();
+      // Site data cleared: no mirror holds our value, and Axiom re-seeds it from the
+      // server — so this is only settled once the server is clean too.
+      if (state === 'absent')     { ob.localOutcome = 'absent';     return !!serverSettled; }
+      if (state === 'unreadable') { ob.localOutcome = 'unreadable'; return false; }
+
       const v = _verdict(_presetBuy(_readSettings(), ob.presetKey), ob.fields);
-      if (v == null)  return false; // unreadable — still owed
-      if (v !== 'to') return true;  // already restored, or the user changed it here
-      if (!_writeLocalFields(ob.presetKey, ob.fields, 'from')) return false;
-      return _verdict(_presetBuy(_readSettings(), ob.presetKey), ob.fields) === 'from';
-    } catch (_) { return false; }
+      if (v == null)     { ob.localOutcome = 'preset-absent'; return !!serverSettled; }
+      if (v === 'from')  { ob.localOutcome = 'restored';   return true; }
+      if (v === 'other') { ob.localOutcome = 'superseded'; return true; }
+      // Expired: the read still happens, only the write stops. 'from' and 'other'
+      // above settle for free; this is the one branch that needs the user.
+      if (readOnly)      { ob.localOutcome = 'needs-decision'; return false; }
+
+      if (!_writeLocalFields(ob.presetKey, ob.fields, 'from')) { ob.localOutcome = 'write-failed'; return false; }
+      const after = _verdict(_presetBuy(_readSettings(), ob.presetKey), ob.fields);
+      ob.localOutcome = after === 'from' ? 'restored' : 'write-unconfirmed';
+      return after === 'from';
+    } catch (_) { ob.localOutcome = 'unreadable'; return false; }
   }
 
   // → true when nothing is owed on the server copy any more.
-  async function _settleServer(ob) {
+  // Checked independently of the local outcome: either surface can be clean while
+  // the other is still stale, so there are two completion states, not one pass.
+  async function _settleServer(ob, readOnly) {
     const f = ob.serverFields ?? ob.fields; // the server's own before-values, not the mirror's
     const server = await _fetchServerSettings();
-    if (!server) return false; // cannot observe — assume still owed
+    if (!server) { ob.serverOutcome = 'unreachable'; return false; }
     const v = _verdict(_presetBuy(server, ob.presetKey), f);
-    if (v == null)  return false;
-    if (v !== 'to') return true; // already restored, or superseded by the user
+    // A response we cannot find the preset in is not proof the preset is clean —
+    // it is a response we do not understand. Stays owed and surfaces to the user.
+    if (v == null)     { ob.serverOutcome = 'preset-absent'; return false; }
+    if (v === 'from')  { ob.serverOutcome = 'restored';   return true; }
+    if (v === 'other') { ob.serverOutcome = 'superseded'; return true; }
+    if (readOnly)      { ob.serverOutcome = 'needs-decision'; return false; }
+
     const buy = _presetBuy(server, ob.presetKey);
     for (const k of Object.keys(f)) buy[k] = f[k].from;
     server.lastUpdatedAt = Date.now(); // force a real diff so the write is accepted
@@ -760,34 +906,52 @@
     const after = await _fetchServerSettings();
     const done = _verdict(_presetBuy(after, ob.presetKey), f) === 'from';
     if (ok && !done) console.warn('[ZQ:AXIOM] restore POST accepted but server still reads the mutated preset');
+    ob.serverOutcome = done ? 'restored' : (after ? 'write-unconfirmed' : 'unreachable');
     return done;
   }
 
-  // Restore the user's original preset. Safe to call repeatedly.
-  async function _restoreSettings(reason) {
-    const ob = ns?.axiomObligation;
+  // Restore the user's original preset. Safe to call repeatedly, and called from
+  // four places now — trade settlement, page load, a refusal in another tab, and
+  // the user's own Restore button — so it takes the obligation as an argument
+  // rather than assuming it created it. `force` is the user answering the prompt.
+  async function _restoreSettings(reason, obIn, opts) {
+    const ob = obIn ?? ns?.axiomObligation;
     if (ns) {
       ns.axiomOptimizing = false;
       if (ns._axiomRestoreTimer) { clearTimeout(ns._axiomRestoreTimer); ns._axiomRestoreTimer = null; }
     }
     if (!ob) return;
+    if (ns) ns.axiomObligation = ob;
 
-    // Ceiling reached: stop attempting, but keep the record. The obligation is
-    // still owed — it is handed to healing, not abandoned.
-    if ((ob.attempts ?? 0) >= _RESTORE_ATTEMPT_CEILING) {
-      console.warn('[ZQ:AXIOM] restore attempt ceiling reached (' + ob.attempts + ') — obligation left outstanding');
+    // Expired or out of attempts: keep reading, stop writing. The read is what
+    // clears the common cases for free — only a surface still holding our value
+    // reaches the user, and only then because we cannot prove it is ours.
+    const readOnly = !opts?.force && _isExpired(ob);
+
+    // The restore reads both surfaces and writes them back, so it needs the lock
+    // for the same reason the mutation does.
+    if (!(await _acquireLock())) {
+      // Another tab is mid-cycle. Not our failure, so it must not spend an attempt:
+      // the ceiling exists to bound real failures, not contention.
+      console.warn('[ZQ:AXIOM] restore deferred (' + reason + ') — settings lock held elsewhere');
       return;
     }
 
     // Server first. Axiom may rewrite the local mirror from server state on a path
     // we have not characterised, which would silently undo a local-only restore.
-    if (!ob.serverRestored) ob.serverRestored = await _settleServer(ob);
-    if (!ob.localRestored)  ob.localRestored  = _settleLocal(ob);
-    ob.attempts++;
+    if (!ob.serverRestored) ob.serverRestored = await _settleServer(ob, readOnly);
+    if (!ob.localRestored)  ob.localRestored  = _settleLocal(ob, ob.serverRestored, readOnly);
+    if (!readOnly) ob.attempts++;
+    ob.needsDecision = ob.localOutcome === 'needs-decision' || ob.serverOutcome === 'needs-decision';
 
     const done = ob.localRestored && ob.serverRestored;
     _persistObligation(done ? null : ob);
-    console.log('[ZQ:AXIOM] restore (' + reason + ') local=' + ob.localRestored + ' server=' + ob.serverRestored);
+    // Held while anything is still owed: that also blocks a fresh mutation from
+    // capturing our unrestored value as its original. Released once we have stopped
+    // acting, so a tab waiting on the user does not block every other tab's restore.
+    if (done || readOnly) _releaseLock();
+    console.log('[ZQ:AXIOM] restore (' + reason + ') local=' + ob.localRestored + '/' + (ob.localOutcome ?? '-') +
+                ' server=' + ob.serverRestored + '/' + (ob.serverOutcome ?? '-') + (readOnly ? ' [read-only]' : ''));
   }
 
   // Optimize & Buy: patch safe values → re-fire Buy → schedule restore.
@@ -795,6 +959,9 @@
   // user still approves the buy through Axiom's own flow.
   // Returns false when the optimization was abandoned and nothing was changed.
   async function _applyOptimizationAndBuy() {
+    // Second gate. _computeOptimization already checks the flag, but this is the only
+    // function that writes to the user's settings — it must not depend on a caller.
+    if (!ns?.axiomOptimizeEnabled) { ns?.axiomProceedTrade?.(); return; }
     const opt = _computeOptimization();
     if (!opt || !ns) { ns?.axiomProceedTrade?.(); return; }
 
@@ -803,6 +970,25 @@
       ns.axiomObligation = null;
       ns.axiomLastOptimization = null;
       ns.axiomOptimizeAbandoned = { at: Date.now(), why: why };
+      _releaseLock();
+      ns.axiomProceedTrade?.();
+      return false;
+    };
+
+    // A second mutation while one is still owed would overwrite the only record of
+    // the true original with the value we ourselves wrote. Deliberately not routed
+    // through _abandon, which clears the obligation — here it must survive.
+    const _skipForOutstanding = function (owed) {
+      const why = owed.ok ? 'restore-outstanding' : 'obligation-unreadable';
+      console.warn('[ZQ:AXIOM] optimization skipped (' + why + ') — an earlier change may be unrestored');
+      ns.axiomLastOptimization = null;
+      ns.axiomOptimizeAbandoned = { at: Date.now(), why: why };
+      if (owed.obligation) {
+        ns.axiomObligation = owed.obligation;  // another tab's record; we hold the lock, so we heal it
+        _restoreSettings('pre-trade');
+      } else {
+        _releaseLock();
+      }
       ns.axiomProceedTrade?.();
       return false;
     };
@@ -822,6 +1008,17 @@
       mevProtection: false,          // Secure is the enhanced flag only
     };
 
+    // The before-values read and the mutation write have to be one critical
+    // section. A second tab reading between them takes our mutation for its own
+    // original, and its undo then re-applies ours.
+    if (!(await _acquireLock())) return _abandon(_healingOnLoad ? 'startup' : 'locked');
+
+    // Inside the lock, and from storage rather than memory: holding the lock only
+    // proves no one is mid-cycle now, not that the last cycle finished. A tab that
+    // was throttled past the staleness window leaves its obligation behind.
+    const owed = await _fetchObligation();
+    if (!owed.ok || owed.obligation) return _skipForOutstanding(owed);
+
     // Each surface is diffed against its own fresh read. The mirror and the server
     // can legitimately hold different values, so a single shared before-value would
     // put the wrong one back on one of them.
@@ -838,7 +1035,8 @@
 
     const fields       = _diffFields(localBuy,  intended);
     const serverFields = _diffFields(serverBuy, intended);
-    if (!Object.keys(fields).length && !Object.keys(serverFields).length) { ns.axiomProceedTrade?.(); return; }
+    // Already at the safe values: nothing to undo, so nothing to hold the lock for.
+    if (!Object.keys(fields).length && !Object.keys(serverFields).length) { _releaseLock(); ns.axiomProceedTrade?.(); return; }
 
     // Write-ahead: the obligation is recorded before the mutation, so a crash
     // between the two leaves a record to heal from rather than a silent change.
@@ -869,7 +1067,7 @@
       ns.axiomOptimizing = false;
       ns.axiomLastOptimization = null;
       const v = _verdict(_presetBuy(await _fetchServerSettings(), opt.key), serverFields);
-      if (v === 'from') _persistObligation(null);
+      if (v === 'from') { _persistObligation(null); _releaseLock(); }
       else              await _restoreSettings('write-failed');
       ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'settings-write-failed' };
       ns.axiomProceedTrade?.();
@@ -889,6 +1087,18 @@
     // Settings are safe on both surfaces. Fire the original Buy click.
     ns.axiomProceedTrade?.();
 
+    // Read back the server's own timestamp for this write, after the buy so the
+    // trade is not made to wait on it. Not yet used to decide anything: the field
+    // moved once in probe testing for reasons we could not attribute, and it is
+    // unverified whether it moves when another device writes. Once that is
+    // confirmed, `readOnly` in _restoreSettings becomes `stamp changed since ours`
+    // and the 48h bound relaxes — a condition swap, not a data-model change.
+    _fetchServerSettings().then(function (s) {
+      if (!s || ns.axiomObligation !== ob) return;
+      ob.serverStamp = s.lastUpdatedAt ?? null;
+      _persistObligation(ob);
+    });
+
     // Fallback restore if the settlement signal is missed (e.g. failed/cancelled).
     ns._axiomRestoreTimer = setTimeout(function () { _restoreSettings('timeout'); }, 45000);
   }
@@ -897,6 +1107,9 @@
   // same-site cookies so the write still authenticates without awaiting a promise.
   // Opportunistic only: it never clears the obligation, because it cannot observe
   // the outcome. The next load confirms by reading.
+  // The lock is deliberately not released here. Releasing would let another tab
+  // start a fresh mutation while this beacon is still in flight, and read the
+  // value the beacon is about to undo as its own original. It ages out instead.
   window.addEventListener('beforeunload', function () {
     const ob = ns?.axiomObligation;
     if (!ob || (ob.localRestored && ob.serverRestored)) return;
@@ -934,6 +1147,86 @@
   });
 
   if (ns) ns.axiomOptimizeTrade = _applyOptimizationAndBuy;
+
+  // The card may have been on screen for days, so both actions re-read: the record
+  // from storage in case another tab settled it, and the surfaces inside the restore.
+  if (ns) ns.axiomRestoreNow = async function () {
+    const owed = await _fetchObligation();
+    if (!owed.ok) return false;
+    if (!owed.obligation) { ns.axiomObligation = null; return true; }
+    await _restoreSettings('user', owed.obligation, { force: true });
+    return !ns.axiomObligation;
+  };
+  if (ns) ns.axiomKeepCurrent = function () { _persistObligation(null); _releaseLock(); };
+
+  // ── Consent gate (OPS-185) ───────────────────────────────────────────────
+  // page-interceptor.js is not loaded on axiom.trade, so the settings handshake
+  // that file owns elsewhere has to be driven from here.
+  let _consentShownLogged = false;
+
+  function _saveAxiomConsent(choice) {
+    try {
+      window.postMessage({ type: 'ZENDIQ_SAVE_SETTINGS', payload: { axiomOptimize: choice } }, '*');
+    } catch (_) {}
+  }
+
+  if (ns) ns.axiomSetConsent = function (choice) {
+    if (choice !== 'on' && choice !== 'off') return;
+    ns.axiomOptimizeConsent = choice;
+    ns.axiomOptimizeEnabled = choice === 'on';
+    _saveAxiomConsent(choice);
+    try {
+      ns.logFunnel?.(choice === 'on' ? 'axiom_consent_enabled' : 'axiom_consent_kept_off', { dex: _AX_SITE });
+    } catch (_) {}
+    try { ns.renderWidgetPanel?.(); } catch (_) {}
+  };
+
+  // Called by the panel the first time the unanswered prompt is actually rendered,
+  // so `shown` counts impressions rather than page loads.
+  if (ns) ns.axiomConsentShown = function () {
+    if (_consentShownLogged) return;
+    _consentShownLogged = true;
+    try { ns.logFunnel?.('axiom_consent_shown', { dex: _AX_SITE }); } catch (_) {}
+  };
+
+  window.addEventListener('message', function (e) {
+    if (e.source !== window || e.origin !== window.location.origin) return;
+    if (e.data?.type !== 'ZENDIQ_SETTINGS_RESPONSE') return;
+    const s = e.data.settings ?? {};
+    if (!ns) return;
+    ns.axiomOptimizeConsent = s.axiomOptimize ?? null;
+    ns.axiomOptimizeEnabled = s.axiomOptimize === 'on';
+    // page-interceptor.js owns this sync on every other DEX; axiom.trade doesn't load it.
+    // The route-optimisation fields are unused here but must still be held, because the
+    // widget Settings tab writes the whole blob back.
+    ns.threshMinRiskLevel  = s.minRiskLevel ?? 'LOW';
+    ns.threshMinLossUsd    = s.minLossUsd   ?? 0;
+    ns.threshMinSlippage   = s.minSlippage  ?? 0;
+    ns.widgetMode          = s.uiMode       ?? 'simple';
+    ns.autoProtect         = s.autoProtect  ?? false;
+    ns.autoAccept          = s.autoAccept   ?? false;
+    ns.pauseOnHighRisk     = s.pauseOnHighRisk !== false;
+    ns.dynamicSlippageMode = s.dynamicSlippageMode ?? 'shadow';
+    ns.jitoMode            = s.jitoMode     ?? 'auto';
+    ns.settingsProfile     = s.profile      ?? 'alert';
+    ns.settingsLoaded      = true;
+    // Unanswered: put the prompt in front of the user rather than waiting for a Buy click.
+    if (ns.axiomOptimizeConsent === null) {
+      const _w = document.getElementById('sr-widget');
+      if (_w) { _w.style.display = ''; _w.classList.add('expanded'); ns.widgetActiveTab = 'monitor'; }
+      else ns.ensureWidgetInjected?.();
+    }
+    try { ns.renderWidgetPanel?.(); } catch (_) {}
+  });
+
+  (function _requestSettings() {
+    const send = () => { try { window.postMessage({ type: 'ZENDIQ_GET_SETTINGS' }, '*'); } catch (_) {} };
+    send();
+    // bridge.js and this file both run at document_start; a single post can lose the race.
+    setTimeout(send, 400);
+    setTimeout(function () { if (!ns?.settingsLoaded) send(); }, 1500);
+  })();
+
 
   // Compute Execution Risk and Bot Attack Risk for the current axiom token.
   // Called after fetchTokenScore completes and whenever slippage/mint changes.
@@ -1007,16 +1300,41 @@
     }
   })();
 
-  // ── OPS-181: load any outstanding restore obligation ─────────────────────
-  // Step 1 only reinstates the record so a reload does not lose it. Acting on it
-  // (load-time healing) is step 4.
-  window.addEventListener('message', function (e) {
-    if (e.origin !== window.location.origin) return;
-    if (e.data?.type !== 'ZENDIQ_AXIOM_OBLIGATION_RESPONSE') return;
-    const ob = e.data.obligation;
-    if (ns && ob && ob.v === 1 && ob.fields) ns.axiomObligation = ob;
-  });
-  try { window.postMessage({ type: 'ZENDIQ_GET_AXIOM_OBLIGATION' }, '*'); } catch (_) {}
+  // ── OPS-181: load-time healing ───────────────────────────────────────────
+  // An obligation is healed by whichever tab finds it, not by the one that created
+  // it — the creating tab may have been closed or killed mid-trade.
+  (function _healOnLoad() {
+    // The API host is sharded and learned from live traffic. The unnumbered alias
+    // answers /get-settings, but the restore also has to POST, and that is not
+    // verified on the alias — so give Axiom's own first call a chance to name the
+    // shard rather than spending an attempt on a guess.
+    function _awaitApiHost(maxMs) {
+      return new Promise(function (resolve) {
+        if (_apiHost) return resolve();
+        const t0 = Date.now();
+        const iv = setInterval(function () {
+          if (_apiHost || Date.now() - t0 >= maxMs) { clearInterval(iv); resolve(); }
+        }, 250);
+      });
+    }
+
+    (async function () {
+      let owed = await _fetchObligation();
+      // The bridge may not be listening yet this early; one retry distinguishes
+      // "not ready" from "nothing owed", which otherwise look the same.
+      if (!owed.ok) {
+        await new Promise(function (r) { setTimeout(r, 1500); });
+        owed = await _fetchObligation();
+      }
+      if (!owed.ok || !owed.obligation) return;
+      if (ns) ns.axiomObligation = owed.obligation;
+      _healingOnLoad = true;
+      try {
+        await _awaitApiHost(8000);
+        await _restoreSettings('load', owed.obligation);
+      } finally { _healingOnLoad = false; }
+    })();
+  })();
 
   // ── fetch observer ──────────────────────────────────────────────────────────────────
   // Installed at document_start before Axiom's JS bundles load.
@@ -1339,9 +1657,38 @@
         ? _esc(tokenScore.symbol || (_token ? _token.slice(0,8) + '\u2026' : '?'))
         : (_token ? _token.slice(0,8) + '\u2026' : '?');
 
+      // ── Consent gate (OPS-185) — shown until the user answers ────────────
+      // Neither button is styled as the default: the choice is not pre-made.
+      const _consentHtml = (ns.settingsLoaded && ns.axiomOptimizeConsent == null) ? (function () {
+        try { ns.axiomConsentShown?.(); } catch (_) {}
+        return '<div style="background:rgba(153,69,255,0.07);border:1px solid rgba(153,69,255,0.35);border-radius:10px;padding:12px 13px;margin-bottom:12px">'
+          + '<div style="color:#E8E8F0;font-size:13px;font-weight:700;margin-bottom:7px">Optimize &amp; Buy on Axiom</div>'
+          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:7px">'
+          +   'When enabled, ZendIQ scores each buy before it executes. If your Axiom preset is looser than '
+          +   'the measured risk warrants, it <b style="color:#E8E8F0">offers</b> a tighter buy slippage and a '
+          +   'stronger MEV protection mode, sized to that specific trade \u2014 then puts your original settings '
+          +   'back when the trade settles. You approve each one.'
+          + '</div>'
+          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:7px">'
+          +   'ZendIQ never touches your funds or keys. If a setting cannot be put back, ZendIQ tells you '
+          +   'and lets you restore it yourself.'
+          + '</div>'
+          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:10px">'
+          +   'Leave this off and ZendIQ only observes and reports \u2014 risk scores and sandwich detection, '
+          +   'with no changes to your Axiom settings.'
+          + '</div>'
+          + '<div style="display:flex;gap:7px">'
+          +   '<button id="sr-ax-consent-on" style="flex:1;padding:9px;border:1px solid rgba(255,255,255,0.18);border-radius:7px;background:rgba(255,255,255,0.04);color:#E8E8F0;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif">Enable</button>'
+          +   '<button id="sr-ax-consent-off" style="flex:1;padding:9px;border:1px solid rgba(255,255,255,0.18);border-radius:7px;background:rgba(255,255,255,0.04);color:#E8E8F0;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif">Keep off</button>'
+          + '</div>'
+          + '<div style="color:#6B6B8A;font-size:10.5px;line-height:1.5;margin-top:8px">Changeable any time in Settings.</div>'
+          + '</div>';
+      })() : '';
+
       // ── Idle state — no token loaded (listing pages, search, etc.) ────────
       if (!_token) {
         return `<div style="padding:14px 16px;">
+          ${_consentHtml}
           <div style="font-size:13px;color:#C2C2D4;text-align:center;padding:12px 0;line-height:1.6">
             Monitoring active.<br>Navigate to a token on <a href="https://axiom.trade" style="color:#9945FF;text-decoration:none">axiom.trade</a> to see risk analysis before you buy.
           </div>
@@ -1480,15 +1827,69 @@
         'settings-write-failed':'Axiom rejected the settings change.',
         'mirror-unwritable':    'The change could not be applied to this browser, so it was undone.',
         'unknown-field':        'A setting ZendIQ needed to change was not in the expected format.',
+        // Amber, not the grey line below: a failure to verify is not a choice not to act.
+        'obligation-unreadable':'ZendIQ could not confirm an earlier change had already been undone.',
       };
-      const _abandonHtml = ns.axiomOptimizeAbandoned
+      // Chose not to act, rather than tried and failed. Kept out of the amber card
+      // on purpose: putting "we did nothing" beside "your account may still be
+      // changed" teaches the user to dismiss the one that matters.
+      const _skipWhy = {
+        'startup':              'ZendIQ was still starting up. Try again in a moment.',
+        'locked':               'Another Axiom tab was mid-change.',
+        'restore-outstanding':  'ZendIQ was finishing an earlier restore first.',
+      };
+      const _abReason = ns.axiomOptimizeAbandoned?.why ?? null;
+      const _abandonHtml = (_abReason && !_skipWhy[_abReason])
         ? '<div style="background:rgba(255,181,71,0.10);border:1px solid rgba(255,181,71,0.45);border-radius:8px;padding:9px 12px;margin-bottom:10px">'
           + '<div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:3px">\u26a0 Traded without optimizing</div>'
           + '<div style="color:#C2C2D4;font-size:12px;line-height:1.5">'
-          +   _esc(_abWhy[ns.axiomOptimizeAbandoned.why] ?? 'ZendIQ could not apply the safer preset.')
+          +   _esc(_abWhy[_abReason] ?? 'ZendIQ could not apply the safer preset.')
           +   ' Your Axiom settings were left exactly as they were.</div>'
           + '</div>'
         : '';
+      const _skipHtml = (_abReason && _skipWhy[_abReason])
+        ? '<div style="color:#6B6B8A;font-size:11.5px;line-height:1.5;margin-bottom:10px;padding:0 2px">'
+          + 'Traded without optimizing \u2014 ' + _esc(_skipWhy[_abReason]) + '</div>'
+        : '';
+
+      // ── Outstanding restore — split by surface ───────────────────────────
+      // "This browser" and "your Axiom account" are different problems with
+      // different remedies, and only one of them follows the user to another device.
+      const _ob = ns.axiomObligation;
+      const _obHtml = (_ob && !(_ob.localRestored && _ob.serverRestored)) ? (function () {
+        const _f = _ob.fields?.slippage ?? _ob.serverFields?.slippage ?? null;
+        const _mine  = _f ? _f.to   : null;   // the value ZendIQ set
+        const _yours = _f ? _f.from : null;   // the value the user had
+        const _localOwed  = !_ob.localRestored;
+        const _serverOwed = !_ob.serverRestored;
+        const _ask = !!_ob.needsDecision;
+        const _col = _ask ? '#FF6B6B' : '#FFB547';
+        const _where = _localOwed && _serverOwed ? 'this browser and your Axiom account'
+                     : _serverOwed ? 'your Axiom account'
+                     : 'this browser';
+        const _body = _ask
+          ? (_f
+              ? 'ZendIQ changed your buy slippage to ' + _esc(String(_mine)) + '% for a trade and has not been able to '
+                + 'confirm it was put back on ' + _where + '. It has been long enough that this may now be your own setting, '
+                + 'so ZendIQ will not change it without you.'
+              : 'ZendIQ has not been able to confirm a settings change was put back on ' + _where + '. '
+                + 'It has been long enough that ZendIQ will not change anything without you.')
+          : 'ZendIQ is still restoring your original buy settings on ' + _where + '. '
+            + (_serverOwed ? 'Your Axiom account is reachable from any device, so this follows you. ' : '')
+            + 'It will retry automatically.';
+        const _actions = _ask && _f
+          ? '<div style="display:flex;gap:7px;margin-top:9px">'
+            + '<button id="sr-ax-restore" style="flex:1;padding:9px;border:none;border-radius:7px;background:linear-gradient(135deg,#14F195,#0cc97a);color:#061a10;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif">Restore ' + _esc(String(_yours)) + '%</button>'
+            + '<button id="sr-ax-keep" style="flex:1;padding:9px;border:1px solid rgba(255,255,255,0.14);border-radius:7px;background:none;color:#C2C2D4;font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif">Keep ' + _esc(String(_mine)) + '%</button>'
+            + '</div>'
+          : '<button id="sr-ax-reload" style="width:100%;padding:9px;margin-top:9px;border:1px solid rgba(255,255,255,0.14);border-radius:7px;background:none;color:#C2C2D4;font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif">Reload and retry now</button>';
+        return '<div style="background:' + _col + '14;border:1px solid ' + _col + '66;border-radius:8px;padding:10px 12px;margin-bottom:10px">'
+          + '<div style="color:' + _col + ';font-size:13px;font-weight:700;margin-bottom:4px">\u26a0 '
+          + (_ask ? 'Your Axiom settings need a decision' : 'Restoring your Axiom settings') + '</div>'
+          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.55">' + _body + '</div>'
+          + _actions
+          + '</div>';
+      })() : '';
 
       // ── Impact warning for HIGH / CRITICAL combined risk ─────────────────
       const _warnLvl = _hasAnyRisk && (_comp >= 40 || _botSc >= 40)
@@ -1556,7 +1957,10 @@
 
       return '<div style="padding:14px 16px">'
         + (_token ? '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.7px;color:#6B6B8A;margin-bottom:10px">TOKEN RISK \u00b7 ' + _sym + '</div>' : '')
+        + _consentHtml
+        + _obHtml
         + _abandonHtml
+        + _skipHtml
         + _overallCard
         + _tokenRiskCard
         + _botCard

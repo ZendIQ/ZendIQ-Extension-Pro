@@ -121,6 +121,30 @@ window.addEventListener('message', (e) => {
     return;
   }
 
+  if (e.data.sr_bridge_to_ext && e.data.msg?.type === 'AXIOM_LOCK') {
+    const { op, owner, _id } = e.data.msg;
+    // Unlike the forwarders above this one answers on every path. The caller gates
+    // a third-party mutation on the reply, so an unanswered request and a refusal
+    // must not look alike: silence would only be distinguished by its timeout.
+    const reply = (result) => {
+      try { window.postMessage({ sr_bridge: true, msg: { type: 'AXIOM_LOCK_RESPONSE', _id, result } }, '*'); } catch (_) {}
+    };
+    try {
+      chrome.runtime.sendMessage({ type: 'AXIOM_LOCK', op, owner }, (res) => {
+        if (chrome.runtime.lastError) {
+          if (!chrome.runtime.lastError.message?.includes('context'))
+            console.warn('[ZendIQ][bridge] AXIOM_LOCK bg error', chrome.runtime.lastError.message);
+          return reply({ ok: false, error: 'bridge' });
+        }
+        reply(res ?? { ok: false, error: 'empty' });
+      });
+    } catch (err) {
+      if (!err?.message?.includes('context')) console.warn('[ZendIQ][bridge] AXIOM_LOCK error', err?.message);
+      reply({ ok: false, error: 'bridge' });
+    }
+    return;
+  }
+
   if (e.data.sr_bridge_to_ext && e.data.msg?.type === 'RPC_CALL') {
     const { method, params, _id } = e.data.msg;
     try {
@@ -213,6 +237,7 @@ window.addEventListener('message', (e) => {
           profile:         s.profile         ?? 'alert',
           pauseOnHighRisk:        s.pauseOnHighRisk !== false,  // default true
           dynamicSlippageMode: s.dynamicSlippageMode ?? 'shadow',
+          axiomOptimize:   s.axiomOptimize ?? null,   // null = never answered the consent prompt
         },
       }, '*');
     });
@@ -354,8 +379,21 @@ window.addEventListener('message', (e) => {
 
   // ZendIQ (OPS-181): load the outstanding obligation on page start
   if (e.data.type === 'ZENDIQ_GET_AXIOM_OBLIGATION') {
+    const tok = typeof e.data.token === 'string' && /^[A-Za-z0-9]{1,40}$/.test(e.data.token) ? e.data.token : null;
     chrome.storage.local.get(['sendiq_axiom_obligation'], ({ sendiq_axiom_obligation }) => {
-      try { window.postMessage({ type: 'ZENDIQ_AXIOM_OBLIGATION_RESPONSE', obligation: sendiq_axiom_obligation ?? null }, '*'); } catch (_) {}
+      // The mutate path blocks on this answer, so a storage failure has to be
+      // reported rather than returned as an empty record: "cannot tell" and
+      // "nothing outstanding" lead to opposite decisions about mutating.
+      const err = chrome.runtime.lastError;
+      if (err) console.warn('[ZendIQ][bridge] obligation read failed', err.message);
+      try {
+        window.postMessage({
+          type: 'ZENDIQ_AXIOM_OBLIGATION_RESPONSE',
+          obligation: err ? null : (sendiq_axiom_obligation ?? null),
+          ok: !err,
+          token: tok,
+        }, '*');
+      } catch (_) {}
     });
     return;
   }
@@ -381,40 +419,13 @@ window.addEventListener('message', (e) => {
       if (typeof raw.minSlippage  === 'number' && isFinite(raw.minSlippage)  && raw.minSlippage >= 0) p.minSlippage  = raw.minSlippage;
       const VALID_DYNSLIP = new Set(['shadow', 'active', 'off']);
       if (typeof raw.dynamicSlippageMode === 'string' && VALID_DYNSLIP.has(raw.dynamicSlippageMode)) p.dynamicSlippageMode = raw.dynamicSlippageMode;
+      const VALID_AXOPT = new Set(['on', 'off']);
+      if (typeof raw.axiomOptimize === 'string' && VALID_AXOPT.has(raw.axiomOptimize)) p.axiomOptimize = raw.axiomOptimize;
       chrome.storage.local.get(['settings'], ({ settings: existing = {} }) => {
         chrome.storage.local.set({ settings: { ...existing, ...p } });
       });
     } catch (err) {
       console.warn('[ZendIQ][bridge] ZENDIQ_SAVE_SETTINGS failed', err?.message);
-    }
-    return;
-  }
-
-  // ZendIQ: save captured trade + open popup
-  if (e.data.type === 'OPTIROUTE_SAVE_CAPTURED_TRADE') {
-    try {
-      const p = e.data.payload;
-      // Validate required fields before storage to prevent crafted payloads
-      // from auto-filling the swap form with arbitrary mints/amounts.
-      if (!p || typeof p !== 'object' ||
-          typeof p.inputMint  !== 'string' ||
-          typeof p.outputMint !== 'string' ||
-          typeof p.amountUI   !== 'number' ||
-          !['CRITICAL','HIGH','MEDIUM','LOW','UNKNOWN'].includes(p.riskLevel)) {
-        console.warn('[ZendIQ][bridge] OPTIROUTE_SAVE_CAPTURED_TRADE: invalid payload, dropping');
-        return;
-      }
-      chrome.storage.local.set({
-        sendiq_captured_trade: p,
-      });
-
-      // Tell background to focus/open the popup
-      chrome.runtime.sendMessage({
-        type:    'OPEN_OPTIMISE_POPUP',
-        payload: p,
-      });
-    } catch (err) {
-      console.warn('[ZendIQ][bridge] Captured trade save failed:', err?.message);
     }
     return;
   }

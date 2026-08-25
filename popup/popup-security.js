@@ -113,7 +113,7 @@ function renderSecurityPanel() {
           known drain contracts, and wallet-specific risks.<br><br>
           All checks are read-only queries against your <strong style="color:var(--text)">public wallet address</strong>.
           ZendIQ never has access to your <strong style="color:var(--green)">private key</strong> or seed phrase,
-          and no data ever leaves your browser.
+          and nothing is sent to a ZendIQ server — only your public address goes to public Solana RPC providers.
         </p>` : ''}
         ${walletPubkey ? `<button id="sec-run-btn" class="btn-q">
           🔒 Run Security Check
@@ -259,13 +259,13 @@ function renderSecurityPanel() {
       <div class="section-title" title="Each finding describes a specific risk detected in your wallet. Hover over individual findings for a full explanation of the risk and what you should do." style="cursor:help">Other Findings</div>
       ${otherFindingsHtml}
       ${revokeLink}
-      <div style="margin-top:10px;font-size:13px;color:var(--muted);line-height:1.7;cursor:help" data-tip="ZendIQ operates entirely inside your browser. Your wallet private key and seed phrase are never read, stored, or transmitted — they are only ever held inside your wallet extension and are never exposed to ZendIQ. The security scan works by taking your public wallet address (visible to anyone on-chain) and querying the Solana RPC directly from your browser to retrieve token account delegate approvals. No data is sent to any ZendIQ server. revoke.cash is an independent third-party tool — ZendIQ has no affiliation with it and does not share any data with it.">
+      <div style="margin-top:10px;font-size:13px;color:var(--muted);line-height:1.7;cursor:help" data-tip="ZendIQ operates entirely inside your browser. Your wallet private key and seed phrase are never read, stored, or transmitted — they are only ever held inside your wallet extension and are never exposed to ZendIQ. To read your token approvals, your public address (already visible to anyone on-chain) is sent to public Solana RPC providers: Solana Labs (api.mainnet-beta.solana.com), MagicBlock, PublicNode, Ankr and dRPC. Nothing is sent to any ZendIQ server, and no trade or balance data is shared. revoke.cash is an independent third-party tool — ZendIQ has no affiliation with it and does not share any data with it.">
         <div style="display:flex;align-items:center;gap:5px;margin-bottom:3px">
-          <span style="color:var(--green);font-size:12px">✓</span>
+          <span style="color:var(--green)">✓</span>
           <span><strong style="color:var(--text)">ZendIQ never has access to your private key or seed phrase.</strong> Only your public address is used.</span>
         </div>
-        On-chain scan only — no data leaves your browser. &nbsp;
-        <a href="https://revoke.cash" target="_blank" rel="noopener" style="color:var(--purple);text-decoration:none">revoke.cash</a> is a trusted third-party tool.
+        On-chain scan only — your public address goes to public Solana RPC providers, never to a ZendIQ server. &nbsp;
+        <a href="https://revoke.cash" target="_blank" rel="noopener" style="color:var(--purple);text-decoration:none">revoke.cash</a> is an independent third-party tool.
       </div>
     </div>
     <div id="sec-float-tip" style="display:none;position:fixed;z-index:9999;max-width:240px;padding:9px 12px;border-radius:8px;background:#13131F;border:1px solid rgba(255,255,255,0.13);font-size:13px;color:#C8C8D8;line-height:1.65;pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,0.6)"></div>`;
@@ -354,9 +354,18 @@ async function runCheck() {
       PROGRAMS.map(programId => popupRpcCall('getTokenAccountsByOwner', [pubkey, { programId }, { encoding: 'jsonParsed' }]))
     );
     let allAccounts = [];
+    let programsOk  = 0;
     for (const r of results) {
-      if (r.status === 'fulfilled') allAccounts = allAccounts.concat(r.value?.result?.value ?? []);
+      if (r.status !== 'fulfilled') continue;
+      const value = r.value?.result?.value;
+      if (!Array.isArray(value)) continue;
+      allAccounts = allAccounts.concat(value);
+      programsOk++;
     }
+    // Nothing was actually read, so there is no basis for a verdict. Scoring 100 here
+    // would read as "no approvals found" when it really means "not checked".
+    if (programsOk === 0) throw new Error('Could not reach Solana RPC \u2014 approvals were not checked');
+    const partialScan = programsOk < PROGRAMS.length;
     totalAccounts = allAccounts.length;
 
     for (const acct of allAccounts) {
@@ -438,7 +447,7 @@ async function runCheck() {
     // Detect wallet type from injected providers via the active jup.ag tab
     let detectedType = 'unknown';
     try {
-      const [tab] = await new Promise(res => chrome.tabs.query({ url: ['*://*.jup.ag/*', '*://raydium.io/*', '*://*.raydium.io/*', '*://pump.fun/*', '*://*.pump.fun/*'], active: true }, ts => res(ts ?? [])));
+      const [tab] = await new Promise(res => chrome.tabs.query({ url: ['*://*.jup.ag/*', '*://raydium.io/*', '*://*.raydium.io/*', '*://pump.fun/*', '*://*.pump.fun/*', '*://axiom.trade/*', '*://*.axiom.trade/*'], active: true }, ts => res(ts ?? [])));
       if (tab) {
         const [result] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
@@ -513,7 +522,15 @@ async function runCheck() {
     // Auto-approve deduction: −10 until user marks as reviewed
     const autoApproveDeduction = autoWarn ? 20 : 0;
 
-    if (!findings.some(f => f.severity === 'CRITICAL' || f.severity === 'HIGH')) {
+    // A partial scan can still prove a problem, but it can never prove the absence of one.
+    if (partialScan) {
+      findings.unshift({
+        severity: 'WARN',
+        text:     'Approval scan incomplete',
+        detail:   'One token program could not be reached — re-scan to finish checking.',
+        tooltip:  'ZendIQ checks two token programs: SPL Token and Token-2022. One of them did not respond, so the approvals held under it were not read. Any approval there is neither confirmed nor ruled out. Click Re-scan to complete the check.',
+      });
+    } else if (!findings.some(f => f.severity === 'CRITICAL' || f.severity === 'HIGH')) {
       findings.unshift({
         severity: 'OK',
         text:     unlimitedList.length === 0
@@ -534,7 +551,7 @@ async function runCheck() {
     _secResult = {
       score: null, checkedAt: Date.now(), pubkey, walletType: 'unknown',
       totalAccounts, unlimitedApprovals: [], badContracts: [],
-      findings: [{ severity: 'WARN', text: 'Security check failed', detail: e.message?.slice(0, 100) ?? 'Unknown error' }],
+      findings: [{ severity: 'WARN', text: 'Security check could not run', detail: (e.message?.slice(0, 120) ?? 'Unknown error') + ' — your approvals were not checked, so this is not an all-clear.' }],
     };
   } finally {
     _secChecking = false;

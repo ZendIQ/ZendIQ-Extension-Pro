@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ZendIQ ? trade.js
  * Trade capture, quote fetching, signing, and the handleOptimiseTrade flow.
  */
@@ -407,12 +407,12 @@
   //               swaps in new tx silently, ignores transient errors.
   async function fetchWidgetQuote(silent = false, noAutoAccept = false) {
     if (!ns.widgetCapturedTrade) return;
-    // pump.fun uses bonding-curve fills — no Jupiter order endpoint available
+    // pump.fun uses bonding-curve fills â€” no Jupiter order endpoint available
     if (window.location.hostname.includes('pump.fun')) return;
 
     // Reset per-trade dynamic slippage state so previous trade never bleeds into the next.
     // _dynSlipData: always recomputed on each fetch (fresh price-impact from Raydium).
-    // _dynSlipOverride: only reset on genuinely new fetches — silent re-fetches inside
+    // _dynSlipOverride: only reset on genuinely new fetches â€” silent re-fetches inside
     // signWidgetSwap (step 3 fallback) must preserve an override the user already set.
     if (!silent) { ns._dynSlipOverride = false; }
     ns._dynSlipData = null;
@@ -423,7 +423,6 @@
       ns.widgetLastOrder       = null;
       ns.widgetLastTxSig       = null;
       ns.widgetLastTxPair      = null;
-      ns.widgetLastTxFromSwapTab = null;
       ns._rdmLastComputeOut    = null;  // cleared each new fetch so stale Raydium baseline never bleeds
       ns._rdmSignParams        = null;  // cleared so stale _computeOutAmount from previous trade never contaminates baseline
       ns.widgetPausedForToken  = false;
@@ -479,8 +478,8 @@
       //   (a) non-silent fetch ? always compare on full fetches
       //   (b) first-time probe (no existing order yet)
       //   (c) existing order is already Raydium ? keep it fresh on 10s refresh / pre-sign re-fetch
-      // Skip on swap-tab quotes and Jupiter-only background ticks.
-      const _rdmShouldRun = (!ns.widgetCapturedTrade?.fromSwapTab) &&
+      // Skip on Jupiter-only background ticks.
+      const _rdmShouldRun =
         (!silent || !ns.widgetLastOrder || ns.widgetLastOrder?._source === 'raydium') &&
         !ns._rdmSkipOnce;   // set true after a sim failure so fallback gets Jupiter's route
       ns._rdmSkipOnce = false;  // consume the flag each fetch
@@ -680,7 +679,7 @@
                   override_applied: false,
                   active:          false,
                   outcome:         'shadow_log',
-                  // Raw token threshold amounts — critical for computing "would this have breached?"
+                  // Raw token threshold amounts â€” critical for computing "would this have breached?"
                   // when actual on-chain output arrives via fetchActualOut (~3-10s later).
                   // Backend joins on the surrounding HISTORY_UPDATE tx_sig to correlate.
                   quoted_out_raw:        _rdmData.outputAmount != null ? Math.round(Number(_rdmData.outputAmount)) : null,
@@ -695,7 +694,7 @@
               : (ns.widgetCapturedTrade.originalSlippageBps ?? 50);
 
             // Store the compute params needed to re-build a fresh TX at sign time.
-            // Pool state changes every few seconds — a fresh TX build right before signing
+            // Pool state changes every few seconds â€” a fresh TX build right before signing
             // ensures the otherAmountThreshold matches the current on-chain price.
             ns._rdmSignParams = {
               inputMint, outputMint, amountStr: _rdmAmountStr,
@@ -951,7 +950,6 @@
       // the Raydium no-benefit gate below may release the original tx without showing Review & Sign.
       const _isRdmSiteOrderDefer = (ns.widgetCapturedTrade?.source === 'raydium') && ns._autoProtectPending;
       const _deferReady = !silent && !noAutoAccept &&
-        !ns.widgetCapturedTrade?.fromSwapTab &&
         ((ns.autoAccept === true && ns._autoProtectPending === true) || _isRdmSiteOrderDefer);
       if (!_deferReady) {
         // Skip render only when this is a pre-sign silent re-fetch (B57):
@@ -995,7 +993,7 @@
 
       // -- Auto-accept / autoProtect decision ------------------------------
       // Compute net benefit once ? used by auto-accept gate and autoProtect fallback.
-      if (!silent && !noAutoAccept && !ns.widgetCapturedTrade?.fromSwapTab) {
+      if (!silent && !noAutoAccept) {
         // When auto-accept is active and we have no Jupiter baseline yet, wait briefly
         // for a live tick to arrive (~1s interval). This prevents signing an
         // optimistically-null net that would have been negative if we'd had the data.
@@ -1187,7 +1185,7 @@
           ns.renderWidgetPanel();
         }
       } else if (ns._autoProtectPending) {
-        // Fallback (silent / noAutoAccept / fromSwapTab): show panel, let user decide.
+        // Fallback (silent / noAutoAccept): show panel, let user decide.
         ns._autoProtectPending = false;
         ns.handlePendingDecision('optimise');
       }
@@ -1340,7 +1338,7 @@
           // The display/comparison quote still uses the user's real slippage setting.
           // Sign-time slippage: use dynamic-tightened value when active, else the compute-stage
           // value from _rdmSignParams (which already reflects active/shadow setting).
-          // Hard floor of 20 bps — Jito simulation diverges slightly from Raydium's compute
+          // Hard floor of 20 bps â€” Jito simulation diverges slightly from Raydium's compute
           // state, so near-zero minimumAmountOut triggers Invalid bundle drops.
           const _signDynSlip = (ns._dynSlipData && ns.dynamicSlippageMode === 'active' && !ns._dynSlipOverride)
             ? ns._dynSlipData.tightenedBps
@@ -1457,7 +1455,7 @@
         }
       }
 
-      // window.solana first — the DEX keeps this pointed at the active wallet adapter;
+      // window.solana first â€” the DEX keeps this pointed at the active wallet adapter;
       // specific wallet globals (window.phantom?.solana etc.) may retain a publicKey
       // after the user switches away, causing signing to target the wrong wallet.
       const legacyWallet = window.solana || window.phantom?.solana || window.solflare || window.backpack?.solana
@@ -1573,7 +1571,6 @@
           inAmt:  _cap?.amountUI ?? null,
           outAmt: _lo.outAmount ? (Number(_lo.outAmount) / Math.pow(10, _dec)) : null,
         };
-        ns.widgetLastTxFromSwapTab = _cap?.fromSwapTab ?? false;
         ns.widgetSwapStatus    = 'done';
         // Analytics: swap completed (skippedExecute ? wallet signed+sent directly)
         try { if (ns.logProEvent) {
@@ -1770,7 +1767,7 @@
             const _balRes = await ns.rpcCall('getBalance', [_bundleWallet, { commitment: 'confirmed' }]);
             const _balLam = _balRes?.result?.value ?? 0;
             const _priFee = ns.widgetLastOrderFees?.priorityFeeLamports ?? 0;
-            const _baseFee = 5_000; // 1 signature (tip injected into swap tx — no separate tip tx)
+            const _baseFee = 5_000; // 1 signature (tip injected into swap tx â€” no separate tip tx)
             const _rentReserve = 890_880;
             const _required = _baseFee + _priFee + _jitoBundleTip + _rentReserve;
             const _solIn = (ns.widgetLastOrder?.inputMint === 'So11111111111111111111111111111111111111112')
@@ -1905,14 +1902,14 @@
             let _freshBlockhashBytes = _rdmStaleBlockhash;
             try {
               // Fetch directly from the page context using ns._jupRpcUrl (sniffed from
-              // Raydium's own live fetch traffic � guaranteed on the same node Raydium
+              // Raydium's own live fetch traffic ï¿½ guaranteed on the same node Raydium
               // uses, fully synced with chain tip).
               // ns.rpcCall routes through the background bridge to publicnode.com which
               // is load-balanced; different nodes can be at different slot heights, making
               // the 'fresh' blockhash appear BlockhashNotFound on Jito (? Invalid bundle).
               // Use 'finalized' commitment so the blockhash is guaranteed to be known
               // by ALL Jito block-engine validators. With 'confirmed', the specific
-              // validator connected to the Frankfurt/SLC block engine may lag 1�5 slots
+              // validator connected to the Frankfurt/SLC block engine may lag 1ï¿½5 slots
               // behind the jup.ag load-balanced RPC, causing 'BlockhashNotFound' during
               // Jito's internal bundle simulation ? immediate 'Invalid' status.
               // 'finalized' is ~13s older but still has ~47s of remaining validity, which
@@ -1954,13 +1951,13 @@
             // Jito's recommended approach: embed the tip in the swap tx so the block engine
             // can forward it as a single-tx bundle. A separate 2-tx bundle (old approach)
             // required the block engine to resolve Raydium's pool-specific ALTs for atomic
-            // validation — that ALT cache miss caused immediate status='Invalid'. With
+            // validation â€” that ALT cache miss caused immediate status='Invalid'. With
             // sendTransaction?bundleOnly=true the block engine forwards directly to the
             // next Jito-eligible validator which has full chain state and resolves ALTs locally.
             const _swapTxUnsigned = _rdmRawWithFreshBh[0];
             const _injectedTxRaw  = await ns.injectJitoTip(_swapTxUnsigned, _jitoBundleTip);
             if (!_injectedTxRaw) {
-              console.error('[ZendIQ RDM Bundle] tip injection failed — falling back to Jupiter route');
+              console.error('[ZendIQ RDM Bundle] tip injection failed â€” falling back to Jupiter route');
               _hadRdmSimFail = true;
               throw new Error('__rdm_sim_fallback__');
             }
@@ -1980,19 +1977,19 @@
                 const _psErr = JSON.stringify(_psv.err);
                 if (/AccountNotFound|BlockhashNotFound|NodeBehindLastValid|AddressLookupTable|sanitize accounts offsets/i.test(_psErr)) {
                   // 'sanitize accounts offsets' = RPC doesn't have the Raydium pool ATL loaded;
-                  // validator has full chain state and resolves it — safe to proceed.
+                  // validator has full chain state and resolves it â€” safe to proceed.
                   console.warn('[ZendIQ RDM PreSim] ALT/RPC cache miss (expected for Raydium V0 txs \u2014 wallet simulation may show "failed" but tx will land on-chain):', _psErr);
                 } else {
                   console.error('[ZendIQ RDM PreSim] REAL SIM FAILURE \u2014 tx body issue:', _psErr);
                   if (_psv.logs?.length) console.error('[ZendIQ RDM PreSim] logs:', _psv.logs.slice(-10));
-                  // Don't abort here — let the user decide via wallet popup; log is the key output.
+                  // Don't abort here â€” let the user decide via wallet popup; log is the key output.
                 }
               } else if (!_psd?.error) {
               }
             } catch (_psE) { console.warn('[ZendIQ RDM PreSim] rpcCall failed:', _psE.message); }
 
             // -- Sign the single injected tx (one wallet popup) ------------------------------
-            // NOTE: The wallet may show "Simulation failed" — this is expected for Raydium V0
+            // NOTE: The wallet may show "Simulation failed" â€” this is expected for Raydium V0
             // transactions. The simulation RPC does not have the Raydium pool ATL cached; actual
             // on-chain validators DO resolve it. Click Confirm to proceed.
             const _wsA  = ns._wsAccount || ns._wsWallet?.accounts?.[0] || null;
@@ -2008,7 +2005,7 @@
                 try { _result = await _wsSF.signTransaction({ account: _wsA, transaction: _injectedTxRaw, chain: 'solana:mainnet' }); }
                 catch (_e) { if (/reject|cancel|denied|abort/i.test(_e?.message ?? '')) throw new Error('cancelled'); throw _e; }
                 // Wallet Standard signTransaction always returns ReadonlyArray<{ signedTransaction }>
-                // regardless of input count — unwrap the array before accessing signedTransaction.
+                // regardless of input count â€” unwrap the array before accessing signedTransaction.
                 const _out = Array.isArray(_result) ? _result[0] : _result;
                 _signedInjected = _out?.signedTransaction ? new Uint8Array(_out.signedTransaction) : null;
                 if (!_signedInjected) throw new Error('bundle: signTransaction returned null bytes (result: ' + JSON.stringify(_result)?.slice(0, 120) + ')');
@@ -2147,7 +2144,6 @@
           inAmt,
           outAmt: outAmt != null ? Number(outAmt) : null,
         };
-        ns.widgetLastTxFromSwapTab = captured?.fromSwapTab ?? false;
         const entry = {
           signature: sig,
           tokenIn:   captured?.inputSymbol ?? (captured?.inputMint ?? '?'),
@@ -2270,8 +2266,8 @@
               active:           ns.dynamicSlippageMode === 'active' && !ns._dynSlipOverride,
               outcome:          'landed',
               tx_sig:           sig ?? null,
-              // Threshold amounts in raw token units — used by shadow-mode backend analysis.
-              // actual_out_raw arrives later via fetchActualOut → HISTORY_UPDATE.quoteAccuracy;
+              // Threshold amounts in raw token units â€” used by shadow-mode backend analysis.
+              // actual_out_raw arrives later via fetchActualOut â†’ HISTORY_UPDATE.quoteAccuracy;
               // backend joins on tx_sig to compute "would tightened threshold have blocked this?"
               quoted_out_raw:        _ldSignedOut,
               min_out_original_raw:  _ldSignedOut != null ? Math.floor(_ldSignedOut * (1 - ns._dynSlipData.originalBps  / 10000)) : null,
@@ -2458,15 +2454,15 @@
         const _minOrig  = _oa != null ? Math.floor(_oa * (1 - ns._dynSlipData.originalBps  / 10000)) : null;
         const _minTight = _oa != null ? Math.floor(_oa * (1 - ns._dynSlipData.tightenedBps / 10000)) : null;
         // Extraction window = tokens the loose threshold exposed vs the tightened one.
-        // tightenedBps < originalBps → _minTight > _minOrig → difference is positive.
+        // tightenedBps < originalBps â†’ _minTight > _minOrig â†’ difference is positive.
         const _exRaw    = (_minOrig != null && _minTight != null) ? (_minTight - _minOrig) : null;
         const _cfUsd    = (_exRaw != null && _oprice != null) ? (_exRaw / Math.pow(10, _outDec)) * _oprice : null;
         const _orig_s   = (ns._dynSlipData.originalBps  / 100).toFixed(1);
         const _tight_s  = (ns._dynSlipData.tightenedBps / 100).toFixed(1);
-        // Only surface the dollar figure when it's meaningful — small amounts ($<1) read as
+        // Only surface the dollar figure when it's meaningful â€” small amounts ($<1) read as
         // "protection fired over nothing" and train users to override. Below the threshold
         // we keep the message but drop the number.
-        const _cfSuffix = (_cfUsd != null && _cfUsd >= 1) ? ` — blocked ~$${_cfUsd.toFixed(2)} extraction` : '';
+        const _cfSuffix = (_cfUsd != null && _cfUsd >= 1) ? ` â€” blocked ~$${_cfUsd.toFixed(2)} extraction` : '';
         if (ns.logDynSlip) {
           try {
             ns.logDynSlip({

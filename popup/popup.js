@@ -57,7 +57,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  buildPickers();
   loadMonitor();
   detectWallet()
     .then(() => initSecurityBadge())
@@ -87,19 +86,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Tab navigation ─────────────────────────────────────────────────────
-  document.getElementById('tab-swap').addEventListener('click',     () => showTab('swap'));
   document.getElementById('tab-monitor').addEventListener('click',  () => showTab('monitor'));
   document.getElementById('tab-activity').addEventListener('click', () => showTab('activity'));
   document.getElementById('tab-settings').addEventListener('click', () => showTab('settings'));
   document.getElementById('tab-security').addEventListener('click', () => { showTab('security'); loadSecurity(); });
-
-  // ── Swap tab ───────────────────────────────────────────────────────────
-  document.getElementById('sel-in').addEventListener('click',   () => togglePicker('in'));
-  document.getElementById('sel-out').addEventListener('click',  () => togglePicker('out'));
-  document.getElementById('btn-flip').addEventListener('click',  flipTokens);
-  document.getElementById('btn-quote').addEventListener('click', getQuote);
-  document.getElementById('btn-swap').addEventListener('click',  sendSwap);
-  document.getElementById('amount-in').addEventListener('input', resetQuote);
 
   // ── Widget toggle ───────────────────────────────────────────────────
   (async () => {
@@ -229,6 +219,4 @@ document.addEventListener('DOMContentLoaded', () => {
   bgMsg({ type: 'PING' })
     .catch(e => console.error('[ZendIQ] Background service worker DEAD:', e.message));
 
-  // ── Handle captured trade from widget interceptor ───────────────────────
-  checkCapturedTrade();
 });

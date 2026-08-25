@@ -10,6 +10,18 @@ const PROFILE_TRIGGER_COPY = {
   custom:   'It activates based on your <strong style="color:var(--text)">custom thresholds</strong> — adjust them any time in Settings.',
 };
 
+// Axiom has no alternative-route flow: ZendIQ checks the buy and offers to adjust
+// Axiom's own settings for that trade, so the profile copy above would be inaccurate
+// here. The second sentence depends on the OPS-185 consent choice.
+const AXIOM_TRIGGER_COPY_BASE =
+  'ZendIQ checks each buy <strong style="color:var(--text)">before it executes</strong> — risk score, bot-attack exposure and sandwich detection. ';
+const AXIOM_TRIGGER_COPY = {
+  on:  AXIOM_TRIGGER_COPY_BASE +
+       'If your Axiom preset is looser than the measured risk warrants, it offers a tighter buy slippage and a stronger MEV protection mode, sized to that trade — you approve each one — then puts your original settings back when the trade settles.',
+  off: AXIOM_TRIGGER_COPY_BASE +
+       '<strong style="color:var(--text)">Optimize &amp; Buy is off</strong>, so ZendIQ only observes and reports — it will not change your Axiom settings.',
+};
+
 async function loadMonitor() {
   const el = document.getElementById('monitor-status');
   el.innerHTML = '<div class="monitor-idle">Checking&hellip;</div>';
@@ -20,10 +32,13 @@ async function loadMonitor() {
   ]);
 
   const profile     = stored.profile ?? 'alert';
-  const triggerCopy = PROFILE_TRIGGER_COPY[profile] ?? PROFILE_TRIGGER_COPY.alert;
+  let   triggerCopy = PROFILE_TRIGGER_COPY[profile] ?? PROFILE_TRIGGER_COPY.alert;
 
   if (tab?.id) {
     const site = _dexSiteFromTab(tab);
+    if (site.host === 'axiom.trade') {
+      triggerCopy = stored.axiomOptimize === 'on' ? AXIOM_TRIGGER_COPY.on : AXIOM_TRIGGER_COPY.off;
+    }
 
     // Check whether the widget is currently hidden on that tab
     let widgetHidden = false;
@@ -89,8 +104,37 @@ async function loadMonitor() {
       </div>`;
     const settingsLink = el.querySelector('#mon-go-settings');
     if (settingsLink) settingsLink.addEventListener('click', () => showTab('settings'));
-    const swapLink = el.querySelector('#mon-go-swap');
-    if (swapLink) swapLink.addEventListener('click', () => showTab('swap'));
   }
+
+  await _renderAxiomObligation(el);
+}
+
+// OPS-181: an unrestored Axiom setting outlives the tab that made it, so it has
+// to be reachable with no axiom.trade open. The popup cannot fix it from here —
+// the restore needs the page's own authenticated session — so it points there.
+async function _renderAxiomObligation(el) {
+  const ob = await new Promise(r => chrome.storage.local.get(['sendiq_axiom_obligation'], x => r(x.sendiq_axiom_obligation)));
+  if (!ob || !ob.fields || (ob.localRestored && ob.serverRestored)) return;
+
+  const f     = ob.fields.slippage ?? ob.serverFields?.slippage ?? null;
+  const mine  = f ? String(f.to)   : null;
+  const yours = f ? String(f.from) : null;
+  const ask   = !!ob.needsDecision;
+  const col   = ask ? '#FF6B6B' : '#FFB547';
+  const where = !ob.serverRestored && !ob.localRestored ? 'this browser and your Axiom account'
+              : !ob.serverRestored ? 'your Axiom account'
+              : 'this browser';
+  const body = f
+    ? (ask
+        ? `ZendIQ set your Axiom buy slippage to <strong>${escapeHtml(mine)}%</strong> for a trade and couldn't confirm it was put back on ${where}. Open Axiom to restore <strong>${escapeHtml(yours)}%</strong> or keep the current value.`
+        : `ZendIQ is still restoring your Axiom buy slippage to <strong>${escapeHtml(yours)}%</strong> on ${where}. Open Axiom and it will finish automatically.`)
+    : `ZendIQ has an unfinished Axiom settings restore on ${where}. Open Axiom and it will finish automatically.`;
+
+  el.insertAdjacentHTML('afterbegin', `
+    <div style="margin-bottom:12px;padding:10px 12px;background:${col}14;border:1px solid ${col}55;border-radius:8px;font-size:var(--fs-base);line-height:1.55;color:var(--text)">
+      <div style="color:${col};font-weight:700;margin-bottom:4px">&#9888; ${ask ? 'Axiom settings need a decision' : 'Axiom settings not yet restored'}</div>
+      <div style="color:var(--muted)">${body}</div>
+      <a href="https://axiom.trade" target="_blank" rel="noopener" style="display:inline-block;margin-top:8px;color:${col};font-weight:700;text-decoration:underline">Open axiom.trade</a>
+    </div>`);
 }
 

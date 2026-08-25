@@ -105,6 +105,10 @@
     _dynSlipData:     null,   // {tightenedBps, originalBps, marginBps, tokenClass, priceImpactBps} | null
     _dynSlipOverride: false,  // true when user clicks "Use original X% instead" on the current trade
 
+    // Until this is true the fields above hold defaults, not the user's choices —
+    // writing the settings blob before it flips would overwrite them.
+    settingsLoaded: false,
+
     // pump.fun passive monitor context — set when user clicks Buy on pump.fun bonding curve
     // (no Jupiter routing available; widget shows slippage risk + token risk + execution risk)
     pumpFunContext: null,  // { outputMint, solAmount, slippagePct, risk, tokenScore } | null
@@ -134,7 +138,10 @@
     axiomPendingBtnRef:  null,     // DOM reference to the intercepted Buy button
     axiomRiskAcknowledged: false,  // true after user clicks "Got it"; cleared on token change or new buy
     // ── Axiom preset-optimization (snapshot + restore) ───────────────────
-    axiomOptimizeEnabled: true,    // master flag for the Optimize & Buy flow
+    // Off until the user opts in. `axiomOptimizeConsent` is null until answered —
+    // absence of a choice is not a choice, so it must be distinguishable from 'off'.
+    axiomOptimizeEnabled: false,   // master flag for the Optimize & Buy flow
+    axiomOptimizeConsent: null,    // null = unanswered | 'on' | 'off'
     axiomObligation:    null,      // OPS-181 restore obligation — see page-axiom.js _applyOptimizationAndBuy
     axiomApiHost:       null,      // Axiom's settings API host, learned from live traffic (sharded: api10, api3, …)
     axiomOptimizing:    false,     // true between applying safe settings and restoring the original

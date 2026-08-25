@@ -28,7 +28,7 @@ It works on **Jupiter** (`jup.ag`), **Raydium** (`raydium.io`), **Pump.fun** (`p
 |-------------|------|
 | **Jupiter Ultra API** | Optimised swap order routing, transaction building, and execution |
 | **Jito** | MEV protection via priority tips routed through Jupiter's execution engine; atomic bundle submission on pump.fun |
-| **Solana RPC** (`mainnet-beta`, `publicnode`) | On-chain data: mint/freeze authority, holder distribution, wallet accounts |
+| **Solana RPC** (`mainnet-beta`, `publicnode`, `magicblock`, `ankr`, `drpc`) | On-chain data: mint/freeze authority, holder distribution, wallet accounts |
 | **Helius RPC** *(optional)* | Faster RPC for deployer history and bundle detection scans |
 | **RugCheck** | Token risk flags, LP lock status, rug-pull detection |
 | **DexScreener** | Token age, liquidity depth, 24 h price change, market cap |
@@ -143,7 +143,9 @@ Fees flow through Jupiter's execution engine. ZendIQ never handles or custodies 
 
 ## Privacy & data collection
 
-ZendIQ Pro does **not** phone home. All swap data, history, risk scores, and wallet security results are stored exclusively in `chrome.storage.local` on your own machine.
+Your swap data, history, risk scores, and wallet security results are stored in
+`chrome.storage.local` on your own machine and are never uploaded. ZendIQ Pro does send
+anonymous aggregate telemetry — see [Telemetry](#telemetry) below for exactly what.
 
 The extension contacts the following third-party APIs **from your browser** solely to calculate risk scores:
 
@@ -152,22 +154,50 @@ The extension contacts the following third-party APIs **from your browser** sole
 | `api.rugcheck.xyz` | RugCheck risk flags for the output token |
 | `api.dexscreener.com` | Token age, liquidity, 24 h price change |
 | `api.geckoterminal.com` | Price history and volume trend |
-| Solana RPC (`mainnet-beta.solana.com`, `solana.publicnode.com`) | Mint/freeze authority, holder data, wallet accounts |
+| Solana RPC (`mainnet-beta.solana.com`, `solana.publicnode.com`, `rpc.magicblock.app`, `rpc.ankr.com`, `solana.drpc.org`) | Mint/freeze authority, holder data, wallet accounts |
 | `lite-api.jup.ag` | Optimised swap order fetch and transaction execution |
 
 ### What is NEVER sent to ZendIQ servers
 
 | Data | Where it stays |
 |------|----------------|
-| Wallet public key or address | `chrome.storage.local` only |
 | Private keys or seed phrases | Never accessed — not technically possible from a content script |
+| Your wallet address, in cleartext | Never transmitted to ZendIQ (a truncated hash is — see [Telemetry](#telemetry)) |
 | Transaction signatures | `chrome.storage.local` only |
 | Full swap history | `chrome.storage.local` only |
 | Wallet security scan results | `chrome.storage.local` only |
 | Risk factor details | Computed and displayed locally |
 | API responses from RugCheck, DexScreener, GeckoTerminal | Used locally for scoring; never forwarded |
 
-ZendIQ currently operates no analytics backend for the Pro edition.
+The wallet security scan is the one exception to "the address stays local": reading your token
+approvals requires querying the chain, so your **public** address is sent to the Solana RPC
+providers listed above. It is never sent to a ZendIQ server, and your address is already visible
+to anyone on-chain.
+
+### Telemetry
+
+ZendIQ Pro posts anonymous aggregate events to `zendiq-backend.onrender.com/api/events` to
+measure whether the protection actually works — interception rates, optimisation outcomes,
+MEV detections, and errors. Each payload carries an `install_id` (a random UUID generated once
+per browser profile) and, once a wallet is connected, a **wallet hash**.
+
+Be aware of what that hash is and is not:
+
+> It is the first 12 hex characters (48 bits) of an unsalted SHA-256 of your address. Solana
+> addresses are public and enumerable, so anyone holding a candidate list can hash it and match
+> the prefix. **It is a dedup token, not anonymisation.** Treat it as pseudonymous, and as
+> equivalent to the address itself where the plausible candidate set is small.
+
+It is used server-side only for distinct counts and deduplication, and is never published on a
+public endpoint or used to attribute behaviour to an individual.
+
+Event payloads carry outcomes, not contents: token mints, risk tiers, route types, USD trade-size
+buckets, latency, and error categories. They do not carry your balances, your holdings, or the
+full contents of your wallet. The wallet security scan reports only `wallet_type`, a bucketed
+`score_tier`, and counts of risky approvals — never the approvals themselves or the addresses
+involved.
+
+Full field-by-field detail is in the [privacy policy](https://zendiq.io/privacy/).
 
 ---
 
@@ -184,7 +214,7 @@ ZendIQ currently operates no analytics backend for the Pro edition.
 | `https://api.rugcheck.xyz/*` | Token risk flags |
 | `https://api.dexscreener.com/*` | Token metadata and market data |
 | `https://api.geckoterminal.com/*` | Price history and volume trend |
-| `https://api.mainnet-beta.solana.com/*`, `https://solana.publicnode.com/*` | Solana RPC |
+| `https://api.mainnet-beta.solana.com/*`, `https://solana.publicnode.com/*`, `https://rpc.magicblock.app/*` | Solana RPC |
 
 No payment APIs, social networks, or ad networks are contacted.
 

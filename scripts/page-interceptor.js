@@ -165,6 +165,7 @@
       ns.dynamicSlippageMode = s.dynamicSlippageMode ?? 'shadow';
       ns.jitoMode           = s.jitoMode     ?? 'auto';
       ns.settingsProfile    = s.profile      ?? 'alert';
+      ns.settingsLoaded     = true;
     }
     // Reviewed-state for wallet security — loaded after scan completes via bridge
     if (e.data?.type === 'ZENDIQ_SEC_REVIEWED_RESPONSE') {

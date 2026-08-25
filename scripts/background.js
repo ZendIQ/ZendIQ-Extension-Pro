@@ -204,6 +204,52 @@ chrome.runtime.onInstalled.addListener((details) => {
   }));
 });
 
+// ── OPS-181: cross-tab lock over Axiom's settings surfaces ───────────────────
+// Mutating and restoring are both read-modify-write. Two tabs interleaving means
+// the second reads the first's mutated value as its own original, so the undo
+// record points at the mutation and the user's real setting is cemented.
+// The compare-and-set has to be atomic across tabs, which rules out doing it in
+// the bridge: that runs once per tab, so two bridges can both read "free" and
+// both write. The service worker is the only single instance, and the promise
+// chain below serialises the get/set pairs that chrome.storage does not.
+// Worker eviction loses the chain but not the lock, which lives in storage.
+const AXIOM_LOCK_STALE_MS = 15000;
+let _axiomLockQueue = Promise.resolve();
+
+function _axiomLockOp(op, owner) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['sendiq_axiom_lock'], ({ sendiq_axiom_lock: lock }) => {
+      const now   = Date.now();
+      const held  = (lock && typeof lock === 'object') ? lock : null;
+      const mine  = !!held && held.owner === owner;
+      const stale = !!held && (now - (Number(held.at) || 0)) > AXIOM_LOCK_STALE_MS;
+
+      if (op === 'release') {
+        // Releasing a lock we do not own would hand a live holder's protection away.
+        if (held && !mine) return resolve({ ok: true, note: 'not-owner' });
+        chrome.storage.local.remove('sendiq_axiom_lock', () => resolve({ ok: true }));
+        return;
+      }
+
+      if (op === 'refresh') {
+        // Lost: a throttled tab went stale and another took over. The caller has to
+        // know, because it is still holding surfaces it no longer has the right to write.
+        if (!mine) return resolve({ ok: false, lost: true });
+        chrome.storage.local.set({ sendiq_axiom_lock: { owner, at: now } }, () => resolve({ ok: true }));
+        return;
+      }
+
+      if (held && !mine && !stale) {
+        return resolve({ ok: false, heldBy: 'other', ageMs: now - (Number(held.at) || 0) });
+      }
+      chrome.storage.local.set({ sendiq_axiom_lock: { owner, at: now } }, () => {
+        const err = chrome.runtime.lastError;
+        resolve(err ? { ok: false, error: 'set' } : { ok: true, stolen: !!(held && !mine && stale) });
+      });
+    });
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // ── Ping ──────────────────────────────────────────────────────────────────
@@ -371,6 +417,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       'https://rpc.ankr.com/solana',
       'https://solana.drpc.org',
       'https://api.mainnet-beta.solana.com',
+      // publicnode/ankr/drpc reject getTokenAccountsByOwner outright and mainnet-beta
+      // rate-limits it, so the wallet approval scan needs a second endpoint that serves it.
+      'https://rpc.magicblock.app/mainnet',
     ];
     const _body = JSON.stringify({ jsonrpc:'2.0', id:1, method: msg.method, params: msg.params ?? [] });
     const _fetchOne = (url) => {
@@ -401,6 +450,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const _batchEndpoints = [
       'https://solana.publicnode.com',
       'https://api.mainnet-beta.solana.com',
+      'https://rpc.magicblock.app/mainnet',
     ];
     const _batchBody = JSON.stringify(
       msg.calls.map((c, i) => ({ jsonrpc: '2.0', id: i, method: c.method, params: c.params ?? [] }))
@@ -469,6 +519,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'SAVE_ANALYSIS') {
     chrome.storage.local.set({ lastAnalysis: { ...msg.data, savedAt: Date.now() } });
     sendResponse({ ok: true });
+    return true;
+  }
+
+  // ── OPS-181: Axiom settings lock ──────────────────────────────────────────
+  if (msg.type === 'AXIOM_LOCK') {
+    const owner = (typeof msg.owner === 'string' && /^[A-Za-z0-9]{1,40}$/.test(msg.owner)) ? msg.owner : null;
+    if (!owner || !['acquire', 'refresh', 'release'].includes(msg.op)) {
+      sendResponse({ ok: false, error: 'bad-request' });
+      return true;
+    }
+    // Every outcome answers. A caller left waiting fails closed on its own timeout,
+    // but that spends the timeout on an answer already known.
+    _axiomLockQueue = _axiomLockQueue
+      .then(() => _axiomLockOp(msg.op, owner))
+      .then((r) => sendResponse(r))
+      .catch((e) => sendResponse({ ok: false, error: e?.message ?? 'lock-failed' }));
     return true;
   }
 

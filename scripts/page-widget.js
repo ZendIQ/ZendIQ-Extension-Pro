@@ -62,6 +62,13 @@
   };
 
   function _saveWidgetSettings() {
+    // Every field below is sent on every save, so writing before the load lands would
+    // persist defaults over the user's real choices. Re-request rather than drop silently.
+    if (!ns.settingsLoaded) {
+      console.warn('[ZendIQ] settings not loaded yet — save skipped, re-requesting');
+      try { window.postMessage({ type: 'ZENDIQ_GET_SETTINGS' }, '*'); } catch (_) {}
+      return;
+    }
     try {
       window.postMessage({
         type: 'ZENDIQ_SAVE_SETTINGS',
@@ -81,8 +88,22 @@
     } catch (_) {}
   }
 
-  function _applyWidgetProfile(name) {
-    ns.settingsProfile = name;
+  // On Axiom, resolveWalletPubkey() returns Axiom's server-custody session wallet.
+  // The approval scan is only meaningful for a wallet the user holds keys to, so the
+  // browser-injected wallet has to be resolved separately.
+  function _browserWalletPubkey() {
+    try {
+      // window.solana first: specific globals keep a stale publicKey after the user
+      // switches wallet, so probing them first can return the wrong address.
+      const w = window.solana || window.phantom?.solana || window.solflare || window.backpack?.solana;
+      const pk = w?.publicKey;
+      if (!pk) return '';
+      const raw = typeof pk === 'string' ? pk : (pk?.toBase58?.() ?? pk?.toString?.() ?? '');
+      return (raw && raw.length >= 32) ? raw : '';
+    } catch (_) { return ''; }
+  }
+
+  function _applyWidgetProfile(name) {    ns.settingsProfile = name;
     if (name !== 'custom' && WIDGET_PROFILES[name]) {
       const p = WIDGET_PROFILES[name];
       ns.threshMinRiskLevel = p.minRiskLevel;
@@ -94,6 +115,10 @@
   }
 
   function _wireSettingsPanel(bodyInner) {
+    // Axiom Optimize & Buy consent — reversible form of the first-visit prompt
+    const axOptCheck = bodyInner.querySelector('#sr-set-axiom-optimize');
+    if (axOptCheck) axOptCheck.onchange = () => ns.axiomSetConsent?.(axOptCheck.checked ? 'on' : 'off');
+
     // Auto-protect toggle
     const apCheck = bodyInner.querySelector('#sr-set-autoprotect');
     if (apCheck) apCheck.onchange = () => { ns.autoProtect = apCheck.checked; _saveWidgetSettings(); renderWidgetPanel(); };
@@ -389,7 +414,6 @@
     Object.assign(ns, { _rClr, _riskLabel, _factorRows, _buildOrderCard, _buildTokenRiskCard, _buildExecutionRiskCard, _buildSavingsCostsCard, _buildReviewShell });
 
     // On axiom.trade there is no Swap tab — redirect if somehow set.
-    if (ns.axiomVerifyOnly && ns.widgetActiveTab === 'swap') ns.widgetActiveTab = 'monitor';
 
     const widget = document.getElementById('sr-widget');
     if (!widget) return;
@@ -436,19 +460,25 @@
       }
     } catch(_) {}
 
+    // On Axiom this address is Axiom's own custody wallet, not the user's. Calling it
+    // "Wallet connected" reads as theirs and contradicts the address the Wallet tab scans.
+    const _isAxiomCustody = !!(ns.axiomVerifyOnly && fullWalletPubkey && fullWalletPubkey === ns.axiomSessionPubkey);
+    const _walletLabel = _isAxiomCustody ? 'Axiom trading wallet' : 'Wallet connected';
+
     // Wallet tab shield colour — mirrors popup _updateSecurityTabColor() logic.
     // Colours only the SVG; text stays at the active/inactive default.
     // Held constant during a re-scan (walletSecurityChecking) to avoid flash.
     const _wsResult = ns.walletSecurityResult;
     const _wsChecking = ns.walletSecurityChecking;
     const _shieldColor = (() => {
-      if (ns.axiomVerifyOnly) return ''; // no scan on Axiom — keep the shield neutral, not amber
+      if (ns.axiomVerifyOnly && !_browserWalletPubkey()) return ''; // nothing scannable here — stay neutral, not amber
       if (_wsChecking && ns._lastWalletShieldColor) return ns._lastWalletShieldColor; // no flash
       if (!_wsResult) return ns._lastWalletShieldColor || '#FFB547'; // amber until first scan
       const raw = _wsResult.score ?? null;
       const ad  = _wsResult.autoApproveDeduction ?? 0;
       const ds  = raw == null ? null : Math.max(0, raw - ((ns.walletReviewedAutoApprove ?? false) ? 0 : ad));
-      const c = ds == null ? null : ds === 100 ? '#14F195' : ds >= 80 ? '#FFB547' : ds >= 60 ? '#FF6B00' : '#FF4444';
+      // No score means the scan did not complete — amber, never the green default.
+      const c = ds == null ? '#FFB547' : ds === 100 ? '#14F195' : ds >= 80 ? '#FFB547' : ds >= 60 ? '#FF6B00' : '#FF4444';
       if (c) ns._lastWalletShieldColor = c;
       return c;
     })();
@@ -456,12 +486,13 @@
     // Wallet security panel HTML — rendered from ns.walletSecurityResult / ns.walletSecurityChecking
     const walletSecHtml = (() => {
       const _esc = s => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      const _wp  = fullWalletPubkey || '';   // use the already-resolved pubkey (same source as wallet bar)
-      // On Axiom, trades execute through Axiom's built-in session wallet (server-side
-      // custody), not the user's own browser wallet — so ZendIQ's approval scan (which
-      // targets self-custody wallets like Phantom/Backpack) can't run here. Show a clear
-      // explanation instead of an inert "Run" button so nothing looks broken.
-      if (ns.axiomVerifyOnly) {
+      // On Axiom the header address is Axiom's session wallet, which the user holds no key
+      // to — scanning it would report on a wallet they cannot revoke anything on.
+      const _wp  = (ns.axiomVerifyOnly ? _browserWalletPubkey() : fullWalletPubkey) || '';
+      // Axiom executes through its own server-custody wallet. If the user has no browser
+      // wallet on the page there is nothing self-custody to scan, so explain rather than
+      // show an inert Run button.
+      if (ns.axiomVerifyOnly && !_wp) {
         return `
           <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.8px;color:#C2C2D4;margin-bottom:10px">Wallet Security Check</div>
           <div style="margin-top:4px;padding:12px;border-radius:8px;background:rgba(153,69,255,0.06);border:1px solid rgba(153,69,255,0.18);font-size:12px;color:#C0C0D8;line-height:1.65">
@@ -469,7 +500,7 @@
               <svg viewBox="0 0 24 24" width="16" height="16" style="flex-shrink:0;fill:none;stroke:#9945FF;stroke-width:1.6"><path d="M12 3L4 7v5c0 4.4 3.4 8.5 8 9.5 4.6-1 8-5.1 8-9.5V7l-8-4z" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 12l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
               <span style="font-weight:700;color:#E8E8F0;font-size:13px">Runs on your own wallet</span>
             </div>
-            <div style="margin-bottom:8px">Axiom trades go through its own built-in wallet, so ZendIQ can\u2019t check your personal wallet\u2019s approvals from here.</div>
+            <div style="margin-bottom:8px">Axiom trades go through its own built-in wallet, and no self-custody wallet is connected on this page — so there are no approvals for ZendIQ to check here.</div>
             <div style="margin-bottom:8px">The wallet scan looks at your self-custody wallet (Phantom, Backpack, Solflare, and others) for <strong style="color:#E8E8F0">unlimited token approvals</strong> and known drain contracts. Open <a href="https://jup.ag" target="_blank" rel="noopener" style="color:#9945FF;font-weight:700;text-decoration:none">jup.ag</a>, <a href="https://raydium.io/swap/" target="_blank" rel="noopener" style="color:#9945FF;font-weight:700;text-decoration:none">Raydium</a>, or <a href="https://pump.fun" target="_blank" rel="noopener" style="color:#9945FF;font-weight:700;text-decoration:none">pump.fun</a> with your wallet connected to run it there.</div>
             <div style="padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);font-size:12px;color:#E8E8F0">
               <span style="color:#14F195">&#x2713;</span> Your private key and seed phrase are never read or stored by ZendIQ.
@@ -513,7 +544,7 @@
           </div>`;
         return `
           <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.8px;color:#C2C2D4;margin-bottom:10px">Wallet Security Check</div>
-          <p style="font-size:13px;color:#C2C2D4;line-height:1.65;margin-bottom:14px">ZendIQ scans your wallet for <strong style="color:#E8E8F0">unlimited token approvals</strong>, known drain contracts, and wallet-specific risks.<br><br>All checks are read-only queries against your <strong style="color:#E8E8F0">public wallet address</strong>. ZendIQ never has access to your <strong style="color:#14F195">private key</strong> or seed phrase, and no data ever leaves your browser.</p>
+          <p style="font-size:13px;color:#C2C2D4;line-height:1.65;margin-bottom:14px">ZendIQ scans your wallet for <strong style="color:#E8E8F0">unlimited token approvals</strong>, known drain contracts, and wallet-specific risks.<br><br>All checks are read-only queries against your <strong style="color:#E8E8F0">public wallet address</strong>. ZendIQ never has access to your <strong style="color:#14F195">private key</strong> or seed phrase, and nothing is sent to a ZendIQ server &mdash; only your public address goes to public Solana RPC providers.</p>
           <button id="sr-sec-run" style="width:100%;padding:10px;border:1px solid rgba(153,69,255,0.3);border-radius:8px;background:rgba(153,69,255,0.1);color:#9945FF;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;margin-bottom:8px">&#x1F512; Run Security Check</button>`;
       }
       const _r   = ns.walletSecurityResult;
@@ -584,6 +615,7 @@
             <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.8px;color:#C2C2D4;margin-bottom:4px">Wallet Security Score</div>
             <div style="display:flex;align-items:baseline;gap:4px"><span style="font-size:32px;font-weight:900;color:${_scColor};font-family:'Space Mono',monospace;line-height:1">${_dsc??'&mdash;'}</span><span style="font-size:13px;font-weight:700;color:#6B6B8A">&thinsp;/ 100</span></div>
             <div style="font-size:13px;color:${_openAct===0?'#14F195':'#FFB547'};font-weight:600;margin-top:2px">${_scSubline}</div>
+            ${_r.pubkey ? `<div style="font-size:12px;color:#6B6B8A;margin-top:1px">Scanned ${_esc(_r.pubkey.slice(0,4))}&hellip;${_esc(_r.pubkey.slice(-4))}${ns.axiomVerifyOnly ? ' &middot; your own wallet, not Axiom&rsquo;s' : ''}</div>` : ''}
             ${_ageStr ? `<div style="font-size:12px;color:#6B6B8A;margin-top:1px">Last scanned: ${_ageStr}</div>` : ''}
           </div>
           <button id="sr-sec-recheck" style="padding:7px 12px;border:1px solid rgba(153,69,255,0.25);border-radius:7px;background:transparent;color:#9945FF;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;flex-shrink:0;margin-top:2px">&circlearrowleft; Re-scan</button>
@@ -593,7 +625,7 @@
         ${_otherHtml}${_revokeHtml}
         <div style="margin-top:10px;font-size:12px;color:#C2C2D4;line-height:1.65">
           <div style="display:flex;align-items:flex-start;gap:5px;margin-bottom:3px"><span style="color:#14F195">&#x2713;</span><span><strong style="color:#E8E8F0">ZendIQ never has access to your private key or seed phrase.</strong> Only your public address is used.</span></div>
-          <div>On-chain scan only &mdash; no data leaves your browser. <a href="https://revoke.cash" target="_blank" rel="noopener" style="color:#9945FF;text-decoration:none">revoke.cash</a> is a trusted third-party tool.</div>
+          <div title="To read your approvals, your public address is sent to public Solana RPC providers: Solana Labs (api.mainnet-beta.solana.com), MagicBlock, PublicNode, Ankr and dRPC. Your address is already visible to anyone on-chain. Nothing is sent to a ZendIQ server, and no trade or balance data is shared." style="cursor:help">On-chain scan only &mdash; your public address goes to public Solana RPC providers, never to a ZendIQ server. <a href="https://revoke.cash" target="_blank" rel="noopener" style="color:#9945FF;text-decoration:none">revoke.cash</a> is an independent third-party tool.</div>
         </div>`;
     })();
 
@@ -2089,25 +2121,7 @@
       }
     }
 
-    let swapTabContent = '';
-
-    if (widgetFlowContent) {
-      // For done/error: capturedTrade is cleared, use saved fromSwapTab flag instead
-      const _isFromSwap = ns.widgetCapturedTrade?.fromSwapTab || ns.widgetLastTxFromSwapTab;
-      if (_isFromSwap) {
-        swapTabContent = widgetFlowContent;
-      } else {
-        monitorContent = widgetFlowContent;   // REPLACE idle monitor text, don't append
-      }
-    }
-
-    // Pre-compute swap tab reactive values
-    const _swapHasQuote = ns.widgetCapturedTrade?.fromSwapTab && ns.widgetLastOrder;
-    const _srAmtOut = _swapHasQuote
-      ? (parseInt(ns.widgetLastOrder.outAmount) / Math.pow(10, ns.widgetCapturedTrade.outputDecimals ?? 9)).toFixed(4)
-      : '';
-    const _swapHasActivity = (ns.widgetCapturedTrade?.fromSwapTab || ns.widgetLastTxFromSwapTab) &&
-      ['fetching','ready','signing','signing-original','sending','done','done-original','error'].includes(ns.widgetSwapStatus);
+    if (widgetFlowContent) monitorContent = widgetFlowContent;   // REPLACE idle monitor text, don't append
 
     // ── First-launch welcome card — shown until user dismisses (synced with popup)
     // Full panel HTML
@@ -2119,17 +2133,12 @@
         #sr-wallet-addr button { background:none;border:none;color:#C2C2D4;cursor:pointer;font-size:13px;padding:2px 4px; }
         #sr-wallet-addr button:hover { color:#14F195; }
         #sr-wallet-addr button svg { width:14px;height:14px;display:block; }
-        #sr-panel-swap .sr-tok-wrap, #sr-panel-swap input { min-width:0; }
-        #sr-panel-swap input { max-width:220px; }
-        #sr-panel-swap .sr-tok-wrap > div { max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        #sr-panel-swap #sr-picker-in, #sr-panel-swap #sr-picker-out { width:180px; }
-        #sr-panel-swap .sr-pick-item { display:flex; align-items:center; gap:8px; padding:6px; border-radius:6px; }
       </style>
 
       <div style="display:flex;align-items:center;gap:8px;padding:7px 12px;background:rgba(20,241,149,0.04);border-bottom:1px solid rgba(20,241,149,0.08);font-size:12px;color:#C2C2D4;">
         ${walletConnected ? `
           <svg width="12" height="12" viewBox="0 0 24 24" style="flex-shrink:0"><path d="M20 6L9 17l-5-5" stroke="#14F195" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
-          <span style="color:#14F195;font-weight:600">Wallet connected</span>
+          <span style="color:#14F195;font-weight:600"${_isAxiomCustody ? ' title="Axiom executes trades from its own built-in wallet. Your personal wallet is scanned separately in the Wallet tab."' : ''}>${escapeHtml(_walletLabel)}</span>
         ` : `
           <div style="width:6px;height:6px;border-radius:50%;background:#C2C2D4"></div>
           <span>Wallet not detected</span>
@@ -2138,10 +2147,6 @@
       </div>
 
       <div style="display:flex;border-bottom:1px solid rgba(153,69,255,0.2);background:rgba(0,0,0,0.15);">
-        ${ns.axiomVerifyOnly ? '' : `<button id="sr-tab-swap"     style="flex:1;padding:9px 4px;font-size:13px;font-weight:600;background:none;border:none;border-bottom:2px solid ${ns.widgetActiveTab==='swap'?'#14F195':'transparent'};color:${ns.widgetActiveTab==='swap'?'#14F195':'#C2C2D4'};cursor:pointer;font-family:'DM Sans',sans-serif;transition:all 0.15s;display:inline-flex;align-items:center;justify-content:center;">
-          <svg viewBox="0 0 24 24" width="14" height="14" style="vertical-align:middle;margin-right:6px;fill:none;stroke:currentColor;stroke-width:1.6"><path d="M7 16V8m0 0l3 3M7 8l-3 3" stroke-linecap="round" stroke-linejoin="round"/><path d="M17 8v8m0 0l3-3m-3 3l-3-3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          Swap
-        </button>`}
         <button id="sr-tab-monitor"  style="flex:1;padding:9px 4px;font-size:13px;font-weight:600;background:none;border:none;border-bottom:2px solid ${ns.widgetActiveTab==='monitor'?'#14F195':'transparent'};color:${ns.widgetActiveTab==='monitor'?'#14F195':'#C2C2D4'};cursor:pointer;font-family:'DM Sans',sans-serif;transition:all 0.15s;display:inline-flex;align-items:center;justify-content:center;">
           <svg viewBox="0 0 24 24" width="14" height="14" style="vertical-align:middle;margin-right:6px;fill:none;stroke:currentColor;stroke-width:1.6"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" stroke-linecap="round" stroke-linejoin="round"/></svg>
           Monitor
@@ -2158,49 +2163,6 @@
           <svg viewBox="0 0 24 24" width="14" height="14" style="vertical-align:middle;margin-right:6px;fill:none;stroke:currentColor;stroke-width:1.6"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke-linecap="round" stroke-linejoin="round"/></svg>
           Settings
         </button>
-      </div>
-
-      <div id="sr-panel-swap" style="display:${ns.widgetActiveTab==='swap'?'block':'none'}">
-        <div style="display:flex;align-items:flex-start;gap:8px;margin:10px 12px 0;padding:9px 11px;background:rgba(153,69,255,0.07);border:1px solid rgba(153,69,255,0.18);border-radius:8px;font-size:12px;color:#C2C2D4;line-height:1.55;">
-          <svg viewBox="0 0 24 24" width="14" height="14" style="flex-shrink:0;margin-top:2px;fill:none;stroke:#9945FF;stroke-width:2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <span>ZendIQ monitors all your jup.ag swaps automatically. Use this form to build a fully optimised order from scratch.</span>
-        </div>
-        <div style="padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.03)">
-          <div style="margin-bottom:8px">
-            <div style="font-size:13px;color:#C2C2D4;margin-bottom:6px">You're Selling</div>
-            <div style="display:flex;align-items:center;gap:8px;background:#1A1A2E;border:1px solid rgba(153,69,255,0.12);border-radius:10px;padding:8px;margin-bottom:6px">
-              <input id="sr-amount-in" type="number" min="0" step="0.0001" placeholder="0.1" style="flex:1;background:transparent;border:none;color:#E8E8F0;font-family:'Space Mono',monospace;font-size:16px;font-weight:700;outline:none" />
-              <div class="sr-tok-wrap" style="position:relative">
-                <div id="sr-sel-in" style="display:flex;align-items:center;gap:6px;background:rgba(153,69,255,0.12);border:1px solid rgba(153,69,255,0.25);border-radius:20px;padding:6px 8px;cursor:pointer;white-space:nowrap;user-select:none">
-                  <span id="sr-ticker-in" style="font-size:12px;font-weight:700">SOL</span>
-                  <span style="color:#C2C2D4;font-size:12px;margin-left:6px">▾</span>
-                </div>
-                <div id="sr-picker-in" style="display:none;position:absolute;top:calc(100% + 6px);right:0;background:#12121E;border:1px solid rgba(153,69,255,0.12);border-radius:8px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,0.6);z-index:200;width:160px"></div>
-              </div>
-            </div>
-
-            <div style="display:flex;justify-content:center;margin:6px 0">
-              <button id="sr-btn-flip" title="Flip tokens" style="background:#1A1A2E;border:1px solid rgba(153,69,255,0.12);color:#9945FF;width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer">⇅</button>
-            </div>
-
-            <div style="font-size:13px;color:#C2C2D4;margin-bottom:6px">You're Buying</div>
-            <div style="display:flex;align-items:center;gap:8px;background:#1A1A2E;border:1px solid rgba(153,69,255,0.12);border-radius:10px;padding:8px">
-              <input id="sr-amount-out" type="text" readonly placeholder="—" value="${_srAmtOut}" style="flex:1;background:transparent;border:none;color:${_srAmtOut ? '#E8E8F0' : '#C2C2D4'};font-family:'Space Mono',monospace;font-size:14px;outline:none" />
-              <div class="sr-tok-wrap" style="position:relative">
-                <div id="sr-sel-out" style="display:flex;align-items:center;gap:6px;background:rgba(153,69,255,0.12);border:1px solid rgba(153,69,255,0.25);border-radius:20px;padding:6px 8px;cursor:pointer;white-space:nowrap;user-select:none">
-                  <span id="sr-ticker-out" style="font-size:12px;font-weight:700">USDC</span>
-                  <span style="color:#C2C2D4;font-size:12px;margin-left:6px">▾</span>
-                </div>
-                <div id="sr-picker-out" style="display:none;position:absolute;top:calc(100% + 6px);right:0;background:#12121E;border:1px solid rgba(153,69,255,0.12);border-radius:8px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,0.6);z-index:200;width:160px"></div>
-              </div>
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;${_swapHasActivity ? 'margin-bottom:0' : ''}">
-            <button id="sr-btn-send-quote" style="flex:1;padding:10px;border:1px solid rgba(153,69,255,0.2);border-radius:8px;background:rgba(153,69,255,0.06);color:#9945FF;font-size:12px;font-weight:700;cursor:pointer">${_swapHasQuote ? '↺ Refresh Quote' : 'Get Quote'}</button>
-            <div id="sr-send-status" style="font-size:12px;color:#C2C2D4;align-self:center;${_swapHasActivity ? 'display:none' : ''}">&nbsp;</div>
-          </div>
-        </div>
-        ${swapTabContent}
       </div>
 
       <div id="sr-panel-monitor" style="display:${ns.widgetActiveTab==='monitor'?'block':'none'}">
@@ -2233,6 +2195,22 @@
 
       <div id="sr-panel-settings" style="display:${ns.widgetActiveTab==='settings'?'block':'none'}">
         <div style="padding:12px 16px">
+${!ns.axiomVerifyOnly ? '' : `
+          <!-- Axiom consent (OPS-185) -->
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);margin-bottom:10px">
+            <div title="When on, ZendIQ offers a tighter buy slippage and a stronger MEV protection mode, sized to the measured risk of that single trade, then puts your original settings back when it settles. You approve each one." style="cursor:default">
+              <div style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:500;color:#E8E8F0">
+                Optimize &amp; Buy on Axiom
+                <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="#C2C2D4" stroke-width="1.5" style="flex-shrink:0"><circle cx="8" cy="8" r="7"/><path d="M8 7v4m0-5.5v.5" stroke-linecap="round"/></svg>
+              </div>
+              <div style="font-size:12px;color:#C2C2D4;margin-top:2px;line-height:1.4">${ns.axiomOptimizeEnabled ? 'ZendIQ may temporarily change your buy settings for a trade you approve.' : 'Observe and report only \u2014 ZendIQ will not change your Axiom settings.'}</div>
+            </div>
+            <label style="position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;flex-shrink:0;margin-left:10px">
+              <input id="sr-set-axiom-optimize" type="checkbox" ${ns.axiomOptimizeEnabled?'checked':''} style="opacity:0;width:0;height:0;position:absolute">
+              <span style="position:absolute;inset:0;border-radius:20px;background:${ns.axiomOptimizeEnabled?'rgba(20,241,149,0.15)':'#1A1A2E'};border:1px solid ${ns.axiomOptimizeEnabled?'#14F195':'rgba(255,255,255,0.1)'};transition:background 0.2s,border-color 0.2s"></span>
+              <span style="position:absolute;top:2px;left:${ns.axiomOptimizeEnabled?'18px':'2px'};width:14px;height:14px;border-radius:50%;background:${ns.axiomOptimizeEnabled?'#14F195':'#C2C2D4'};transition:left 0.2s,background 0.2s"></span>
+            </label>
+          </div>`}
 
           <!-- Auto-optimise -->
           <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);margin-bottom:0">
@@ -2421,8 +2399,6 @@
     }
 
     // Tab switching
-    const _tabSwapBtn = bodyInner.querySelector('#sr-tab-swap');
-    if (_tabSwapBtn) _tabSwapBtn.onclick = () => { collapseAlertIfPending(); ns.widgetActiveTab = 'swap'; renderWidgetPanel(); };
     bodyInner.querySelector('#sr-tab-monitor').onclick  = () => {
       ns.widgetActiveTab = 'monitor';
       // Re-apply alert class if a pending decision is still waiting
@@ -2454,7 +2430,7 @@
       setTimeout(() => {
         try {
           if (!ns.walletSecurityResult && !ns.walletSecurityChecking) {
-            const _pk = ns.resolveWalletPubkey?.();
+            const _pk = ns.axiomVerifyOnly ? _browserWalletPubkey() : ns.resolveWalletPubkey?.();
             if (_pk) ns.runWalletSecurityCheck?.(_pk);
           } else {
             // If a persisted result was loaded, re-render the panel to show it.
@@ -2470,8 +2446,8 @@
       const _secRun     = bodyInner.querySelector('#sr-sec-run');
       const _secRecheck = bodyInner.querySelector('#sr-sec-recheck');
       const _openPopupBtn = bodyInner.querySelector('#sr-open-popup');
-      if (_secRun)     _secRun.onclick     = () => ns.runWalletSecurityCheck?.();
-      if (_secRecheck) _secRecheck.onclick = () => ns.runWalletSecurityCheck?.();
+      if (_secRun)     _secRun.onclick     = () => ns.runWalletSecurityCheck?.(ns.axiomVerifyOnly ? _browserWalletPubkey() : undefined);
+      if (_secRecheck) _secRecheck.onclick = () => ns.runWalletSecurityCheck?.(ns.axiomVerifyOnly ? _browserWalletPubkey() : undefined);
       if (_openPopupBtn) _openPopupBtn.onclick = () => {
         try { window.postMessage({ type: 'ZENDIQ_OPEN_POPUP' }, '*'); } catch (_) {}
         // Ask bridge to re-send persisted scan result after a short delay
@@ -2492,6 +2468,11 @@
 
     // Axiom verify-only: wire close / proceed / cancel buttons in Monitor tab.
     if (ns.axiomVerifyOnly) {
+      const _axOn  = bodyInner.querySelector('#sr-ax-consent-on');
+      const _axOff = bodyInner.querySelector('#sr-ax-consent-off');
+      if (_axOn)  _axOn.onclick  = () => ns.axiomSetConsent?.('on');
+      if (_axOff) _axOff.onclick = () => ns.axiomSetConsent?.('off');
+
       const _axClose = bodyInner.querySelector('#sr-ax-close');
       if (_axClose) _axClose.onclick = () => {
         if (ns) ns.axiomRiskAcknowledged = true;
@@ -2538,6 +2519,28 @@
         ns.axiomPendingBtnRef  = null;
         renderWidgetPanel(); // re-render to swap back to "Got it — close" state
       };
+
+      // Outstanding-restore actions. Restore re-reads both surfaces before writing
+      // anything — this card may have been on screen since a previous session.
+      const _axRestore = bodyInner.querySelector('#sr-ax-restore');
+      if (_axRestore) _axRestore.onclick = async () => {
+        _axRestore.disabled = true;
+        _axRestore.textContent = '\u23f3 Restoring\u2026';
+        let _done = false;
+        try { _done = await ns.axiomRestoreNow?.(); } catch (_) {}
+        if (!_done) {
+          _axRestore.disabled = false;
+          _axRestore.textContent = '\u26a0 Could not reach Axiom \u2014 try again';
+          return;
+        }
+        renderWidgetPanel();
+      };
+
+      const _axKeep = bodyInner.querySelector('#sr-ax-keep');
+      if (_axKeep) _axKeep.onclick = () => { ns.axiomKeepCurrent?.(); renderWidgetPanel(); };
+
+      const _axReload = bodyInner.querySelector('#sr-ax-reload');
+      if (_axReload) _axReload.onclick = () => { location.reload(); };
     }
 
     // Wire settings panel controls when the settings tab is visible
@@ -3305,7 +3308,6 @@
       const o  = bodyInner.querySelector('#sr-btn-optimise');
       const s  = bodyInner.querySelector('#sr-btn-skip');
       const c  = bodyInner.querySelector('#sr-btn-cancel');
-      const i  = bodyInner.querySelector('#sr-btn-inspect');
       const sm = bodyInner.querySelector('#sr-btn-skip-monitor');
       if (o)  o.onclick  = () => ns.handleOptimiseTrade();
       if (s) {
@@ -3351,7 +3353,6 @@
         }
       }
       if (c)  c.onclick  = () => ns.handlePendingDecision('block');
-      if (i)  i.onclick  = () => { ns.widgetActiveTab = 'swap'; renderWidgetPanel(); };
       if (sm) sm.onclick = () => ns.handlePendingDecision('allow');
     }
 
@@ -3385,7 +3386,7 @@
       }
       ns.widgetCapturedTrade = null; ns.widgetLastOrder = null;
       ns.widgetSwapStatus = ''; ns.widgetSwapError = '';
-      ns.widgetLastTxSig = null; ns.widgetLastTxPair = null; ns.widgetLastTxFromSwapTab = null;
+      ns.widgetLastTxSig = null; ns.widgetLastTxPair = null;
       renderWidgetPanel();
     };
     if (retryBtn) retryBtn.onclick = () => ns.fetchWidgetQuote();
@@ -3428,7 +3429,7 @@
     if (newBtn)   newBtn.onclick   = () => {
       ns.widgetCapturedTrade = null; ns.widgetLastOrder = null;
       ns.widgetSwapStatus = ''; ns.widgetSwapError = '';
-      ns.widgetLastTxSig = null; ns.widgetLastTxPair = null; ns.widgetLastTxFromSwapTab = null;
+      ns.widgetLastTxSig = null; ns.widgetLastTxPair = null;
       ns.widgetOriginalSigningInfo = null; ns.widgetOriginalTxSig = null;
       renderWidgetPanel();
     };
@@ -3438,7 +3439,7 @@
         if (ns.widgetSwapStatus === 'done') {
           ns.widgetCapturedTrade = null; ns.widgetLastOrder = null;
           ns.widgetSwapStatus = ''; ns.widgetSwapError = '';
-          ns.widgetLastTxSig = null; ns.widgetLastTxPair = null; ns.widgetLastTxFromSwapTab = null;
+          ns.widgetLastTxSig = null; ns.widgetLastTxPair = null;
           // Show generic idle content until next swap begins (clears when /compute fires)
           ns._rdmPostSwapIdle = true;
           renderWidgetPanel();
@@ -3526,97 +3527,6 @@
       };
     }
 
-    // Swap tab token pickers
-    const TOKENS = [
-      { symbol:'SOL',  name:'Solana',    icon:'◎',  mint:'So11111111111111111111111111111111111111112',  decimals:9 },
-      { symbol:'USDC', name:'USD Coin',  icon:'💵', mint:'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals:6 },
-      { symbol:'USDT', name:'Tether',    icon:'💲', mint:'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', decimals:6 },
-      { symbol:'JUP',  name:'Jupiter',   icon:'🪐', mint:'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',  decimals:6 },
-      { symbol:'BONK', name:'Bonk',      icon:'🐶', mint:'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', decimals:5 },
-      { symbol:'WIF',  name:'dogwifhat', icon:'🎩', mint:'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', decimals:6 },
-      { symbol:'RAY',  name:'Raydium',   icon:'⚡', mint:'4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R',  decimals:6 },
-    ];
-
-    let tokenIn  = TOKENS.find(t => t.symbol === 'USDC') || TOKENS[1];
-    let tokenOut = TOKENS.find(t => t.symbol === 'SOL')  || TOKENS[0];
-
-    const selIn    = bodyInner.querySelector('#sr-sel-in');
-    const selOut   = bodyInner.querySelector('#sr-sel-out');
-    const pickerIn = bodyInner.querySelector('#sr-picker-in');
-    const pickerOut = bodyInner.querySelector('#sr-picker-out');
-    const amtInEl  = bodyInner.querySelector('#sr-amount-in');
-    const amtOutEl = bodyInner.querySelector('#sr-amount-out');
-
-    if (amtInEl) {
-      amtInEl.value = '0.1';
-      amtInEl.addEventListener('input', () => {
-        ns.widgetLastOrder = null; ns.widgetSwapStatus = '';
-        const st = bodyInner.querySelector('#sr-send-status'); if (st) st.textContent = '\u00A0';
-      });
-    }
-
-    function updateTokenUI() {
-      const tk = bodyInner.querySelector('#sr-ticker-in');
-      const ot = bodyInner.querySelector('#sr-ticker-out');
-      if (tk) tk.textContent = tokenIn.symbol;
-      if (ot) ot.textContent = tokenOut.symbol;
-    }
-
-    function buildPickers() {
-      if (pickerIn)  pickerIn.innerHTML  = TOKENS.map(t => `<div class="sr-pick-item" data-side="in"  data-sym="${t.symbol}" style="padding:6px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px"><div><div style="font-weight:700">${t.symbol}</div><div style="font-size:13px;color:#C2C2D4">${t.name}</div></div></div>`).join('');
-      if (pickerOut) pickerOut.innerHTML = TOKENS.map(t => `<div class="sr-pick-item" data-side="out" data-sym="${t.symbol}" style="padding:6px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:8px"><div><div style="font-weight:700">${t.symbol}</div><div style="font-size:13px;color:#C2C2D4">${t.name}</div></div></div>`).join('');
-      Array.from(bodyInner.querySelectorAll('.sr-pick-item')).forEach(item => {
-        item.addEventListener('click', () => {
-          const side = item.dataset.side;
-          const tok  = TOKENS.find(t => t.symbol === item.dataset.sym);
-          if (!tok) return;
-          if (side === 'in') tokenIn = tok; else tokenOut = tok;
-          updateTokenUI();
-          if (pickerIn)  pickerIn.style.display  = 'none';
-          if (pickerOut) pickerOut.style.display = 'none';
-        });
-      });
-    }
-
-    if (selIn)  selIn.onclick  = (e) => { if (pickerIn)  pickerIn.style.display  = pickerIn.style.display  === 'block' ? 'none' : 'block'; e.stopPropagation(); };
-    if (selOut) selOut.onclick = (e) => { if (pickerOut) pickerOut.style.display = pickerOut.style.display === 'block' ? 'none' : 'block'; e.stopPropagation(); };
-    document.addEventListener('click', () => { if (pickerIn) pickerIn.style.display = 'none'; if (pickerOut) pickerOut.style.display = 'none'; });
-
-    updateTokenUI();
-    buildPickers();
-
-    const flipBtn = bodyInner.querySelector('#sr-btn-flip');
-    if (flipBtn) flipBtn.onclick = () => { [tokenIn, tokenOut] = [tokenOut, tokenIn]; updateTokenUI(); };
-
-    const sendBtn2 = bodyInner.querySelector('#sr-btn-send-quote');
-    if (sendBtn2) {
-      sendBtn2.onclick = async () => {
-        try {
-          const amount = parseFloat(amtInEl?.value || '0');
-          if (!amount || amount <= 0) {
-            const st = bodyInner.querySelector('#sr-send-status'); if (st) st.textContent = 'Enter an amount'; return;
-          }
-          const amountRaw = Math.round(amount * Math.pow(10, tokenIn.decimals));
-          ns.widgetCapturedTrade = {
-            inputMint:      tokenIn.mint,
-            outputMint:     tokenOut.mint,
-            inputDecimals:  tokenIn.decimals,
-            outputDecimals: tokenOut.decimals,
-            inputSymbol:    tokenIn.symbol,
-            outputSymbol:   tokenOut.symbol,
-            amountRaw:      amountRaw,
-            amountRawStr:   String(amountRaw),
-            walletPubkey:   ns.resolveWalletPubkey(),
-            fromSwapTab:    true,
-          };
-          ns.widgetLastOrder = null; ns.widgetSwapStatus = ''; ns.widgetSwapError = '';
-          renderWidgetPanel();
-          await ns.fetchWidgetQuote();
-        } catch (e) {
-          const st = bodyInner.querySelector('#sr-send-status'); if (st) st.textContent = 'Quote failed';
-        }
-      };
-    }
   }
 
   // ── openZendIQPanel ──────────────────────────────────────────────────────
