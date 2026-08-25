@@ -1388,18 +1388,25 @@
   let _currentAxiomMint = null;
 
   function _onMintChange(mint) {
-    if (!mint || mint === _currentAxiomMint) return;
+    if (mint === _currentAxiomMint) return;
     _currentAxiomMint  = mint;
     _axiomBuyAmountSol = null;  // reset amount on token navigation
     if (!ns) return;
     // Reset any pending intercept state from the previous token.
     ns.axiomConfirmPending = false;
     ns.axiomPendingBtnRef  = null;
+    if (!mint) {
+      // Left the token page for a list. ns._tokenScoreMint is deliberately left
+      // set: the trade logger reads it to attribute a buy that is still settling.
+      try { ns.renderWidgetPanel?.(); } catch (_) {}
+      return;
+    }
     // Clear stale score so the widget shows "Scanning…" for the new token.
     if (ns._tokenScoreMint !== mint) {
       ns._tokenScoreMint  = mint;
       ns.tokenScoreResult = null;
     }
+    try { ns.renderWidgetPanel?.(); } catch (_) {}
     // Pre-fetch before the user buys — score is ready by the time the trade fires.
     if (ns.fetchTokenScore) {
       ns.fetchTokenScore(mint, null).then(function (r) {
@@ -1685,12 +1692,34 @@
           + '</div>';
       })() : '';
 
-      // ── Idle state — no token loaded (listing pages, search, etc.) ────────
+      // ── Off a token page — state the coverage gap, don't imply protection ──
+      // Keyed on the URL, not _tokenScoreMint: that is left pointing at the last
+      // token viewed, so trusting it would show a stale verdict next to a list of
+      // other tokens' Buy buttons. The intercept only matches the token page's
+      // "Buy SYM" button, so a list quick-buy genuinely is not covered.
+      if (!_readMintFromUrl()) {
+        return `<div style="padding:14px 16px;">
+          ${_consentHtml}
+          <div style="background:rgba(255,181,71,0.07);border:1px solid rgba(255,181,71,0.35);border-radius:10px;padding:12px 13px">
+            <div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:7px">Buys on this page are not checked</div>
+            <div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:7px">
+              ZendIQ scores a token and steps in front of your buy only once you open that token&rsquo;s own page.
+              A <b style="color:#E8E8F0">Buy</b> clicked straight from a list &mdash; Discover, Pulse or Trackers &mdash;
+              executes immediately, with no risk check and no chance to review.
+            </div>
+            <div style="color:#C2C2D4;font-size:12px;line-height:1.6">
+              Open the token first if you want it scored before you commit.
+            </div>
+          </div>
+        </div>`;
+      }
+
+      // On a token page but state not populated yet (first paint before _onMintChange).
       if (!_token) {
         return `<div style="padding:14px 16px;">
           ${_consentHtml}
           <div style="font-size:13px;color:#C2C2D4;text-align:center;padding:12px 0;line-height:1.6">
-            Monitoring active.<br>Navigate to a token on <a href="https://axiom.trade" style="color:#9945FF;text-decoration:none">axiom.trade</a> to see risk analysis before you buy.
+            Reading token&hellip;
           </div>
         </div>`;
       }
