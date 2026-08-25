@@ -360,7 +360,8 @@
     }
 
     // ── Parse holderData ───────────────────────────────────────────────────────
-    // largestR may be null for Token-2022; that produces holderData with 0 holders (LOW).
+    // largestR may be null for Token-2022, giving zero holders. top1Pct stays null in that
+    // case: a real token always has a top holder, so 0% means "not read", not "well spread".
     let holderData = null;
     if (totalSupply) {
       const holders = largestR?.result?.value ?? [];
@@ -370,7 +371,7 @@
       }));
       holderData = {
         holderPcts,
-        top1Pct:      holderPcts[0]?.pct ?? 0,
+        top1Pct:      holderPcts[0]?.pct ?? null,
         top5Pct:      holderPcts.slice(0, 5).reduce((s, h) => s + h.pct, 0),
         totalHolders: holders.length,
       };
@@ -550,9 +551,9 @@
     }
 
     if (mintAuth === undefined) {
-      // Neither source returned data — mildly concerning but not actionable
+      // Severity must not be LOW: LOW draws a green tick, which reads as "checked and fine".
       score += 5;
-      factors.push({ name: 'Mint authority: data unavailable', severity: 'LOW', detail: 'On-chain lookup failed — could not confirm whether new tokens can be minted. Check manually.' });
+      factors.push({ name: 'Mint authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether devs can print more tokens. Neither confirmed nor ruled out; check manually before buying.' });
     } else if (mintAuth === null || mintAuth === '') {
       factors.push({ name: 'Supply fixed (mint burned)', severity: 'LOW', detail: 'Mint authority revoked — devs cannot print more tokens' });
     } else {
@@ -571,7 +572,8 @@
     }
 
     if (freezeAuth === undefined) {
-      factors.push({ name: 'Freeze authority: data unavailable', severity: 'LOW', detail: 'On-chain lookup failed — could not confirm freeze authority status. Check manually.' });
+      score += 5;
+      factors.push({ name: 'Freeze authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether the contract can freeze your tokens. Neither confirmed nor ruled out; check manually before buying.' });
     } else if (freezeAuth === null || freezeAuth === '') {
       factors.push({ name: 'No freeze authority', severity: 'LOW', detail: 'Freeze authority revoked — your tokens cannot be frozen by the contract' });
     } else {
@@ -585,14 +587,15 @@
     let top5Pct  = null;
     if (rugCheck?.topHolders?.length) {
       const th = rugCheck.topHolders;
-      top1Pct = parseFloat(th[0]?.pct ?? th[0]?.amount ?? 0);
+      top1Pct = parseFloat(th[0]?.pct ?? th[0]?.amount ?? NaN);
       top5Pct = th.slice(0, 5).reduce((s, h) => s + parseFloat(h.pct ?? h.amount ?? 0), 0);
     } else if (holderData) {
       top1Pct = holderData.top1Pct;
       top5Pct = holderData.top5Pct;
     }
 
-    if (top1Pct != null && isFinite(top1Pct)) {
+    // A top holder of exactly 0% is not a real reading — treat it as missing, never as a pass.
+    if (top1Pct != null && isFinite(top1Pct) && top1Pct > 0) {
       if (top1Pct > 50) {
         score += 30;
         factors.push({ name: `Whale risk: ${top1Pct.toFixed(1)}% in one wallet`, severity: 'CRITICAL', detail: 'A single wallet controls the majority of supply — a dump would decimate price' });
@@ -605,6 +608,9 @@
       } else {
         factors.push({ name: `Top holder: ${top1Pct.toFixed(1)}%`, severity: 'LOW', detail: 'Supply appears reasonably distributed' });
       }
+    } else {
+      score += 5;
+      factors.push({ name: 'Top holder: data unavailable', severity: 'MEDIUM', detail: 'Holder distribution could not be read, so insider supply is neither confirmed nor ruled out. This is not an all-clear — check the holder list manually.' });
     }
 
     if (top5Pct != null && isFinite(top5Pct) && top5Pct > 0) {
@@ -969,11 +975,17 @@
     } else if (bundleLaunchData?.inconclusive) {
       factors.push({
         name: 'Bundle check: inconclusive',
-        severity: 'LOW',
-        detail: 'Token has a high transaction count \u2014 creation block analysis is unavailable. Check top holder concentration for insider supply signals.',
+        severity: 'MEDIUM',
+        detail: 'Token has a high transaction count \u2014 creation block analysis is unavailable, so a bundled launch is neither confirmed nor ruled out. Check top holder concentration for insider supply signals.',
+      });
+    } else if (!bundleLaunchData) {
+      // Without a row the pending "scanning…" line just vanishes and the check looks done.
+      factors.push({
+        name: 'Bundle check: unavailable',
+        severity: 'MEDIUM',
+        detail: 'Creation-block lookup failed \u2014 could not check whether multiple wallets bought in the token\u2019s first block (Jito bundle rug pattern). This is not an all-clear.',
       });
     }
-    // bundleLaunchData === null → fetch failed silently; no factor added to avoid noise
 
     // ── Fallback: no data at all ──────────────────────────────────────────────
     if (!mintInfo && !holderData && !rugCheck && !dexData && !geckoData) {
@@ -1203,8 +1215,8 @@
       if (deployerFailed && !deployerData) {
         result.factors.push({
           name: 'Creator history: unavailable',
-          severity: 'LOW',
-          detail: 'On-chain deployer lookup timed out or returned no data — unable to assess creator track record.',
+          severity: 'MEDIUM',
+          detail: 'On-chain deployer lookup timed out or returned no data — the creator\u2019s track record of previous launches could not be checked. This is not an all-clear.',
         });
       }
       _setCached(mint, result);
@@ -1226,8 +1238,11 @@
         try { ns.tokenScoreResult = fallback; ns.renderWidgetPanel?.(); } catch (_) {}
         return fallback;
       }
+      // score/level stay null: a scan that never ran cannot report LOW. Every UI site
+      // gates on `loaded`, and the two behavioural consumers treat null as "not high".
       const errResult = {
-        mint, score: 0, level: 'LOW', factors: [{ name: 'Scan failed', severity: 'LOW', detail: err?.message ?? 'Unknown error' }],
+        mint, score: null, level: null,
+        factors: [{ name: 'Token risk scan failed', severity: 'MEDIUM', detail: (err?.message ?? 'Unknown error') + ' — the token was not checked, so this is not an all-clear.' }],
         loaded: false, error: err?.message ?? 'Scan failed', dataSource: 'unknown',
       };
       try { ns.tokenScoreResult = errResult; ns.renderWidgetPanel?.(); } catch (_) {}

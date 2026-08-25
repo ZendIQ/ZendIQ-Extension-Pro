@@ -221,6 +221,26 @@
     // Simple-mode plain-English risk label — available across all panels (Monitor, Review & Sign).
     const _riskLabel = l => ({'LOW':'✓ Low risk','MEDIUM':'⚠ Moderate risk','HIGH':'⚠ High risk','CRITICAL':'⛔ Critical risk'}[l] ?? l ?? '—');
 
+    // Weighted composite of the three risk dimensions, floored at the worst one.
+    // Averaging alone lets a CRITICAL dimension read as HIGH: a token whose creator rugged
+    // 10/10 previous launches scores 100 on Token Risk but only 25 of the headline, and a
+    // LOW Bot Attack (nobody sandwiches a worthless token) drags the headline down further.
+    // dims: [{ score, level, loaded }] — entries with loaded === false are excluded.
+    const _compositeRisk = (dims, bands) => {
+      const B     = bands ?? { CRITICAL: 75, HIGH: 50, MEDIUM: 25 };
+      const known = dims.filter(d => d.loaded !== false);
+      const score = Math.round(dims.reduce((s, d) => s + (d.score ?? 0) * d.weight, 0));
+      const byWeight = score >= B.CRITICAL ? 'CRITICAL' : score >= B.HIGH ? 'HIGH' : score >= B.MEDIUM ? 'MEDIUM' : 'LOW';
+      const RANK  = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
+      const worst = known.reduce((w, d) => (RANK[d.level] ?? -1) > (RANK[w] ?? -1) ? d.level : w, 'LOW');
+      const level = (RANK[worst] ?? 0) > (RANK[byWeight] ?? 0) ? worst : byWeight;
+      const FLOOR = { LOW: 0, MEDIUM: B.MEDIUM, HIGH: B.HIGH, CRITICAL: B.CRITICAL };
+      return { score: Math.max(score, FLOOR[level] ?? 0), level, floored: level !== byWeight };
+    };
+    // Shared with page-axiom.js, which renders its own composite card.
+    ns._compositeRisk = _compositeRisk;
+    ns._riskLabel     = _riskLabel;
+
     // ── Shared Review & Sign panel builders ──────────────────────────────────
     // These helpers produce the standard card HTML used by every DEX integration
     // (pump.fun today; add new sites by calling these with different opts).
@@ -925,10 +945,13 @@
       const _execScB      = risk?.score ?? 0;
       const _botScB       = _orderIsRFQ ? 0 : (risk?.mev?.riskScore ?? 0);
       const _tkScB        = _tsLoadedB ? (_tokenScore.score ?? 0) : 0;
-      const _compScB      = risk ? Math.round(_execScB * 0.40 + _botScB * 0.35 + _tkScB * 0.25) : null;
-      const _compLvlB     = _compScB != null
-        ? (_compScB >= 75 ? 'CRITICAL' : _compScB >= 50 ? 'HIGH' : _compScB >= 25 ? 'MEDIUM' : 'LOW')
-        : null;
+      const _cmpB         = risk ? _compositeRisk([
+        { score: _execScB, level: risk.level,                                weight: 0.40 },
+        { score: _botScB,  level: _orderIsRFQ ? 'LOW' : (risk.mev?.riskLevel ?? 'LOW'), weight: 0.35 },
+        { score: _tkScB,   level: _tsLoadedB ? (_tokenScore.level ?? 'LOW') : null, weight: 0.25, loaded: !!_tsLoadedB },
+      ]) : null;
+      const _compScB      = _cmpB?.score ?? null;
+      const _compLvlB     = _cmpB?.level ?? null;
       const _badgeLevel   = _compLvlB;
       const _badgeLabel   = _badgeLevel ? `${_badgeLevel} Risk` : null;
       const levelColor    = _badgeLevel ? ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'}[_badgeLevel] ?? '#14F195') : '#FFB547';
@@ -936,6 +959,7 @@
       const _mevLevelColor = risk?.mev?.riskLevel ? ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'}[risk.mev.riskLevel] ?? '#C2C2D4') : levelColor;
       const _riskTooltip = risk
         ? `Overall Risk: ${_compScB ?? risk.score}/100 \u00b7 ${_badgeLevel ?? risk.level}&#10;Execution: ${risk.score}/100 \u00b7 Bot Attack: ${_botScB}/100 \u00b7 Token Risk: ${_tsLoadedB ? _tkScB + '/100' : 'pending'}&#10;Formula: Execution \u00d7 40% + Bot Attack \u00d7 35% + Token Risk \u00d7 25%` +
+          (_cmpB?.floored ? `&#10;&#10;Raised to ${_badgeLevel}: one dimension is ${_badgeLevel} on its own. The worst risk sets the headline \u2014 averaging would hide it.` : '') +
           (_orderIsRFQ ? `&#10;&#10;ZendIQ&#39;s route is RFQ \u2014 no mempool exposure. Bot Attack = 0 in composite.${_tokenScore ? `&#10;Token risk included: ${_tokenScore.level} (${_tokenScore.score}/100)` : ''}` : '') +
           ((risk.factors ?? []).length ? `&#10;&#10;Top execution factors:&#10;` + (risk.factors ?? []).slice(0, 3).map(f => `\u2022 ${f.name} [${f.severity}]`).join('&#10;') : '')
         : '';
@@ -1845,12 +1869,18 @@
               const _tsL2    = _tsR2?.mint === (ct.outputMint ?? null) && _tsR2?.loaded;
               const _tkSc    = _tsL2 ? (_tsR2.score ?? 0) : 0;
               const _tkLvl   = _tsL2 ? (_tsR2.level ?? 'LOW') : null;
-              const _comp    = Math.round(_execSc * 0.40 + _botSc * 0.35 + _tkSc * 0.25);
-              const _compLvl = _comp >= 75 ? 'CRITICAL' : _comp >= 50 ? 'HIGH' : _comp >= 25 ? 'MEDIUM' : 'LOW';
+              const _cmp     = _compositeRisk([
+                { score: _execSc, level: _execLvl, weight: 0.40 },
+                { score: _botSc,  level: _botLvl,  weight: 0.35 },
+                { score: _tkSc,   level: _tkLvl,   weight: 0.25, loaded: !!_tsL2 },
+              ]);
+              const _comp    = _cmp.score;
+              const _compLvl = _cmp.level;
               const _cc      = ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'})[_compLvl] ?? '#C2C2D4';
               const _bg      = `background:${_cc}11;border:1px solid ${_cc}44`;
               const _badge   = ns.widgetMode === 'simple' ? _riskLabel(_compLvl) : `${_compLvl} \u00b7 ${_comp}/100`;
-              const _tip     = `Overall Risk Score \u2014 weighted composite of all three risk dimensions.&#10;Formula: Execution \u00d7 40% + Bot Attack \u00d7 35% + Token Risk \u00d7 25%&#10;&#10;Execution: ${_execSc}/100 \u00b7 Bot Attack: ${_botSc}/100 \u00b7 Token Risk: ${_tsL2 ? _tkSc + '/100' : 'pending\u2026'}`;
+              const _tip     = `Overall Risk Score \u2014 weighted composite of all three risk dimensions.&#10;Formula: Execution \u00d7 40% + Bot Attack \u00d7 35% + Token Risk \u00d7 25%&#10;&#10;Execution: ${_execSc}/100 \u00b7 Bot Attack: ${_botSc}/100 \u00b7 Token Risk: ${_tsL2 ? _tkSc + '/100' : 'pending\u2026'}`
+                + (_cmp.floored ? `&#10;&#10;Raised to ${_compLvl}: one dimension is ${_compLvl} on its own. The worst risk sets the headline \u2014 averaging would hide it.` : '');
               const _sc      = s => ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'})[s] ?? '#C2C2D4';
               const _subRows = ns.widgetMode !== 'simple' ? `<div style="margin-top:8px;border-top:1px solid ${_cc}22;padding-top:7px">
                   <div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0">

@@ -1705,8 +1705,19 @@
       const _botLvl = mevRisk   ? (mevRisk.riskLevel       ?? 'LOW') : null;
       const _exSc   = execRisk  ? (execRisk.score          ?? 0) : 0;
       const _exLvl  = execRisk  ? (execRisk.level          ?? 'LOW') : null;
-      const _comp   = Math.round(_exSc * 0.40 + _botSc * 0.35 + _tkSc * 0.25);
-      const _compLvl = _comp >= 70 ? 'CRITICAL' : _comp >= 40 ? 'HIGH' : _comp >= 20 ? 'MEDIUM' : 'LOW';
+      const _BANDS   = { CRITICAL: 70, HIGH: 40, MEDIUM: 20 };
+      const _cmp     = ns._compositeRisk
+        ? ns._compositeRisk([
+            { score: _exSc,  level: _exLvl,  weight: 0.40, loaded: !!execRisk },
+            { score: _botSc, level: _botLvl, weight: 0.35, loaded: !!mevRisk },
+            { score: _tkSc,  level: _tkLvl,  weight: 0.25, loaded: !!hasScore },
+          ], _BANDS)
+        : (() => {
+            const s = Math.round(_exSc * 0.40 + _botSc * 0.35 + _tkSc * 0.25);
+            return { score: s, level: s >= 70 ? 'CRITICAL' : s >= 40 ? 'HIGH' : s >= 20 ? 'MEDIUM' : 'LOW', floored: false };
+          })();
+      const _comp    = _cmp.score;
+      const _compLvl = _cmp.level;
       const _cc      = _c(_compLvl);
       const _hasAnyRisk = mevRisk || execRisk || hasScore;
       const _compBadge = _hasAnyRisk
@@ -1715,7 +1726,11 @@
       const _compTip = 'Overall Risk Score \u2014 weighted composite of all three risk dimensions.'
         + '&#10;Formula: Execution \u00d7 40% + Bot Attack \u00d7 35% + Token Risk \u00d7 25%'
         + '&#10;&#10;Execution: ' + _exSc + '/100 \u00b7 Bot Attack: ' + _botSc + '/100 \u00b7 Token Risk: '
-        + (hasScore ? _tkSc + '/100' : 'pending\u2026');
+        + (hasScore ? _tkSc + '/100' : 'pending\u2026')
+        + (_cmp.floored
+            ? '&#10;&#10;Raised to ' + _compLvl + ': one dimension is ' + _compLvl
+              + ' on its own. The worst risk sets the headline \u2014 averaging would hide it.'
+            : '');
       const _sc = lvl => _c(lvl ?? 'LOW');
       const _subRows = _isSimple ? '' : (
         '<div style="margin-top:8px;border-top:1px solid ' + _cc + '22;padding-top:7px">'
