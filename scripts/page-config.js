@@ -15,7 +15,9 @@
     ? 'https://api.devnet.solana.com'
     : 'https://api.mainnet-beta.solana.com';
 
-  const HELIUS_KEY = '';  // optional: set your Helius API key here for a faster RPC
+  // Must stay empty. This file ships in the extension bundle and the repo is public,
+  // so any key set here is world-readable. Keyed RPC belongs server-side (see OPS-202).
+  const HELIUS_KEY = '';
   const HELIUS_RPC = HELIUS_KEY
     ? `https://${NETWORK}.helius-rpc.com/?api-key=${HELIUS_KEY}`
     : RPC_URL;

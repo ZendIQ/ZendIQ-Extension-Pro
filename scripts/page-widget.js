@@ -645,7 +645,7 @@
         ${_otherHtml}${_revokeHtml}
         <div style="margin-top:10px;font-size:12px;color:#C2C2D4;line-height:1.65">
           <div style="display:flex;align-items:flex-start;gap:5px;margin-bottom:3px"><span style="color:#14F195">&#x2713;</span><span><strong style="color:#E8E8F0">ZendIQ never has access to your private key or seed phrase.</strong> Only your public address is used.</span></div>
-          <div title="To read your approvals, your public address is sent to public Solana RPC providers: Solana Labs (api.mainnet-beta.solana.com), MagicBlock, PublicNode, Ankr and dRPC. Your address is already visible to anyone on-chain. Nothing is sent to a ZendIQ server, and no trade or balance data is shared." style="cursor:help">On-chain scan only &mdash; your public address goes to public Solana RPC providers, never to a ZendIQ server. <a href="https://revoke.cash" target="_blank" rel="noopener" style="color:#9945FF;text-decoration:none">revoke.cash</a> is an independent third-party tool.</div>
+          <div title="To read your approvals, your public address is sent to public Solana RPC providers: Solana Labs (api.mainnet-beta.solana.com), PublicNode and Solana Vibe Station. Your address is already visible to anyone on-chain. Nothing is sent to a ZendIQ server, and no trade or balance data is shared." style="cursor:help">On-chain scan only &mdash; your public address goes to public Solana RPC providers, never to a ZendIQ server. <a href="https://revoke.cash" target="_blank" rel="noopener" style="color:#9945FF;text-decoration:none">revoke.cash</a> is an independent third-party tool.</div>
         </div>`;
     })();
 

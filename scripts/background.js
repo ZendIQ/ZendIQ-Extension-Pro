@@ -410,29 +410,60 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'RPC_CALL') {
+    // Diagnostic: logs which endpoint served each call, and grades the rest. Promise.any
+    // otherwise hides a provider silently dropping a method. Flip on to re-measure.
+    const RPC_TRACE = false;
     // Race all endpoints with a 10 s timeout each; first success wins.
     // Sequential fallback only runs when all parallel attempts fail.
     const _rpcEndpoints = [
       'https://solana.publicnode.com',
-      'https://rpc.ankr.com/solana',
-      'https://solana.drpc.org',
       'https://api.mainnet-beta.solana.com',
-      // publicnode/ankr/drpc reject getTokenAccountsByOwner outright and mainnet-beta
-      // rate-limits it, so the wallet approval scan needs a second endpoint that serves it.
-      'https://rpc.magicblock.app/mainnet',
+      // Measured from the service worker 2026-09-10: both publicnode hosts 403
+      // getTokenAccountsByOwner specifically while serving other methods in ~65ms, and
+      // mainnet-beta 403s anything carrying an Origin header. solanavibestation is the only
+      // endpoint serving the wallet approval scan — redundancy for that method is 1.
+      'https://public.rpc.solanavibestation.com',
+      // Same operator as solana.publicnode.com — a distinct host, not independent capacity.
+      'https://solana-rpc.publicnode.com',
     ];
     const _body = JSON.stringify({ jsonrpc:'2.0', id:1, method: msg.method, params: msg.params ?? [] });
+    const _trace = [];
     const _fetchOne = (url) => {
+      const t0 = Date.now();
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), 12_000); // 12 s per endpoint
       return fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: _body, signal: ac.signal })
         .then(r => { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-        .then(data => { if (data?.error) throw new Error(data.error.message ?? 'RPC error'); clearTimeout(timer); return data; })
-        .catch(e => { clearTimeout(timer); throw e; });
+        .then(data => {
+          if (data?.error) throw new Error(data.error.message ?? 'RPC error');
+          clearTimeout(timer);
+          _trace.push({ url, ms: Date.now() - t0, ok: true });
+          return data;
+        })
+        .catch(e => {
+          clearTimeout(timer);
+          _trace.push({ url, ms: Date.now() - t0, ok: false, err: e.message });
+          throw e;
+        });
     };
     // Try all endpoints in parallel; settle for first success.
-    Promise.any(_rpcEndpoints.map(_fetchOne))
-      .then(data => sendResponse({ ok: true, data }))
+    const _attempts = _rpcEndpoints.map(url => _fetchOne(url).then(data => ({ url, data })));
+    if (RPC_TRACE) {
+      Promise.allSettled(_attempts).then(() => {
+        console.log(
+          '[ZendIQ RPC] ' + msg.method + '\n' +
+          _trace.map(t =>
+            '  ' + (t.ok ? 'OK  ' : 'FAIL') + '  ' + String(t.ms).padStart(6) + 'ms  ' +
+            t.url + (t.ok ? '' : '  — ' + t.err)
+          ).join('\n')
+        );
+      });
+    }
+    Promise.any(_attempts)
+      .then(({ url, data }) => {
+        if (RPC_TRACE) console.log('[ZendIQ RPC] ' + msg.method + ' — SERVED BY ' + url);
+        sendResponse({ ok: true, data });
+      })
       .catch((agg) => {
         // Surface the actual per-endpoint errors so callers can diagnose
         // sendTransaction rejections (e.g. "Transaction simulation failed: …").
@@ -450,7 +481,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const _batchEndpoints = [
       'https://solana.publicnode.com',
       'https://api.mainnet-beta.solana.com',
-      'https://rpc.magicblock.app/mainnet',
+      'https://public.rpc.solanavibestation.com',
     ];
     const _batchBody = JSON.stringify(
       msg.calls.map((c, i) => ({ jsonrpc: '2.0', id: i, method: c.method, params: c.params ?? [] }))
