@@ -7,7 +7,7 @@
  *
  * Runs in MAIN world. Exports:
  *   ns.runWalletSecurityCheck(pubkey?) — async
- *   ns.detectWalletType()              — sync
+ *   ns.detectWalletType(pubkey?)       — sync
  *   ns.walletSecurityResult            — state object (see schema below)
  *   ns.walletSecurityChecking          — bool
  *
@@ -49,15 +49,63 @@
   const UNLIMITED_THRESHOLD = 1_000_000_000_000_000;
 
   // ── detectWalletType ──────────────────────────────────────────────────────
-  function detectWalletType() {
+  const _nameToType = (name) => {
+    const n = (name ?? '').toLowerCase();
+    if (n.includes('jupiter'))  return 'jupiter';
+    if (n.includes('backpack')) return 'backpack';
+    if (n.includes('solflare')) return 'solflare';
+    if (n.includes('glow'))     return 'glow';
+    if (n.includes('phantom'))  return 'phantom';
+    if (n.includes('coin98'))   return 'coin98';
+    if (n.includes('brave'))    return 'brave';
+    return null;
+  };
+
+  // Which wallet holds the key being scanned — not merely which extensions are installed.
+  // An injected global only proves the extension exists, so matching on one hands a Jupiter
+  // user Phantom's instructions whenever both are installed.
+  function detectWalletType(pubkey) {
     try {
-      if (window.phantom?.solana?.isPhantom || window.solana?.isPhantom)   return 'phantom';
+      const pk    = pubkey ?? ns.walletPubkey ?? null;
+      const found = [];
+      const _add  = (w) => { if (w?.name && !found.includes(w)) found.push(w); };
+
+      try {
+        window.dispatchEvent(new CustomEvent('wallet-standard:app-ready', {
+          detail: { register(w) { _add(w); } },
+        }));
+      } catch (_) {}
+      try {
+        const reg  = window.navigator?.wallets ?? window.__wallet_standard_wallets__;
+        const list = reg ? (typeof reg.get === 'function' ? reg.get() : (Array.isArray(reg) ? reg : [])) : [];
+        for (const w of list) _add(w);
+      } catch (_) {}
+      _add(ns._wsWallet);
+
+      if (pk) {
+        for (const w of found) {
+          for (const acc of (w.accounts ?? [])) {
+            const addr = acc?.address ?? acc?.publicKey?.toString?.();
+            if (addr === pk) return _nameToType(w.name) ?? 'unknown';
+          }
+        }
+      }
+
+      const hooked = _nameToType(ns._wsWallet?.name);
+      if (hooked) return hooked;
+
+      // Name-based, holding back browser-native wallets so they can't shadow an extension.
+      for (const w of found) { const t = _nameToType(w.name); if (t && t !== 'brave') return t; }
+      for (const w of found) { const t = _nameToType(w.name); if (t) return t; }
+
+      if (window.jupiterWallet || window.jupiter?.solana || window.solana?.isJupiter) return 'jupiter';
       if (window.backpack?.solana || window.xnft?.solana)                  return 'backpack';
       if (window.solflare?.isSolflare || window.solana?.isSolflare)        return 'solflare';
       if (window.solana?.isGlow)                                            return 'glow';
-      if (window.solana?.isBrave || window.braveSolana)                    return 'brave';
       if (window.solana?.isCoin98)                                          return 'coin98';
       if (window.solana?.isMathWallet)                                      return 'mathwallet';
+      if (window.solana?.isBrave || window.braveSolana)                    return 'brave';
+      if (window.phantom?.solana?.isPhantom || window.solana?.isPhantom)   return 'phantom';
       return 'unknown';
     } catch (_) { return 'unknown'; }
   }
@@ -154,7 +202,7 @@
       }
 
       // ── 5. Wallet-specific auto-approve guidance ─────────────────────────
-      const walletType = detectWalletType();
+      const walletType = detectWalletType(_pubkey);
       const autoApproveWarnings = {
         phantom:  {
           text:    'Action required: check & disable Phantom auto-approve',
@@ -240,7 +288,7 @@
         score:              null,
         checkedAt:          Date.now(),
         pubkey:             _pubkey,
-        walletType:         detectWalletType(),
+        walletType:         detectWalletType(_pubkey),
         totalAccounts,
         unlimitedApprovals: [],
         badContracts:       [],
