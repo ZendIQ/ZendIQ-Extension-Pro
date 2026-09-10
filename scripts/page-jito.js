@@ -299,7 +299,9 @@
   // fails on-chain, or the timeout elapses.
   // Returns { ok: true, slot } on confirmed success.
   // Throws on on-chain failure (tx included but errored).
-  // Returns null on timeout (blockhash window ~60s; bundle likely expired).
+  // Returns null on timeout (blockhash window elapsed; bundle likely expired).
+  // That window is 150 slots, so it shrinks as slot time does: ~60s at 400ms,
+  // ~45s at the current 300ms, ~30s at the 200ms target (SIMD-0525).
   async function awaitJitoSigConfirmation(sig, rpcUrl, maxWaitMs) {
     const url   = rpcUrl || ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
     const limit = maxWaitMs ?? 30000;

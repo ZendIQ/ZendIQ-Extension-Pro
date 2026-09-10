@@ -426,7 +426,7 @@
             try {
               const res = await ns.rpcCall('getTransaction', [
                 _sig,
-                { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+                { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
               ]);
               const tx = res?.result;
               if (!tx?.meta) continue;
@@ -1138,7 +1138,6 @@
       ns.logSession?.('end', {
         type:         'end',
         wallet:       'axiom',
-        wallet_hash:  ns.walletHash ?? null,
         dex:          _AX_SITE,
         duration_s:   Math.min(86400, Math.round((Date.now() - _axSessionAt) / 1000)),
         trades_count: _axTradeCount,
@@ -1514,6 +1513,35 @@
       try { ns?.renderWidgetPanel?.(); } catch (_) {}
     }
 
+    // Auto-accept: optimize and buy without waiting for a click. Fails closed —
+    // an unscored token keeps the panel, because pauseOnHighRisk cannot be
+    // evaluated against a verdict that has not arrived yet.
+    function _shouldAutoAccept() {
+      if (!ns?.autoAccept) return false;
+      if (!ns.axiomOptimizeEnabled || ns.axiomOptimizeConsent !== 'on') return false;
+      if (ns.axiomObligation) return false;      // a restore is still owed
+      if (ns.pauseOnHighRisk === false) return true;
+      const r = ns.tokenScoreResult;
+      if (!r?.loaded) return false;
+      return r.level !== 'HIGH' && r.level !== 'CRITICAL';
+    }
+
+    function _showPanelOrAutoAccept(btn) {
+      _showPanel(btn);
+      if (!_shouldAutoAccept()) return;
+      if (ns) ns.axiomAutoAccepting = true;
+      try { ns?.renderWidgetPanel?.(); } catch (_) {}
+      Promise.resolve()
+        .then(function () { return _applyOptimizationAndBuy(); })
+        .catch(function (e) {
+          console.warn('[ZQ:AXIOM] auto-accept failed, falling back to the panel', e);
+        })
+        .then(function () {
+          if (ns) ns.axiomAutoAccepting = false;
+          try { ns?.renderWidgetPanel?.(); } catch (_) {}
+        });
+    }
+
     // Layer 1: pointerdown — earliest possible intercept point.
     // preventDefault() here suppresses the browser-generated mousedown + click
     // that would follow a physical press, blocking Axiom regardless of which
@@ -1524,7 +1552,7 @@
       if (!btn) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      _showPanel(btn);
+      _showPanelOrAutoAccept(btn);
     }, true);
 
     // Layer 2: click — handles keyboard Enter / programmatic clicks that skip
@@ -1535,7 +1563,8 @@
       if (!btn) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (!ns?.axiomConfirmPending) _showPanel(btn); // avoid double-showing
+      // avoid double-showing, and never re-enter an auto-accept already in flight
+      if (!ns?.axiomConfirmPending && !ns?.axiomAutoAccepting) _showPanelOrAutoAccept(btn);
     }, true);
   }
 
@@ -1674,7 +1703,7 @@
           +   'When enabled, ZendIQ scores each buy before it executes. If your Axiom preset is looser than '
           +   'the measured risk warrants, it <b style="color:#E8E8F0">offers</b> a tighter buy slippage and a '
           +   'stronger MEV protection mode, sized to that specific trade \u2014 then puts your original settings '
-          +   'back when the trade settles. You approve each one.'
+          +   'back when the trade settles. You approve each trade.'
           + '</div>'
           + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:7px">'
           +   'ZendIQ never touches your funds or keys. If a setting cannot be put back, ZendIQ tells you '
@@ -1980,7 +2009,11 @@
           + '</div>';
       })() : '';
 
-      const _footer = ns.axiomConfirmPending
+      const _footer = ns.axiomAutoAccepting
+        ? '<div style="font-size:12px;color:#C2C2D4;margin-bottom:8px;text-align:center">' + _amtLabel + '</div>'
+          + _optCard
+          + '<div style="width:100%;padding:11px;border:1px solid rgba(20,241,149,0.35);border-radius:8px;background:rgba(20,241,149,0.06);color:#14F195;font-size:13px;font-weight:700;text-align:center;font-family:\'DM Sans\',sans-serif">\u23f3 Optimizing your buy\u2026</div>'
+        : ns.axiomConfirmPending
         ? '<div style="font-size:12px;color:#C2C2D4;margin-bottom:8px;text-align:center">' + _amtLabel + '</div>'
           + _optCard
           + (_opt
@@ -1991,7 +2024,9 @@
         : ns.axiomRiskAcknowledged
           ? ''
           : '<button id="sr-ax-close" style="width:100%;padding:10px;border:1px solid rgba(255,255,255,0.1);border-radius:8px;background:rgba(255,255,255,0.04);color:#C2C2D4;font-size:13px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;transition:background 0.15s">\u2713 Got it \u2014 close</button>';
-      const _disclaimer = ns.axiomConfirmPending
+      const _disclaimer = ns.axiomAutoAccepting
+        ? '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">Auto-accept is on — ZendIQ is applying the optimization and placing your buy. Turn it off in Settings to review each trade.</div>'
+        : ns.axiomConfirmPending
         ? (_opt
             ? '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">ZendIQ tightens your preset for this trade only and restores your original settings the moment it settles.</div>'
             : '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">Your preset is already safe. ZendIQ cannot re-route Axiom trades \u2014 cancel and lower slippage manually to reduce risk further.</div>')

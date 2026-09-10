@@ -143,7 +143,7 @@
       // Fee-payer of the oldest tx (accountKeys[0]) = real deployer
       const txResp = await ns.rpcCall('getTransaction', [
         oldest,
-        { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+        { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
       ]);
       const keys = txResp?.result?.transaction?.message?.staticAccountKeys
                 ?? txResp?.result?.transaction?.message?.accountKeys ?? [];
@@ -181,7 +181,7 @@
         const _batchResults = await Promise.all(
           _batch.map(s => ns.rpcCall('getTransaction', [
             s.signature,
-            { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+            { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
           ]).catch(() => null))
         );
         txResps.push(..._batchResults);

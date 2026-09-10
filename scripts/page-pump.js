@@ -1864,7 +1864,7 @@
               try {
                 await new Promise(resW => setTimeout(resW, 4000));
                 const txRes = await ns.rpcCall('getTransaction', [
-                  _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+                  _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
                 ]);
                 if (txRes?.result?.meta?.err) {
                   window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE',
@@ -1888,7 +1888,7 @@
             try {
               await new Promise(resW => setTimeout(resW, 4000));
               const txRes = await ns.rpcCall('getTransaction', [
-                _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+                _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
               ]);
               if (txRes?.result?.meta?.err) {
                 // Update Activity entry to mark failure

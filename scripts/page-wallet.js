@@ -538,7 +538,7 @@
             try {
               await new Promise(r => setTimeout(r, 4000));
               const txRes = await ns.rpcCall('getTransaction', [
-                _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: 0 },
+                _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
               ]);
               if (txRes?.result?.meta?.err) {
                 window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE',
@@ -1015,7 +1015,7 @@
   window.addEventListener('beforeunload', () => {
     const _site = window.location.hostname.includes('raydium') ? 'raydium.io'
                 : window.location.hostname.includes('pump')    ? 'pump.fun' : 'jup.ag';
-    try { ns.logSession?.('end', { type: 'end', wallet: ns.walletAdapter ?? 'unknown', wallet_hash: ns.walletHash ?? null, dex: _site }); } catch (_) {}
+    try { ns.logSession?.('end', { type: 'end', wallet: ns.walletAdapter ?? 'unknown', dex: _site }); } catch (_) {}
   });
 
   // ── watchForWalletSwitch ─────────────────────────────────────────────────

@@ -57,8 +57,9 @@
   //         shadow_mode, override_applied, active, outcome ('landed'|'reverted'|'overridden'), ts, trade_size_usd?
   ns.logDynSlip  = (data)        => _send('slippage', 'dyn_slip', data);
 
-  // ── Wallet hash helper ────────────────────────────────────────────────────
-  // SHA-256 of an address, first 12 hex chars (48 bits).
+  // ── Attacker hash helper ──────────────────────────────────────────────────
+  // SHA-256 of an address, first 12 hex chars (48 bits). Attacker addresses only —
+  // OPS-186 removed the user-wallet hash entirely rather than qualify it.
   //
   // This is a DEDUP TOKEN, NOT ANONYMISATION. The hash is unsalted and the input space
   // (Solana addresses) is public and fully enumerable, so anyone holding a candidate list
@@ -86,13 +87,11 @@
   ns.setWalletForSession = async function (walletAddr, walletName) {
     if (ns._sessionLogged) return;
     ns._sessionLogged = true;
-    ns.walletHash    = await _hashAddr(walletAddr);
     ns.walletAdapter = walletName;
     try {
       ns.logSession('start', {
         type:        'start',
         wallet:      walletName ?? 'unknown',
-        wallet_hash: ns.walletHash ?? null,
         dex:         _daSite,
       });
     } catch (_) {}

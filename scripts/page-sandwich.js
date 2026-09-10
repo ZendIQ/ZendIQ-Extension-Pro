@@ -202,7 +202,7 @@
         try {
           const _r = await ns.rpcCall('getTransaction', [
             sig,
-            { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' },
+            { encoding: 'jsonParsed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION, commitment: 'confirmed' },
           ]);
           if (_r?.result) { _confirmedTx = _r; break; }
         } catch (_) {}
@@ -308,11 +308,17 @@
           candidateJobs.map(async ({ cSig, offset }) => {
             const r = await ns.rpcCall('getTransaction', [
               cSig,
-              { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' },
+              { encoding: 'jsonParsed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION, commitment: 'confirmed' },
             ]);
             return { cSig, offset, data: r?.result ?? null };
           })
         );
+
+        // A candidate we could not read is not a candidate we cleared. Counted here
+        // so the "clean" verdict below cannot be returned on a partial scan.
+        const _unreadable = settled.filter(
+          s => s.status !== 'fulfilled' || !s.value?.data?.meta
+        ).length;
 
         // ── Step 4: classify each candidate as front-run or back-run ─────
         const fronts = []; // bought outputMint BEFORE user's tx
@@ -596,7 +602,16 @@
           }
         }
 
-        // No matching pair or front-runner found — clean
+        // Nothing matched. Only report "clean" if every candidate was actually read —
+        // an unread candidate could be the attacker, and a false all-clear on a
+        // safety check is worse than admitting the scan was incomplete.
+        if (_unreadable > 0) {
+          console.warn('[zq-sandwich] partial scan — reporting unavailable', {
+            unreadable: _unreadable, candidates: candidateJobs.length, slot,
+          });
+          return { error: 'unavailable' };
+        }
+
         const cleanRes = { detected: false, scanned: candidateJobs.length, slot };
         ns.sandwichCache.set(sig, cleanRes);
         return cleanRes;

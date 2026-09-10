@@ -28,6 +28,11 @@
     HELIUS_RPC,
     FEE_WALLET:   'BS9DnoBnndNj6QmeEbH2mxizefWYyrLond5G8bKUYxHC',
 
+    // Must be >= the highest tx version mainnet can produce, or the RPC rejects the
+    // ENTIRE getTransaction/getBlock call with -32015 — not just the versioned tx.
+    // v1 (SIMD-0296) activates at epoch 1035, 2026-09-15. Bump here, never inline.
+    MAX_TX_VERSION: 1,
+
     // ── Priority fees (baked into the order transaction at fetch time) ──────
     // Actual fees computed by calcDynamicFees()
     PRIORITY_FEE_LOW:   50_000,
@@ -135,6 +140,7 @@
     axiomMevRisk:       null,      // calculateMEVRisk result for current token
     axiomRiskResult:    null,      // calculateRisk result for current token (execution risk)
     axiomConfirmPending: false,    // true while buy-button intercept awaits user decision
+    axiomAutoAccepting:  false,    // true while auto-accept optimizes without waiting for a click
     axiomPendingBtnRef:  null,     // DOM reference to the intercepted Buy button
     axiomRiskAcknowledged: false,  // true after user clicks "Got it"; cleared on token change or new buy
     // ── Axiom preset-optimization (snapshot + restore) ───────────────────

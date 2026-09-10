@@ -12,6 +12,45 @@
   // and is what Jito's docs recommend for consistent inclusion.
   const _RDM_BUNDLE_TIP_FLOOR = 1_000_000;
 
+  // -- rent-exempt minimum ---------------------------------------------------
+  // Solana is stepping lamports-per-byte down from 6,960 to 696 through five
+  // feature gates, so the rent floor for a 0-byte system account is no longer a
+  // constant. Read it from the chain and cache it; the fallback is the
+  // pre-reduction value, which over-reserves rather than under-reserves.
+  const _RENT_EXEMPT_FALLBACK = 890_880;
+  const _RENT_CACHE_TTL_MS    = 60 * 60 * 1000;
+  let _rentExemptLamports = null;
+  let _rentExemptFetchedAt = 0;
+  let _rentExemptInFlight  = null;
+
+  function _refreshRentExempt() {
+    if (_rentExemptInFlight) return _rentExemptInFlight;
+    _rentExemptInFlight = ns.rpcCall('getMinimumBalanceForRentExemption', [0])
+      .then(res => {
+        const v = res?.result;
+        if (typeof v === 'number' && v > 0) {
+          _rentExemptLamports  = v;
+          _rentExemptFetchedAt = Date.now();
+        } else {
+          console.warn('[ZendIQ Rent] unexpected getMinimumBalanceForRentExemption result:', v);
+        }
+      })
+      .catch(e => console.warn('[ZendIQ Rent] rent-exempt lookup failed, using fallback:', e.message))
+      .finally(() => { _rentExemptInFlight = null; });
+    return _rentExemptInFlight;
+  }
+
+  // Non-blocking: returns the cached value (or the conservative fallback) and
+  // kicks off a refresh when stale. Never delays a quote or a signature.
+  function _rentExemptMin() {
+    if (_rentExemptLamports == null || Date.now() - _rentExemptFetchedAt > _RENT_CACHE_TTL_MS) {
+      _refreshRentExempt();
+    }
+    return _rentExemptLamports ?? _RENT_EXEMPT_FALLBACK;
+  }
+
+  setTimeout(_refreshRentExempt, 2000);   // let bridge.js attach before the first RPC
+
   // -- extractMintsFromContext ----------------------------------------------
   function extractMintsFromContext(txInfo) {
     try {
@@ -489,18 +528,19 @@
       const _rdmFiredAt = Date.now();
       // When SOL is the input, Raydium wraps exactly `amount` lamports. The wallet must also
       // have native SOL for fees AFTER wrapping AND must keep its account above the Solana
-      // minimum rent-exempt balance (~890,880 lamports).
+      // minimum rent-exempt balance (read from chain - see _rentExemptMin).
       //
       // Bundling path (jitoTip >= 1000): the swap tx carries NO priority fee ? bundle
-      // ordering is set by the tip tx amount. Reserve = tip lamports + 906_880 (rent floor).
+      // ordering is set by the tip tx amount. Reserve = tip lamports + rent floor + base-fee headroom.
       // Non-bundling path: reserve for worst-case CU price. Raydium routing can use up to
       // 1.4M CU (7? our 200k assumption), so actual fee can be 7? priorityFeeLamports.
       const _rdmBundling = (ns.jitoMode ?? 'auto') !== 'never';
+      const _rdmRentFloor = _rentExemptMin() + 16_000;   // rent floor + signature/ATA headroom
       const _rdmFeeReserve = (inputMint === _SOL_MINT)
         ? Math.max(1_000_000, (
             _rdmBundling
-              ? (jitoTipLamports ?? 0) + 906_880        // bundle: tip tx debit + rent-exempt floor
-              : (priorityFeeLamports ?? 0) * 7 + 906_880 // non-bundle: CU price worst case
+              ? (jitoTipLamports ?? 0) + _rdmRentFloor        // bundle: tip tx debit + rent-exempt floor
+              : (priorityFeeLamports ?? 0) * 7 + _rdmRentFloor // non-bundle: CU price worst case
           ))
         : 0;
       const _rdmAmountStr = _rdmFeeReserve > 0
@@ -1318,7 +1358,8 @@
     // -- Step 3: Pre-sign refresh ------------------------------------------------------------
     // Raydium: await the background TX build started during the probe ? typically already done
     // by the time the user clicks Sign & Send (~2s to build, user reads Review & Sign for 2-5s).
-    // Skip a full re-fetch; Raydium txs share Solana blockhash expiry (~60s) and the probe
+    // Skip a full re-fetch; Raydium txs share Solana blockhash expiry (150 slots — ~45s at
+    // the current 300ms slot time, shrinking toward ~30s) and the probe
     // was at most a few seconds ago. Fall back to full re-fetch only when the build failed.
     // Jupiter: re-fetch a fresh /order as before (txs expire in ~30s).
     if (ns.widgetLastOrder?._source === 'raydium') {
@@ -1657,8 +1698,10 @@
         if (data.status === 'Failed') {
           const code   = data.code;
           const errStr = String(data.error ?? '').toLowerCase();
-          // -2005 = blockhash expired / requestId TTL elapsed (user took >~60s in wallet popup,
-          // or Jupiter's server-side requestId timed out). Recover silently: re-fetch a fresh
+          // -2005 = blockhash expired / requestId TTL elapsed (user lingered in the wallet
+          // popup past the 150-slot blockhash window — ~45s at the current 300ms slot time,
+          // shrinking toward ~30s — or Jupiter's server-side requestId timed out).
+          // Recover silently: re-fetch a fresh
           // quote so the user just has to click "Sign & Send" again ? no re-entering anything.
           const isStale = code === -2005 || errStr.includes('blockhash') || errStr.includes('expired');
           // Positive on-chain program error codes (>= 100) indicate the tx landed but the
@@ -1756,7 +1799,7 @@
         //   ? Network base fee:    5_000 lamports per signature (Raydium swap = 1 sig)
         //   ? Priority fee:        priorityFeeLamports (compute-unit price ? CU limit)
         //   ? Jito tip:            _jitoBundleTip lamports (separate transfer to tip account)
-        //   ? Rent reserve:        ~890_880 lamports (fee-payer must stay rent-exempt)
+        //   ? Rent reserve:        rent-exempt minimum, read from chain (fee-payer must stay rent-exempt)
         //   ? SOL spent by swap:   only when input mint = SOL (added by swap tx itself)
         // If wallet has < required SOL, Jito drops the bundle as 'Invalid' immediately
         // with no useful error. We HARD-FAIL the swap with a clear SOL-denominated
@@ -1768,7 +1811,7 @@
             const _balLam = _balRes?.result?.value ?? 0;
             const _priFee = ns.widgetLastOrderFees?.priorityFeeLamports ?? 0;
             const _baseFee = 5_000; // 1 signature (tip injected into swap tx â€” no separate tip tx)
-            const _rentReserve = 890_880;
+            const _rentReserve = _rentExemptMin();
             const _required = _baseFee + _priFee + _jitoBundleTip + _rentReserve;
             const _solIn = (ns.widgetLastOrder?.inputMint === 'So11111111111111111111111111111111111111112')
               ? Number(ns.widgetLastOrder?.inAmount ?? 0) : 0;
