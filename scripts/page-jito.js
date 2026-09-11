@@ -302,21 +302,34 @@
   // Returns null on timeout (blockhash window elapsed; bundle likely expired).
   // That window is 150 slots, so it shrinks as slot time does: ~60s at 400ms,
   // ~45s at the current 300ms, ~30s at the 200ms target (SIMD-0525).
+  // Throws '__bundle_unverified__' when no poll ever got an answer — see below.
   async function awaitJitoSigConfirmation(sig, rpcUrl, maxWaitMs) {
-    const url   = rpcUrl || ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
+    // No hardcoded URL fallback. jup.ag's connect-src CSP blocks direct fetch to any RPC
+    // host the site does not use itself, and api.mainnet-beta.solana.com returns 403 to
+    // every request carrying an Origin header. Polling a host that cannot answer produces
+    // 30s of silent failures that are indistinguishable from a bundle that never landed,
+    // so with no sniffed URL we poll through the background worker, which has neither limit.
+    const url   = rpcUrl || ns._jupRpcUrl || null;
     const limit = maxWaitMs ?? 30000;
     const start = Date.now();
     let attempt = 0;
+    let answered = false;
     while (Date.now() - start < limit) {
       if (attempt > 0) await new Promise(r => setTimeout(r, 1000));
       attempt++;
       try {
-        const r  = await fetch(url, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses', params: [[sig]] }),
-          signal: AbortSignal.timeout(4000),
-        });
-        const d  = await r.json();
+        let d;
+        if (url) {
+          const r = await fetch(url, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses', params: [[sig]] }),
+            signal: AbortSignal.timeout(4000),
+          });
+          d = await r.json();
+        } else {
+          d = await ns.rpcCall('getSignatureStatuses', [[sig]]);
+        }
+        answered = true;
         const sv = d?.result?.value?.[0];
         if (sv?.err)       throw new Error('Jito tx failed on-chain: ' + JSON.stringify(sv.err));
         if (sv && !sv.err) return { ok: true, slot: sv.slot };
@@ -325,7 +338,10 @@
         console.warn(`[ZendIQ Jito] poll ${attempt} error:`, e.message);
       }
     }
-    return null; // timeout
+    // Never got a single answer: we do not know whether the bundle landed. Reporting that
+    // as "did not land" is a confident wrong answer — the user may already be filled.
+    if (!answered) throw new Error('__bundle_unverified__');
+    return null; // polled successfully, signature never appeared — genuinely did not land
   }
 
   Object.assign(ns, { injectJitoTip, submitJitoBundleOnly, awaitJitoSigConfirmation });

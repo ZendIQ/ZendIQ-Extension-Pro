@@ -1957,13 +1957,22 @@
               // Jito's internal bundle simulation ? immediate 'Invalid' status.
               // 'finalized' is ~13s older but still has ~47s of remaining validity, which
               // is well within the full fetch?sign?submit flow time of <15s.
-              const _bhRpcUrl = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
-              const _bhFetchR = await fetch(_bhRpcUrl, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestBlockhash', params: [{ commitment: 'finalized' }] }),
-                signal: AbortSignal.timeout(5000)
-              });
-              const _bhJson = await _bhFetchR.json();
+              const _bhRpcUrl = ns._jupRpcUrl || null;
+              let _bhJson;
+              if (_bhRpcUrl) {
+                const _bhFetchR = await fetch(_bhRpcUrl, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestBlockhash', params: [{ commitment: 'finalized' }] }),
+                  signal: AbortSignal.timeout(5000)
+                });
+                _bhJson = await _bhFetchR.json();
+              } else {
+                // Nothing sniffed yet. The previous fallback was a hardcoded mainnet-beta URL,
+                // which 403s every request carrying an Origin header — it could never return a
+                // blockhash, so the bundle always went out on the stale one. The bridge costs a
+                // little slot-lag risk and actually works.
+                _bhJson = await ns.rpcCall('getLatestBlockhash', [{ commitment: 'finalized' }]);
+              }
               const _bhStr = _bhJson?.result?.value?.blockhash;
               if (_bhStr) _freshBlockhashBytes = ns.b58Decode(_bhStr);
             } catch (_bhE) {
@@ -2144,7 +2153,7 @@
             }
 
             // -- Poll for on-chain confirmation (max 30s) ----------------------------
-            const _rpcPollUrl = ns._jupRpcUrl || 'https://api.mainnet-beta.solana.com';
+            const _rpcPollUrl = ns._jupRpcUrl || null;
             const _confirmResult = await ns.awaitJitoSigConfirmation(rpcSig, _rpcPollUrl, 30000);
 
             if (!_confirmResult) {
@@ -2158,7 +2167,7 @@
             }
           } catch (jitoErr) {
             if (/reject|cancel|denied|abort/i.test(jitoErr?.message ?? '')) throw new Error('cancelled');
-            if (jitoErr?.message === '__bundle_expired__') throw jitoErr;
+            if (jitoErr?.message === '__bundle_expired__' || jitoErr?.message === '__bundle_unverified__') throw jitoErr;
             if (jitoErr?.message === '__rdm_sim_fallback__') throw jitoErr;
             // Any other unexpected Jito error \u2014 surface it to the user, no silent fallback.
             throw jitoErr;
@@ -2466,7 +2475,7 @@
         }, 6000);
         return;
       }
-      if (e.message === '__bundle_slot_miss__' || e.message === '__bundle_expired__') {
+      if (e.message === '__bundle_slot_miss__' || e.message === '__bundle_expired__' || e.message === '__bundle_unverified__') {
         // Jito bundle didn't land. Do NOT retry ? that would prompt the wallet a
         // second time, which is confusing and wastes the user's time. Surface the
         // failure clearly so the user can decide whether to retry manually (which
@@ -2479,8 +2488,12 @@
         // window. Very common (~30-60% of attempts depending on validator set).
         // Retrying immediately usually hits a different slot and lands successfully.
         ns.widgetSwapError  = e.message === '__bundle_slot_miss__'
-          ? 'No Jito leader slot available ? click Swap to retry (usually resolves immediately)'
-          : 'Bundle did not land ? click Swap to try again';
+          ? 'No Jito leader slot available \u2014 click Swap to retry (usually resolves immediately)'
+          // Unverified is not the same as failed: every status poll errored, so the bundle may
+          // well have landed. Telling the user it failed would invite a duplicate swap.
+          : e.message === '__bundle_unverified__'
+            ? 'Could not confirm the bundle \u2014 check your wallet before retrying, it may have landed'
+            : 'Bundle did not land \u2014 click Swap to try again';
         ns.widgetSwapStatus = 'error';
         ns.renderWidgetPanel();
         return;

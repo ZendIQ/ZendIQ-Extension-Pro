@@ -108,7 +108,6 @@ const FETCH_JSON_ALLOWED = [
   'https://api.jup.ag',
   'https://lite-api.jup.ag',
   'https://ultra-api.jup.ag',
-  'https://api.mainnet-beta.solana.com',
   'https://solana.publicnode.com',
   'https://api.rugcheck.xyz',
   'https://api.dexscreener.com',
@@ -417,14 +416,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Sequential fallback only runs when all parallel attempts fail.
     const _rpcEndpoints = [
       'https://solana.publicnode.com',
-      'https://api.mainnet-beta.solana.com',
-      // Measured from the service worker 2026-09-10: both publicnode hosts 403
-      // getTokenAccountsByOwner specifically while serving other methods in ~65ms, and
-      // mainnet-beta 403s anything carrying an Origin header. solanavibestation is the only
-      // endpoint serving the wallet approval scan — redundancy for that method is 1.
+      // Measured 2026-09-11: both publicnode hosts 403 getTokenAccountsByOwner specifically
+      // (-32602 Request blocked) while serving every other method in ~40ms. solanavibestation
+      // is the only endpoint that serves the wallet approval scan — redundancy for that one
+      // method is 1, and it 429s under burst. Tracked in OPS-205.
       'https://public.rpc.solanavibestation.com',
       // Same operator as solana.publicnode.com — a distinct host, not independent capacity.
       'https://solana-rpc.publicnode.com',
+      // api.mainnet-beta.solana.com is deliberately absent: it returns HTTP 403 to any
+      // request carrying an Origin header, which every extension and page fetch does.
+      // It answers from curl, so it looks healthy in a terminal probe and never works here.
     ];
     const _body = JSON.stringify({ jsonrpc:'2.0', id:1, method: msg.method, params: msg.params ?? [] });
     const _trace = [];
@@ -480,7 +481,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // when getAccountInfo + getTokenLargestAccounts + getTokenSupply fire together.
     const _batchEndpoints = [
       'https://solana.publicnode.com',
-      'https://api.mainnet-beta.solana.com',
       'https://public.rpc.solanavibestation.com',
     ];
     const _batchBody = JSON.stringify(

@@ -11,9 +11,11 @@
   window.__safeRouteLoaded = true;
 
   const NETWORK    = 'mainnet-beta';  // switch to 'devnet' for testing
+  // Not api.mainnet-beta.solana.com: it 403s any request carrying an Origin header, so it
+  // can never serve the extension or a page script even though curl says it is healthy.
   const RPC_URL    = NETWORK === 'devnet'
     ? 'https://api.devnet.solana.com'
-    : 'https://api.mainnet-beta.solana.com';
+    : 'https://solana.publicnode.com';
 
   // Must stay empty. This file ships in the extension bundle and the repo is public,
   // so any key set here is world-readable. Keyed RPC belongs server-side (see OPS-202).
