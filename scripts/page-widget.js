@@ -1468,7 +1468,7 @@
                 <span style="font-size:13px;font-weight:700;color:${_oRlc}">${_oRScore}/100 ${_oRLevel ?? ''}</span>
               </div>` : ''}
             </div>
-            <div style="font-size:13px;color:#C2C2D4;text-align:center">${_oi._sending ? 'Broadcasting to Solana\u2026' : (_oi.reason === 'no_net_benefit' ? `ZendIQ found no net benefit \u2014 ${_oSrcName} route is as good or better` : `Check your wallet \u2014 this is ${_oSrcName} original route`)}</div>
+            <div style="font-size:13px;color:#C2C2D4;text-align:center">${_oi._sending ? 'Broadcasting to Solana\u2026' : (_oi.reason === 'wallet_v1' ? `Your wallet hasn't confirmed it can sign v1 transactions \u2014 using ${_oSrcName} own route` : (_oi.reason === 'no_net_benefit' ? `ZendIQ found no net benefit \u2014 ${_oSrcName} route is as good or better` : `Check your wallet \u2014 this is ${_oSrcName} original route`))}</div>
           </div>`;
     } else if (ns._adapterBusyStates?.().includes(ns.widgetSwapStatus)) {
       // ── Site adapter flow states (pump-slippage-review, pump-signing, pump-done, etc.) ──

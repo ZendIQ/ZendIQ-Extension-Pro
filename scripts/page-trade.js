@@ -765,6 +765,35 @@
         }
       }
 
+      // Decline rather than build a route the wallet cannot sign. Advertisement is absent
+      // on most wallets at the v1 gate, so "unconfirmed" has to mean "no" — the DEX's own
+      // transaction is released untouched instead.
+      const _orderTxs = Array.isArray(order.transaction) ? order.transaction
+                      : (order.transaction ? [order.transaction] : []);
+      const _orderHasV1 = _orderTxs.some(t => {
+        try { return ns.wireTxVersion(Uint8Array.from(atob(t), c => c.charCodeAt(0))) === 1; }
+        catch (_) { return false; }
+      });
+      if (_orderHasV1 && !ns.walletSupportsTxVersion(1)) {
+        console.warn('[ZendIQ] route returned a v1 transaction and the wallet has not confirmed v1 support — not optimising this trade');
+        ns._autoProtectPending = false;
+        ns.widgetLastOrder     = null;
+        if (ns.pendingDecisionResolve) {
+          _setSigningOriginalFromTrade(ns, { reason: 'wallet_v1' });
+          ns._confirmRiskSnapshot   = ns.lastRiskResult ?? null;
+          ns.pendingDecisionResolve('confirm');
+          ns.pendingDecisionResolve = null;
+          ns.pendingDecisionPromise = null;
+          ns.pendingTransaction     = null;
+        } else {
+          // Probe with no intercept held open — state the reason instead of failing silent.
+          ns.widgetSwapError  = "Your wallet hasn't confirmed it can sign v1 transactions, so ZendIQ can't optimise this trade.";
+          ns.widgetSwapStatus = '';
+        }
+        ns.renderWidgetPanel();
+        return;
+      }
+
       ns.widgetLastOrder          = order;
       // Raydium bundles: swap tx has no priority fee; bundle ordering is set by tip tx only.
       // Zero priority fee in both cases so Review & Sign and Activity show correct costs.
@@ -1471,6 +1500,15 @@
     try {
       const swapBytes = Uint8Array.from(atob(txBase64), c => c.charCodeAt(0));
 
+      // A wallet that cannot parse v1 rejects it as a malformed v0 tx, which reads to the
+      // user as ZendIQ having produced garbage. Refuse when nothing can sign it; each
+      // handoff below is gated on its own feature, as the two may not advertise alike.
+      const _txV = ns.wireTxVersion(swapBytes);
+      const _canSignWith = (feat) => _txV !== 1 || ns.walletSupportsTxVersion(1, feat);
+      if (_txV === 1 && !ns.walletSupportsTxVersion(1)) {
+        throw new Error("Your wallet hasn't confirmed it can sign v1 transactions — ZendIQ didn't send this trade. Swap again to use the exchange's own route.");
+      }
+
       // Find VersionedTransaction from jup.ag bundled web3.js
       // Also capture _web3Pkg (the full package) so we can construct a Jito tip tx
       // using Transaction, PublicKey, and SystemProgram from the same web3.js build.
@@ -1523,7 +1561,7 @@
       if (!_isRaydiumTx && !signedB64 && ns._wsWallet) {
         const wsAccount = ns._wsAccount || ns._wsWallet.accounts?.[0] || null;
         const wsSignFeature = ns._wsWallet.features?.['solana:signTransaction'];
-        if (wsSignFeature?.signTransaction && wsAccount) {
+        if (wsSignFeature?.signTransaction && wsAccount && _canSignWith('solana:signTransaction')) {
           try {
             const [res] = await wsSignFeature.signTransaction({ account: wsAccount, transaction: swapBytes, chain: 'solana:mainnet' });
             const rawSwap = res?.signedTransaction;
@@ -1539,7 +1577,7 @@
             // letting the tx land on-chain where it succeeds. Skip for non-Raydium failures.
             if (_isRaydiumTx) {
               const wsSnSFallback = ns._wsWallet.features?.['solana:signAndSendTransaction'];
-              if (wsSnSFallback?.signAndSendTransaction && wsAccount) {
+              if (wsSnSFallback?.signAndSendTransaction && wsAccount && _canSignWith('solana:signAndSendTransaction')) {
                 try {
                   const _snsFbRes = await wsSnSFallback.signAndSendTransaction({ account: wsAccount, transaction: swapBytes, chain: 'solana:mainnet' });
                   skippedExecute = true;
@@ -1561,7 +1599,7 @@
         } else if (wsAccount && !signedB64) {
           // signTransaction feature absent ? try signAndSendTransaction (wallet handles broadcast)
           const wsSnS = ns._wsWallet.features?.['solana:signAndSendTransaction'];
-          if (wsSnS?.signAndSendTransaction) {
+          if (wsSnS?.signAndSendTransaction && _canSignWith('solana:signAndSendTransaction')) {
             try {
               const _wsSnsRes = await wsSnS.signAndSendTransaction({ account: wsAccount, transaction: swapBytes, chain: 'solana:mainnet' });
               skippedExecute = true;
@@ -1578,7 +1616,8 @@
 
       // Path 2: legacy wallet (window.phantom.solana etc.) ? Jupiter only.
       // Raydium uses the multi-tx RPC block below instead.
-      if (!_isRaydiumTx && !signedB64 && !skippedExecute && legacyWallet) {
+      // The legacy adapter cannot advertise a version, so v1 never reaches it.
+      if (!_isRaydiumTx && !signedB64 && !skippedExecute && legacyWallet && _txV !== 1) {
         try {
           const txToSign = VersionedTransaction ? VersionedTransaction.deserialize(swapBytes) : swapBytes;
           if (!signedB64 && !skippedExecute && legacyWallet.signTransaction) {
@@ -1600,6 +1639,11 @@
 
       // If both paths were skipped (no wallet found at all), apply the Path 1 error if we had one
       if (!signedB64 && !skippedExecute && _path1Err) throw _path1Err;
+
+      // Every handoff was gated out on version ? say so rather than posting a null tx.
+      if (!signedB64 && !skippedExecute && _txV === 1 && !_isRaydiumTx) {
+        throw new Error("Your wallet hasn't confirmed it can sign v1 transactions — ZendIQ didn't send this trade. Swap again to use the exchange's own route.");
+      }
 
       if (skippedExecute) {
         const _cap = ns.widgetCapturedTrade;
@@ -2052,6 +2096,9 @@
             // on-chain validators DO resolve it. Click Confirm to proceed.
             const _wsA  = ns._wsAccount || ns._wsWallet?.accounts?.[0] || null;
             const _wsSF = ns._wsWallet?.features?.['solana:signTransaction'];
+            if (ns.wireTxVersion(_injectedTxRaw) === 1 && !ns.walletSupportsTxVersion(1, 'solana:signTransaction')) {
+              throw new Error("Your wallet hasn't confirmed it can sign v1 transactions — ZendIQ didn't send this trade. Swap again to use the exchange's own route.");
+            }
             let _signedInjected = null;
             // _bundleSignInFlight prevents the DEX from broadcasting a parallel plain-RPC
             // tx while the wallet prompt is open. __zendiq_own_tx (set above) ensures our

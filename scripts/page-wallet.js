@@ -1057,6 +1057,25 @@
     }, 1000);
   }
 
+  // Wallet Standard lets a wallet advertise the transaction versions it can sign.
+  // Absent advertisement counts as "cannot sign": most wallets will not have shipped it
+  // by the v1 gate, and a wallet that cannot parse v1 reports it as a malformed v0 tx
+  // (LedgerHQ/app-solana#248), which the user reads as ZendIQ producing garbage.
+  // Pass featureName at a wallet handoff to check the one feature about to be called;
+  // omit it to ask whether any feature could sign, which is the quote-time question.
+  // The legacy window.solana adapter has no advertisement mechanism, so it never confirms.
+  function walletSupportsTxVersion(version, featureName) {
+    const feats = ns._wsWallet?.features;
+    if (!feats) return false;
+    const names = featureName
+      ? [featureName]
+      : ['solana:signTransaction', 'solana:signAndSendTransaction'];
+    return names.some(n => {
+      const versions = feats[n]?.supportedTransactionVersions;
+      return Array.isArray(versions) && versions.includes(version);
+    });
+  }
+
   Object.assign(ns, {
     detectAndHookWallet,
     scheduleWsProbe,
@@ -1066,5 +1085,6 @@
     hookWsWallet,
     handleTransaction,
     watchForWalletSwitch,
+    walletSupportsTxVersion,
   });
 })();

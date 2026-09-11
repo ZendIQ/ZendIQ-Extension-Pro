@@ -321,6 +321,9 @@
     if (!wsFeat?.signTransaction) throw new Error('No WS signTransaction available');
     const account = ns._wsAccount;
     if (!account) throw new Error('No WS account');
+    if (txBytesArray.some(b => ns.wireTxVersion(b) === 1) && !ns.walletSupportsTxVersion(1, 'solana:signTransaction')) {
+      throw new Error("Your wallet hasn't confirmed it can sign v1 transactions");
+    }
     window.__zendiq_own_tx = true;
     try {
       const inputs = txBytesArray.map(b => ({ account, transaction: b, chain: 'solana:mainnet' }));
