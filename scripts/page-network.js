@@ -653,41 +653,7 @@
             return rdmResp;
           }
 
-          let overlayInfo = { method: methodName || 'send', params: parsed?.params };
-
-          try {
-            const candidate = parsed?.params?.[0];
-            if (typeof candidate === 'string' && window.ZendIQ?.decodeSignedTx) {
-              const decoded = window.ZendIQ.decodeSignedTx(candidate);
-              if (decoded && decoded.ok) {
-                const best = decoded.findings.find(f => f.protocol === 'jupiter') || decoded.findings[0];
-                if (best && best.decoded) {
-                  const d = best.decoded;
-                  const inRaw  = d.inAmount ?? d.amountIn;
-                  const minRaw = d.minimumOutAmount ?? d.minimumAmountOut;
-                  const mints  = new Set();
-                  try {
-                    const scanStr  = JSON.stringify(parsed);
-                    const mintRegex = /[1-9A-HJ-NP-Za-km-z]{32,44}/g;
-                    let m;
-                    while ((m = mintRegex.exec(scanStr)) !== null) {
-                      if (m[0].length >= 32) mints.add(m[0]);
-                    }
-                  } catch (e) {}
-                  overlayInfo.decoded = {
-                    protocol: best.protocol,
-                    inAmountRaw: inRaw,
-                    minOutRaw: minRaw,
-                    slippagePercent: d.slippagePercent,
-                    detectedMints: Array.from(mints),
-                    totalBytes: decoded.length,
-                  };
-                }
-              }
-            }
-          } catch (e) {
-            console.warn('[ZendIQ] Transaction decode attempt error', e?.message);
-          }
+          const overlayInfo = { method: methodName || 'send', params: parsed?.params };
 
           const decision = await ns.showPendingTransaction(overlayInfo);
 
@@ -697,24 +663,6 @@
             return new Response(JSON.stringify({ error: 'Superseded by ZendIQ' }), {
               status: 400, headers: { 'Content-Type': 'application/json' },
             });
-          }
-
-          if (overlayInfo.decoded) {
-            ns.addSwapToHistory({
-              decision,
-              amount:   overlayInfo.decoded.inAmountRaw ? overlayInfo.decoded.inAmountRaw / Math.pow(10, 9) : 0,
-              slippage: overlayInfo.decoded.slippagePercent || 0,
-              risk:     overlayInfo.risk || null,
-            });
-
-            if (overlayInfo.risk && (overlayInfo.risk.level === 'CRITICAL' || overlayInfo.risk.level === 'HIGH')) {
-              const widget = document.getElementById('sr-widget');
-              if (widget) {
-                widget.classList.add('alert');
-                const ps = widget.querySelector('#sr-pill-status');
-                if (ps) { ps.textContent = 'Alert'; ps.style.color = '#FFB547'; }
-              }
-            }
           }
 
           if (decision === 'cancel') {

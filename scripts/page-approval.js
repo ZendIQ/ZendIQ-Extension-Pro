@@ -7,31 +7,6 @@
   'use strict';
   const ns = window.__zq;
 
-  // ── Add a swap to history ────────────────────────────────────────────────
-  function addSwapToHistory(swapInfo) {
-    ns.recentSwaps.unshift({
-      timestamp: new Date().toLocaleTimeString(),
-      status:    swapInfo.decision,
-      amount:    swapInfo.amount,
-      slippage:  swapInfo.slippage,
-      risk:      swapInfo.risk,
-    });
-    if (ns.recentSwaps.length > ns.MAX_SWAP_HISTORY) {
-      ns.recentSwaps.pop();
-    }
-    try {
-      // Forward to extension background so popup history is persisted and widget can sync
-      window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: {
-        timestamp: Date.now(),
-        optimized: false,
-        amount: swapInfo.amount,
-        slippage: swapInfo.slippage,
-        risk: swapInfo.risk,
-        decision: swapInfo.decision,
-      } } }, '*');
-    } catch (e) {}
-  }
-
   // ── Threshold check helpers ──────────────────────────────────────────────
   const RISK_LEVELS = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
 
@@ -316,7 +291,6 @@
 
   // ── Export ───────────────────────────────────────────────────────────────
   Object.assign(ns, {
-    addSwapToHistory,
     showPendingTransaction,
     handlePendingDecision,
     showOverlay,
