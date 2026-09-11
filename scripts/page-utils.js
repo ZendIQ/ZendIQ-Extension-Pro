@@ -52,14 +52,25 @@
   }
 
   /**
+   * Wire-format version read at offset 0, or null when the bytes use legacy/v0 framing.
+   * v1 (SIMD-0385) moved signatures to the tail, so its version byte lands at offset 0 and
+   * the transaction starts with 0x81. Legacy and v0 both start with a compact-u16 signature
+   * count instead — a v0 message's 0x80 sits after the signatures, never at offset 0.
+   */
+  function wireTxVersion(bytes) {
+    if (!bytes || bytes.length === 0) return null;
+    return (bytes[0] & 0x80) !== 0 ? (bytes[0] & 0x7f) : null;
+  }
+
+  /**
    * Extract the fee payer (account index 0) directly from a serialised
    * Solana transaction's raw bytes and return it as a base58 string.
    */
   function extractFeePayerFromTx(b64) {
     try {
       const raw = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      if (wireTxVersion(raw) !== null) return null; // v1+ reorders the envelope; offsets below don't apply
       let off = 0;
-      if ((raw[0] & 0x80) !== 0) off = 1;  // versioned tx: skip version byte
       const numSigs = raw[off];             // compact-u16; simplified (< 128 sigs)
       off += 1 + numSigs * 64;              // skip all signatures
       off += 3;                             // skip 3-byte message header
@@ -189,7 +200,7 @@
    * After a swap lands on-chain, fetch the actual received token amount from
    * the Solana transaction record and compute real quote accuracy.
    *
-   * Polls `getTransaction` up to 5 times (3 s first pause, then 2 s each).
+   * Polls `getTransaction` up to 15 times (5 s first pause, then 3 s each — 47 s total).
    * Returns { actualOut: <number>, quoteAccuracy: <0-100> } or null on failure.
    *
    * @param {string} signature      - Transaction signature (base58)
@@ -270,6 +281,7 @@
     b58Encode,
     b58Decode,
     extractFeePayerFromTx,
+    wireTxVersion,
     rpcCall,
     rpcBatch,
     fetchActualOut,

@@ -772,7 +772,7 @@
                     return d.reverse().map(x => _B58A[x]).join('');
                   }
                   const _txBytes = _decB58(_txB58);
-                  if (_txBytes) {
+                  if (_txBytes && ns.wireTxVersion(_txBytes) === null) {
                     // Parse: numSigs + sigs → header (3) → compact-u16 numAccts → account keys
                     let _off = 0;
                     const _ns2 = _txBytes[_off++] ?? 0;

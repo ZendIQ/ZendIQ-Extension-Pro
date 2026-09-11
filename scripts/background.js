@@ -428,6 +428,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // It answers from curl, so it looks healthy in a terminal probe and never works here.
     ];
     const _body = JSON.stringify({ jsonrpc:'2.0', id:1, method: msg.method, params: msg.params ?? [] });
+    // A node that has not indexed a signature yet answers getTransaction with HTTP 200 and
+    // result:null in ~50ms — faster than a node holding the real data can serve it. Counting
+    // that as a win makes the race below systematically return the least caught-up endpoint.
+    const _nullIsNotReady = msg.method === 'getTransaction';
     const _trace = [];
     const _fetchOne = (url) => {
       const t0 = Date.now();
@@ -438,6 +442,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         .then(data => {
           if (data?.error) throw new Error(data.error.message ?? 'RPC error');
           clearTimeout(timer);
+          if (_nullIsNotReady && data?.result == null) {
+            const e = new Error('result null — not indexed yet');
+            e._notReady = true;
+            throw e;
+          }
           _trace.push({ url, ms: Date.now() - t0, ok: true });
           return data;
         })
@@ -466,9 +475,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ ok: true, data });
       })
       .catch((agg) => {
+        const _errors = agg?.errors || [];
+        const _real = _errors.filter(e => !e?._notReady);
+        // Every endpoint agreed the signature is not indexed yet. That is an answer, not a
+        // failure — the caller's poll loop needs to see it and retry.
+        if (_errors.length && _real.length === 0) {
+          sendResponse({ ok: true, data: { jsonrpc: '2.0', id: 1, result: null } });
+          return;
+        }
         // Surface the actual per-endpoint errors so callers can diagnose
         // sendTransaction rejections (e.g. "Transaction simulation failed: …").
-        const errs = (agg?.errors || []).map(e => e?.message || String(e));
+        const errs = _real.map(e => e?.message || String(e));
         const detail = errs.length ? errs.join(' | ') : (agg?.message || 'unknown');
         sendResponse({ ok: false, error: 'All RPC endpoints failed: ' + detail });
       });

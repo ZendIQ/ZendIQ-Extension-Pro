@@ -80,6 +80,14 @@
     const tipKey = ns.b58Decode(tipAcctB58);
     const sysKey = new Uint8Array(32); // SystemProgram — all zeros
     try {
+      // v1 moves the compute budget into a message config and signatures to the tail, so the
+      // v0 offsets below would mis-parse it and emit a corrupt transaction. Refuse instead:
+      // the caller falls back to a route whose tip we can actually apply.
+      const _txV = ns.wireTxVersion(txBytes);
+      if (_txV !== null) {
+        console.error('[ZendIQ Jito] transaction is v' + _txV + ' — cannot inject tip, refusing to patch');
+        return null;
+      }
       const _cu     = (buf, p) => { let v = buf[p++]; if (v & 0x80) v = (v & 0x7f) | (buf[p++] << 7); return [v, p]; };
       const _encCU  = (v) => v < 0x80 ? [v] : [0x80 | (v & 0x7f), v >> 7];
       const _encU64 = (n) => { const b = new Uint8Array(8); let v = BigInt(n); for (let i = 0; i < 8; i++) { b[i] = Number(v & 0xffn); v >>= 8n; } return b; };

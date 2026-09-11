@@ -118,6 +118,7 @@
 
   // ── Extract recent blockhash bytes from a v0 or legacy transaction ────────
   function _extractBlockhashFromTx(txBytes) {
+    if (ns.wireTxVersion(txBytes) !== null) return null; // v1 reorders the envelope
     let p = 0;
     let nSig = txBytes[p++]; if (nSig & 0x80) nSig = (nSig & 0x7f) | (txBytes[p++] << 7);
     p += nSig * 64;
@@ -139,6 +140,13 @@
     const tipKey = ns.b58Decode(tipAcctB58);
     const sysKey = new Uint8Array(32); // SystemProgram — all zeros
     try {
+      // v1 moves the compute budget into a message config and signatures to the tail, so the
+      // v0 parse below would mis-read it and the rebuild would stamp it back as v0.
+      const _txV = ns.wireTxVersion(txBytes);
+      if (_txV !== null) {
+        console.error('[ZendIQ Pump] transaction is v' + _txV + ' — cannot inject tip, refusing to patch');
+        return null;
+      }
       // compact-u16 decode / encode
       const _cu = (buf, p) => {
         let v = buf[p++];
@@ -548,6 +556,9 @@
     try {
       const dfBytes = ns.b58Decode(DF_B58);
       if (!dfBytes || dfBytes.length !== 32) return txBytes;
+      // v1 reorders the envelope; the parse below would mis-read it and the rebuild
+      // would stamp a v0 version byte back onto it.
+      if (ns.wireTxVersion(txBytes) !== null) return txBytes;
 
       const _cu    = (buf, p) => { let v = buf[p++]; if (v & 0x80) v = (v & 0x7F) | (buf[p++] << 7); return [v, p]; };
       const _encCU = (n) => n < 128 ? [n] : [0x80 | (n & 0x7F), n >> 7];
@@ -751,6 +762,7 @@
       //    pumpportal's bytes — untouched except for the fresh blockhash.
       const _userB58  = ns.walletPubkey || ns._wsAccount?.address;
       const _bhBytes  = _extractBlockhashFromTx(freshTxBytes);
+      if (!_bhBytes) throw new Error('Could not read the blockhash from this transaction');
       const _tipTxBytes = _buildJitoTipTx(_userB58, _bhBytes, _tipLamports, true /* v0 */);
       if (!_tipTxBytes) throw new Error('Failed to build Jito tip tx');
 

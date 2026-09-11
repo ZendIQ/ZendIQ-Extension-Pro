@@ -1860,6 +1860,9 @@
                 const DF_B58  = 'jitodontfront111111111111111111111111111111';
                 const dfBytes = ns.b58Decode(DF_B58);
                 const raw     = Uint8Array.from(atob(txB64), c => c.charCodeAt(0));
+                // v1 puts signatures at the tail, so the parse below would read the version
+                // byte as a signature count and the rebuild would stamp it back as v0.
+                if (ns.wireTxVersion(raw) !== null) return txB64;
                 const _rcu = (buf, pos) => { let v = buf[pos++]; if (v & 0x80) v = (v & 0x7f) | (buf[pos++] << 7); return [v, pos]; };
                 const _wcu = n => n < 128 ? new Uint8Array([n]) : new Uint8Array([0x80 | (n & 0x7f), n >> 7]);
                 let p = 0;
@@ -1984,6 +1987,9 @@
             // offset (sigSection + versionByte? + 3 header + nAcctsCU + nAccts*32)).
             function _patchTxBlockhash(rawBytes, freshBhBytes) {
               const out = new Uint8Array(rawBytes);
+              // v1 offsets differ; writing 32 bytes at the v0 position would corrupt the tx.
+              // Leaving it stale is safe here — tip injection refuses v1 immediately after.
+              if (ns.wireTxVersion(out) !== null) return out;
               let p = 0;
               const _cu = (buf, pos) => { let v = buf[pos++]; if (v & 0x80) v = (v & 0x7f) | (buf[pos++] << 7); return [v, pos]; };
               let [nSigs, pSigs] = _cu(out, p); p = pSigs + nSigs * 64;
