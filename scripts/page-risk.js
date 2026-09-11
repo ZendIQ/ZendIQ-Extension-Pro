@@ -333,8 +333,16 @@
       else if (amountUSD < 50) sizeCap = 15;
     }
     if (sizeCap !== null && score > sizeCap) {
+      // `capped` carries the pre-cap score so the UI can explain why the factor
+      // rows above no longer sum to the badge, instead of showing a bare 0.
+      const preCapScore = score;
       score = sizeCap;
-      factors.push({ factor: 'Trade size floor', impact: 'Trade too small for profitable sandwich attack', score: 0 });
+      factors.push({
+        factor: 'Trade size floor',
+        impact: `Trade too small for profitable sandwich attack — bot risk capped from ${preCapScore} to ${sizeCap}`,
+        score: 0,
+        capped: { from: preCapScore, to: sizeCap },
+      });
     }
 
     // ── Final score + estimated loss ──────────────────────────────────────────

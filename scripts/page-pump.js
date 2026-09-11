@@ -2161,10 +2161,20 @@
         }
         let _botFactorRows = '';
         if (!isSimp && mevR.factors?.length) {
+          // The trade-size floor overrides the rows above — show what it capped rather than a bare 0.
+          const _cap = mevR.factors.find(f => f.capped);
           _botFactorRows = mevR.factors.map(f => {
-            const fc = f.score >= 30 ? '#FF4D4D' : f.score >= 15 ? '#FFB547' : f.score >= 5 ? '#9945FF' : '#14F195';
-            return `<div style="display:flex;justify-content:space-between;padding:3px 8px;background:rgba(0,0,0,0.25);border-left:2px solid ${fc};border-radius:0 5px 5px 0;margin-bottom:3px"><span style="font-size:12px;color:#C0C0D8">${f.factor}</span><span style="font-size:11px;font-weight:700;color:${fc};font-family:'Space Mono',monospace">${f.score}</span></div>`;
-          }).join('');
+            if (f.capped) {
+              return `<div title="${(f.impact ?? '').replace(/"/g, '&quot;')}" style="display:flex;justify-content:space-between;padding:3px 8px;background:rgba(20,241,149,0.08);border-left:2px solid #14F195;border-radius:0 5px 5px 0;margin-bottom:3px;cursor:help"><span style="font-size:12px;color:#14F195">${f.factor}</span><span style="font-size:11px;font-weight:700;color:#14F195;font-family:'Space Mono',monospace">${f.capped.from} \u2192 ${f.capped.to}</span></div>`;
+            }
+            const fc = ns.mevFactorColor(f.score);
+            // Superseded rows keep full label contrast — the strikethrough and grey
+            // border carry the meaning, so dimming the text only costs legibility.
+            const _bd = _cap ? 'rgba(255,255,255,0.14)' : fc;
+            const _sc = _cap ? '#8A8AA3;text-decoration:line-through' : fc;
+            return `<div style="display:flex;justify-content:space-between;padding:3px 8px;background:rgba(0,0,0,0.25);border-left:2px solid ${_bd};border-radius:0 5px 5px 0;margin-bottom:3px"><span style="font-size:12px;color:#C0C0D8">${f.factor}</span><span style="font-size:11px;font-weight:700;color:${_sc};font-family:'Space Mono',monospace">${f.score}</span></div>`;
+          }).join('')
+          + (_cap ? `<div style="font-size:11px;color:#8A8AA3;padding:3px 8px 0">Signals above superseded \u2014 final bot risk ${_cap.capped.to}/100</div>` : '');
         }
         const _hasBotDetail = !isSimp && (_estLossHtml || _botFactorRows);
         _botCard = `<div title="Bot Attack Risk \u2014 pump.fun buys are in the public mempool and can be sandwiched. Higher slippage = larger bot window.&#10;Score 0\u201390: LOW &lt;25 | MEDIUM 25\u201349 | HIGH 50\u201374 | CRITICAL 75+" style="background:${_mc}11;border:1px solid ${_mc}44;border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help">

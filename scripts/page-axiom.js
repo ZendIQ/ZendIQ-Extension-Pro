@@ -1849,13 +1849,27 @@
         if (!_isSimple) {
           const _mf = mevRisk.factors ?? [];
           if (_mf.length) {
+            // The trade-size floor overrides the rows above — show what it capped rather than a bare 0.
+            const _cap = _mf.find(function (f) { return f.capped; });
             _mevRows = '<div style="margin-top:8px">' + _mf.map(function (f) {
-              const fc = f.score >= 20 ? '#FF4D4D' : f.score >= 10 ? '#FFB547' : f.score >= 5 ? '#9945FF' : '#14F195';
-              return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:rgba(0,0,0,0.25);border-left:2px solid ' + fc + ';border-radius:0 5px 5px 0;margin-bottom:3px">'
+              if (f.capped) {
+                return '<div title="' + _esc(f.impact ?? '') + '" style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:rgba(20,241,149,0.08);border-left:2px solid #14F195;border-radius:0 5px 5px 0;margin-bottom:3px;cursor:help">'
+                  + '<span style="font-size:12px;color:#14F195">' + _esc(f.factor) + '</span>'
+                  + '<span style="font-size:9px;font-weight:700;color:#14F195;font-family:Space Mono,monospace;flex-shrink:0;margin-left:6px">' + f.capped.from + ' \u2192 ' + f.capped.to + '</span>'
+                  + '</div>';
+              }
+              const fc = ns.mevFactorColor(f.score);
+              // Superseded rows keep full label contrast — the strikethrough and grey
+              // border carry the meaning, so dimming the text only costs legibility.
+              const _bd = _cap ? 'rgba(255,255,255,0.14)' : fc;
+              const _sc = _cap ? '#8A8AA3;text-decoration:line-through' : fc;
+              return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:rgba(0,0,0,0.25);border-left:2px solid ' + _bd + ';border-radius:0 5px 5px 0;margin-bottom:3px">'
                 + '<span style="font-size:12px;color:#C0C0D8">' + _esc(f.factor) + '</span>'
-                + '<span style="font-size:9px;font-weight:700;color:' + fc + ';font-family:Space Mono,monospace;flex-shrink:0;margin-left:6px">' + f.score + '</span>'
+                + '<span style="font-size:9px;font-weight:700;color:' + _sc + ';font-family:Space Mono,monospace;flex-shrink:0;margin-left:6px">' + f.score + '</span>'
                 + '</div>';
-            }).join('') + '</div>';
+            }).join('')
+            + (_cap ? '<div style="font-size:11px;color:#8A8AA3;padding:3px 8px 0">Signals above superseded \u2014 final bot risk ' + _cap.capped.to + '/100</div>' : '')
+            + '</div>';
           }
         }
 

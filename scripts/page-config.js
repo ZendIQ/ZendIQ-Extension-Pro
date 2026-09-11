@@ -281,6 +281,18 @@
     return { tightenedBps, originalBps: originalSlippageBps ?? 50, marginBps, tokenClass, priceImpactBps: piBps };
   };
 
+  // ── Severity palette ─────────────────────────────────────────────────────
+  window.__zq.RISK_COLORS = { CRITICAL: '#FF4D4D', HIGH: '#FFB547', MEDIUM: '#9945FF', LOW: '#14F195' };
+
+  // Thresholds for an individual MEV factor's score. Each adapter used to inline
+  // its own cut-offs, so the same score rendered a different colour per DEX.
+  window.__zq.mevFactorLevel = function (score) {
+    return score >= 20 ? 'CRITICAL' : score >= 10 ? 'HIGH' : score >= 5 ? 'MEDIUM' : 'LOW';
+  };
+  window.__zq.mevFactorColor = function (score) {
+    return window.__zq.RISK_COLORS[window.__zq.mevFactorLevel(score)];
+  };
+
   // ── Site adapter registry helpers ────────────────────────────────────────
   window.__zq.registerSiteAdapter = function (adapter) {
     window.__zq._siteAdapters.push(adapter);

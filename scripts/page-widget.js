@@ -247,7 +247,7 @@
     // All helpers return an HTML string and are pure (no side effects).
 
     // Risk-level → brand colour
-    const _rClr = lv => ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'})[lv] ?? '#C2C2D4';
+    const _rClr = lv => ns.RISK_COLORS[lv] ?? '#C2C2D4';
 
     // Generic factor-row list (shared by Token Risk, Execution Risk, Bot Risk)
     // Within-tier danger priority — lower number = more dangerous = shown first.
@@ -303,7 +303,15 @@
     const _SPINNER = `<span style="display:inline-block;width:11px;height:11px;border:2px solid rgba(255,181,71,0.25);border-top-color:#FFB547;border-radius:50%;animation:sr-spin 0.8s linear infinite;vertical-align:middle;margin-right:5px"></span>`;
     const _SCAN_BADGE  = `<span style="display:flex;align-items:center;font-weight:700;font-size:12px;font-family:'Space Mono',monospace;color:#FFB547">${_SPINNER}Scanning…</span>`;
     const _SCAN_ROWS   = `<div style="margin-top:6px;font-size:12px;color:#C2C2D4;font-style:italic;display:flex;align-items:center">${_SPINNER}Scanning token…</div>`;
-    const _factorRows = (factors, showSimple) => {
+    // Each factor's share of Est. Loss, so the headline figure can be added up from the rows.
+    // baseUsd is the trade value; factors without a lossContrib render nothing.
+    const _lossChip = (f, baseUsd) => {
+      const lc = f.lossContrib;
+      if (!(baseUsd > 0) || !(lc > 0)) return '';
+      const pct = (lc / baseUsd) * 100;
+      return `<span style="font-size:9px;color:#FFB547;font-family:Space Mono,monospace;flex-shrink:0;margin-left:6px;cursor:help" title="Adds ${pct.toFixed(2)}% of trade value to Est. Loss">${pct < 0.01 ? '&lt;0.01' : pct.toFixed(2)}%</span>`;
+    };
+    const _factorRows = (factors, showSimple, lossBaseUsd) => {
       if (!factors?.length) return '';
       const sorted = factors.slice().sort((a, b) => {
         const sd = (SEV_ORDER_TOK[a.severity] ?? 9) - (SEV_ORDER_TOK[b.severity] ?? 9);
@@ -324,6 +332,7 @@
         return `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:rgba(0,0,0,0.25);border-left:2px solid ${fc};border-radius:0 5px 5px 0;margin-bottom:3px;cursor:help" title="${tip}">` +
           `<span style="font-size:11px;color:${iconClr};flex-shrink:0;width:14px;margin-right:4px">${icon}</span>` +
           `<span style="font-size:12px;color:#C0C0D8;flex:1">${f.name}</span>` +
+          _lossChip(f, lossBaseUsd) +
           `<span style="font-size:9px;font-weight:700;color:${fc};font-family:Space Mono,monospace;margin-left:6px">${pill}</span></div>`;
       }).join('') + '</div>';
     };
@@ -380,7 +389,7 @@
       if (!risk) return '';
       const rc      = _rClr(risk.level);
       const badge   = isSimple ? _riskLabel(risk.level) : `${risk.level} \u00b7 ${risk.score}/100`;
-      const rows    = isSimple ? '' : _factorRows(risk.factors, false);
+      const rows    = isSimple ? '' : _factorRows(risk.factors, false, risk.swapAmountUsd ?? risk.swapAmount);
       const divider = rows ? ';margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.06)' : '';
       return `<div style="background:${rc}11;border:1px solid ${rc}44;border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help"
         title="Execution Risk \u2014 network congestion, trade size and token characteristics.&#10;Score 0\u2013100: LOW &lt;25 | MEDIUM 25\u201349 | HIGH 50\u201374 | CRITICAL 75+">
@@ -431,7 +440,7 @@
     };
     // ── End shared Review & Sign builders ────────────────────────────────────
     // Expose card builders to site adapters (pump, raydium, etc.)
-    Object.assign(ns, { _rClr, _riskLabel, _factorRows, _buildOrderCard, _buildTokenRiskCard, _buildExecutionRiskCard, _buildSavingsCostsCard, _buildReviewShell });
+    Object.assign(ns, { _rClr, _riskLabel, _lossChip, _factorRows, _buildOrderCard, _buildTokenRiskCard, _buildExecutionRiskCard, _buildSavingsCostsCard, _buildReviewShell });
 
     // On axiom.trade there is no Swap tab — redirect if somehow set.
 
@@ -1079,7 +1088,8 @@
                 _erRows = '<div style="margin-top:8px">' + _ef.map(f => {
                   const fc = ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'})[f.severity] ?? '#C2C2D4';
                   return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:rgba(0,0,0,0.25);border-left:2px solid ' + fc + ';border-radius:0 5px 5px 0;margin-bottom:3px">' +
-                    '<span style="font-size:12px;color:#C0C0D8">' + f.name + '</span>' +
+                    '<span style="font-size:12px;color:#C0C0D8;flex:1">' + f.name + '</span>' +
+                    _lossChip(f, _elUsd) +
                     '<span style="font-size:9px;font-weight:700;color:' + fc + ';font-family:Space Mono,monospace;flex-shrink:0;margin-left:6px">' + f.severity + '</span>' +
                   '</div>';
                 }).join('') + '</div>';
@@ -1963,7 +1973,7 @@
               }
               if (!mevRisk) return '';
 
-              const _mc   = {CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'}[mevRisk.riskLevel] ?? '#C2C2D4';
+              const _mc   = _rClr(mevRisk.riskLevel);
               const _mbg  = `background:${_mc}11;border:1px solid ${_mc}44`;
               const _badge = ns.widgetMode === 'simple'
                 ? _riskLabel(mevRisk.riskLevel)
@@ -1976,15 +1986,29 @@
                 if (!_mf.length) {
                   _mevFactorRows = '<div style="font-size:12px;color:#C2C2D4;padding:2px 8px;margin-bottom:4px">No bot risk detected</div>';
                 } else {
+                  // When the trade-size floor fired it overrode the rows above, which would
+                  // otherwise appear to sum to a score the badge contradicts.
+                  const _cap = _mf.find(f => f.capped);
                   _mevFactorRows = '<div style="margin-top:8px">' + _mf.map(f => {
-                    const fc = ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'})[
-                      f.score >= 20 ? 'CRITICAL' : f.score >= 10 ? 'HIGH' : f.score >= 5 ? 'MEDIUM' : 'LOW'
-                    ] ?? '#C2C2D4';
-                    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:rgba(0,0,0,0.25);border-left:2px solid ' + fc + ';border-radius:0 5px 5px 0;margin-bottom:3px">' +
+                    const ftip = (f.impact ?? '').replace(/"/g, '&quot;');
+                    if (f.capped) {
+                      return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:rgba(20,241,149,0.08);border-left:2px solid #14F195;border-radius:0 5px 5px 0;margin-bottom:3px;cursor:help" title="' + ftip + '">' +
+                        '<span style="font-size:12px;color:#14F195">' + f.factor + '</span>' +
+                        '<span style="font-size:9px;font-weight:700;color:#14F195;font-family:Space Mono,monospace;flex-shrink:0;margin-left:6px">' + f.capped.from + ' \u2192 ' + f.capped.to + '</span>' +
+                      '</div>';
+                    }
+                    const fc = ns.mevFactorColor(f.score);
+                    // Superseded rows keep full label contrast — the strikethrough and grey
+                    // border carry the meaning, so dimming the text only costs legibility.
+                    const _bd = _cap ? 'rgba(255,255,255,0.14)' : fc;
+                    const _sc = _cap ? '#8A8AA3;text-decoration:line-through' : fc;
+                    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:rgba(0,0,0,0.25);border-left:2px solid ' + _bd + ';border-radius:0 5px 5px 0;margin-bottom:3px;cursor:help" title="' + ftip + '">' +
                       '<span style="font-size:12px;color:#C0C0D8">' + f.factor + '</span>' +
-                      '<span style="font-size:9px;font-weight:700;color:' + fc + ';font-family:Space Mono,monospace;flex-shrink:0;margin-left:6px">' + f.score + '</span>' +
+                      '<span style="font-size:9px;font-weight:700;color:' + _sc + ';font-family:Space Mono,monospace;flex-shrink:0;margin-left:6px">' + f.score + '</span>' +
                     '</div>';
-                  }).join('') + '</div>';
+                  }).join('')
+                  + (_cap ? '<div style="font-size:11px;color:#8A8AA3;padding:3px 8px 0">Signals above superseded \u2014 final bot risk ' + _cap.capped.to + '/100</div>' : '')
+                  + '</div>';
                 }
               }
 
@@ -1998,7 +2022,11 @@
               // For simple mode show only the badge and provide a hover tooltip with details
               if (ns.widgetMode === 'simple') {
                 const mf = mevRisk.factors ?? [];
-                const mfTip = mf.length ? 'MEV factors:\n' + mf.slice(0,4).map(f => `• ${f.factor} (${f.score})`).join('\n') : 'No bot risk detected';
+                const _capF = mf.find(f => f.capped);
+                const mfTip = mf.length
+                  ? 'MEV factors:\n' + mf.filter(f => !f.capped).slice(0,4).map(f => `• ${f.factor} (${f.score})`).join('\n')
+                    + (_capF ? `\n\n${_capF.impact}` : '')
+                  : 'No bot risk detected';
                 const tip = (_mevTip + '\n\n' + mfTip).replace(/"/g,'&quot;');
                 return `<div title="${tip}" style="${_mbg};border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help">
                   <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;">
@@ -2049,7 +2077,8 @@
                     const fc = ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'})[f.severity] ?? '#C2C2D4';
                     const tip = f.detail ? f.detail.replace(/"/g, '&quot;') : '';
                     return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:rgba(0,0,0,0.25);border-left:2px solid ' + fc + ';border-radius:0 5px 5px 0;margin-bottom:3px;cursor:help" title="' + tip + '">' +
-                      '<span style="font-size:12px;color:#C0C0D8">' + f.name + '</span>' +
+                      '<span style="font-size:12px;color:#C0C0D8;flex:1">' + f.name + '</span>' +
+                      _lossChip(f, _elUsd) +
                       '<span style="font-size:9px;font-weight:700;color:' + fc + ';font-family:Space Mono,monospace;flex-shrink:0;margin-left:6px">' + f.severity + '</span>' +
                     '</div>';
                   }).join('') + '</div>';
@@ -2809,8 +2838,7 @@ ${!ns.axiomVerifyOnly ? '' : `
 
               // Risk Factors + Bot Attack Risk — always shown in advanced mode
               if (ns.widgetMode !== 'simple') {
-                const sfc = {CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'};
-                const mfc = {CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'};
+                const sfc = ns.RISK_COLORS;
                 // ── Section: Risk Factors (calculateRisk factors) ─────────────
                 t += `<div style="margin:8px 0 4px;font-size:9px;font-weight:700;color:#C2C2D4;text-transform:uppercase;letter-spacing:0.4px;cursor:help" title="Risk signals assessed by ZendIQ for this swap: price impact, slippage, trade size, and network conditions.">Risk Factors</div>`;
                 if (h.riskFactors?.length) {
@@ -2825,7 +2853,7 @@ ${!ns.axiomVerifyOnly ? '' : `
                 t += `<div style="margin:8px 0 4px;font-size:9px;font-weight:700;color:#C2C2D4;text-transform:uppercase;letter-spacing:0.4px;cursor:help" title="Individual bot-attack signals detected for this swap. Each factor contributes to the overall Bot Attack Risk score.">Bot Attack Risk</div>`;
                 if (h.mevFactors?.length) {
                   t += h.mevFactors.map(f => {
-                    const fc = mfc[f.score >= 20 ? 'CRITICAL' : f.score >= 10 ? 'HIGH' : f.score >= 5 ? 'MEDIUM' : 'LOW'] ?? '#C2C2D4';
+                    const fc = ns.mevFactorColor(f.score);
                     return `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:2px;padding-left:10px"><span style="color:#C2C2D4">${escapeHtml(f.factor)}</span><span style="color:${fc};font-weight:600">${escapeHtml(f.score)}</span></div>`;
                   }).join('');
                 } else {
