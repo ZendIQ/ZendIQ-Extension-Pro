@@ -476,6 +476,14 @@
                   status: 400, headers: { 'Content-Type': 'application/json' },
                 });
               }
+              // 'skip' means ZendIQ is already signing its own replacement for this swap —
+              // usually Jupiter's auto-retry after the 'optimise' throw. Forwarding it would
+              // submit a second transaction and record the trade as unoptimised.
+              if (decision === 'skip') {
+                return new Response(JSON.stringify({ error: 'Superseded by ZendIQ' }), {
+                  status: 400, headers: { 'Content-Type': 'application/json' },
+                });
+              }
               // 'confirm' from the network-path overlay (fallback for non-wallet-hook flows)
               return _captureConfirmTrade(resource, init, risk);
             } catch (overlayErr) {
@@ -682,6 +690,14 @@
           }
 
           const decision = await ns.showPendingTransaction(overlayInfo);
+
+          // ZendIQ is mid-flight on its own replacement — drop the retry rather than
+          // letting it reach the RPC or logging it as a swap the user made.
+          if (decision === 'skip') {
+            return new Response(JSON.stringify({ error: 'Superseded by ZendIQ' }), {
+              status: 400, headers: { 'Content-Type': 'application/json' },
+            });
+          }
 
           if (overlayInfo.decoded) {
             ns.addSwapToHistory({
