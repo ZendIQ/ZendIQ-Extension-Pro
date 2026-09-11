@@ -151,15 +151,17 @@
     } catch (_) { return null; }
   }
 
-  // Returns { tokenCount, mints[] } — distinct mints the deployer initialised in last windowDays.
+  // Returns { tokenCount, mints[], complete } — distinct mints the deployer initialised in last windowDays.
   // Uses jsonParsed encoding to detect initializeMint instructions directly.
+  // tokenCount === null means the lookup failed; it is NOT the same as zero.
+  // complete === false means some txs could not be read, so the count is a lower bound.
   async function _getDeployerTokenData(deployerAddress, windowDays = 30) {
-    if (!deployerAddress) return { tokenCount: 0, mints: [] };
+    if (!deployerAddress) return { tokenCount: null, mints: [], complete: false };
     try {
       const cutoff  = Math.floor((Date.now() - windowDays * 24 * 3600 * 1000) / 1000);
       const resp    = await ns.rpcCall('getSignaturesForAddress', [deployerAddress, { limit: 200 }]);
       const recent  = (resp?.result ?? []).filter(s => (s.blockTime ?? 0) >= cutoff);
-      if (!recent.length) return { tokenCount: 0, mints: [] };
+      if (!recent.length) return { tokenCount: 0, mints: [], complete: true };
 
       // Prefer all 200 recent txs, but cap API calls at 50.
       // Active deployer wallets that also trade heavily have mint-creation txs
@@ -182,7 +184,7 @@
           _batch.map(s => ns.rpcCall('getTransaction', [
             s.signature,
             { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
-          ]).catch(() => null))
+          ]).catch(() => ({ _failed: true })))
         );
         txResps.push(..._batchResults);
       }
@@ -205,8 +207,11 @@
         _scanIxs(r.result.transaction?.message?.instructions);
         for (const inner of (r.result.meta?.innerInstructions ?? [])) _scanIxs(inner.instructions);
       }
-      return { tokenCount: mints.length, mints };
-    } catch (_) { return { tokenCount: 0, mints: [] }; }
+      // A transport failure means the tx was never scanned. A `result: null` (pruned from the
+      // endpoint's ledger) is an inherent limit of the method, present in healthy scans too.
+      const _failed = txResps.filter(r => r?._failed).length;
+      return { tokenCount: mints.length, mints, complete: _failed === 0 };
+    } catch (_) { return { tokenCount: null, mints: [], complete: false }; }
   }
 
   // Batch DexScreener call for deployer's previous tokens — checks how many have
@@ -890,26 +895,44 @@
     }
 
     // ── 14. Serial deployer ───────────────────────────────────────────────────
-    // deployerData: { address: string, tokenCount: number } | null
+    // deployerData: { address: string, tokenCount: number|null, complete: boolean } | null
     // Tiers calibrated against real pump.fun bot behaviour:
     //   ≥50 = scripted factory (token every ~14h)
     //   ≥25 = near-automated (physically implausible manually)
     //   ≥10 = systematic serial launcher
     //    ≥3 = repeat experimenter / early-stage bad actor
     if (deployerData?.address) {
-      const tc = deployerData.tokenCount ?? 0;
-      if (tc >= 50) {
+      const tc       = deployerData.tokenCount;
+      const complete = deployerData.complete !== false;
+      // An incomplete scan can only undercount, so a tier that is already hit stays valid.
+      // Only the "no history found" conclusion is unsafe to draw from partial data.
+      const n        = complete ? `${tc}` : `${tc}+`;
+      const partial  = complete ? '' : ' Only part of this wallet\u2019s recent activity could be read, so the real figure may be higher.';
+
+      if (tc == null) {
+        factors.push({
+          name: 'Creator history: unavailable',
+          severity: 'MEDIUM',
+          detail: 'On-chain deployer lookup failed \u2014 this wallet\u2019s record of previous launches could not be checked. Neither confirmed nor ruled out; this is not an all-clear.',
+        });
+      } else if (tc >= 50) {
         score += 35;
-        factors.push({ name: `Bot factory — ${tc} deploys in 30d`, severity: 'CRITICAL', detail: `Creator wallet launched ${tc} tokens in 30 days (~1 every 14h). Scripted bot factory — near-certain rug.` });
+        factors.push({ name: `Bot factory — ${n} deploys in 30d`, severity: 'CRITICAL', detail: `Creator wallet launched ${n} tokens in 30 days (~1 every 14h). Scripted bot factory — near-certain rug.` + partial });
       } else if (tc >= 25) {
         score += 30;
-        factors.push({ name: `Bot-created token — ${tc} deploys in 30d`, severity: 'CRITICAL', detail: `Creator wallet launched ${tc} tokens in 30 days — physically implausible without automation. Automated rug pipeline.` });
+        factors.push({ name: `Bot-created token — ${n} deploys in 30d`, severity: 'CRITICAL', detail: `Creator wallet launched ${n} tokens in 30 days — physically implausible without automation. Automated rug pipeline.` + partial });
       } else if (tc >= 10) {
         score += 20;
-        factors.push({ name: `Serial launcher — ${tc} tokens in 30d`, severity: 'HIGH', detail: `Creator wallet has launched ${tc} tokens in 30 days. Systematic serial launches are a strong rug-pull indicator.` });
+        factors.push({ name: `Serial launcher — ${n} tokens in 30d`, severity: 'HIGH', detail: `Creator wallet has launched ${n} tokens in 30 days. Systematic serial launches are a strong rug-pull indicator.` + partial });
       } else if (tc >= 3) {
         score += 8;
-        factors.push({ name: `Repeat creator — ${tc} tokens in 30d`, severity: 'MEDIUM', detail: `Creator has launched ${tc} tokens in the last 30 days. May be an experimenter or early-stage bad actor.` });
+        factors.push({ name: `Repeat creator — ${n} tokens in 30d`, severity: 'MEDIUM', detail: `Creator has launched ${n} tokens in the last 30 days. May be an experimenter or early-stage bad actor.` + partial });
+      } else if (!complete) {
+        factors.push({
+          name: 'Creator history: partial scan',
+          severity: 'MEDIUM',
+          detail: `Only part of this wallet\u2019s recent activity could be read. ${tc} previous launch${tc === 1 ? '' : 'es'} found so far, but the real figure may be higher \u2014 this is not an all-clear.`,
+        });
       } else {
         factors.push({
           name: tc === 0 ? 'Creator: first token ever' : `Creator: ${tc} token${tc === 1 ? '' : 's'} in 30d`,
@@ -1199,7 +1222,7 @@
         if (address) {
           const td = await _t2(_getDeployerTokenData(address, 30), 6000);
           if (td) {
-            deployerData = { address, tokenCount: td.tokenCount };
+            deployerData = { address, tokenCount: td.tokenCount, complete: td.complete !== false };
             if (td.mints?.length >= 3) rugRateData = await _t2(_fetchDeployerRugRate(td.mints), 6000);
           } else {
             deployerFailed = true;
@@ -1210,13 +1233,13 @@
       } catch (_) { deployerFailed = true; }
 
       const result = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleFinal);
-      // If deployer lookup failed/timed out, _computeScore won't push a creator-history row.
+      // Deployer address itself could not be resolved, so _computeScore pushed no creator row.
       // Add an explicit "unavailable" row so the pending spinner is replaced (not left hanging).
       if (deployerFailed && !deployerData) {
         result.factors.push({
           name: 'Creator history: unavailable',
           severity: 'MEDIUM',
-          detail: 'On-chain deployer lookup timed out or returned no data — the creator\u2019s track record of previous launches could not be checked. This is not an all-clear.',
+          detail: 'The wallet that created this token could not be identified on-chain, so its record of previous launches could not be checked. This is not an all-clear.',
         });
       }
       _setCached(mint, result);
