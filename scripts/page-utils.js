@@ -237,18 +237,35 @@
         if (!_wp) return null;
 
         let actualOut = null;
+        const post = meta.postTokenBalances ?? [];
+        const pre  = meta.preTokenBalances  ?? [];
         if (isSOL) {
           // Find wallet's index in the account-key list
           const idx = keys.findIndex(k => (typeof k === 'string' ? k : k.pubkey) === _wp);
           if (idx >= 0) {
+            // Only credit costs back if this wallet actually bore them. On a gasless or
+            // RFQ route a relayer is the fee payer (index 0), and crediting its spend to
+            // the user would inflate a bad fill to a clean 100%.
+            const _paidCosts = idx === 0;
+            // A multi-hop route opens an intermediate token account for the wallet and
+            // leaves rent sitting in it. Those lamports are still the user's — recoverable
+            // by closing the account — so charging them against the fill understates it.
+            const _preIdx = new Set(pre.map(e => e.accountIndex));
+            let rentParked = 0;
+            if (_paidCosts) {
+              for (const e of post) {
+                if (e.owner !== _wp || _preIdx.has(e.accountIndex)) continue;
+                const d = (meta.postBalances[e.accountIndex] ?? 0) - (meta.preBalances[e.accountIndex] ?? 0);
+                if (d > 0) rentParked += d;
+              }
+            }
             // Add fee back: wallet paid fee from its balance, but we want received SOL, not net change
-            const receivedLamports = (meta.postBalances[idx] ?? 0) - (meta.preBalances[idx] ?? 0) + (meta.fee ?? 0);
+            const receivedLamports = (meta.postBalances[idx] ?? 0) - (meta.preBalances[idx] ?? 0)
+              + (_paidCosts ? (meta.fee ?? 0) : 0) + rentParked;
             if (receivedLamports > 0) actualOut = receivedLamports / 1e9;
           }
         } else {
           // SPL token — match by mint + owner in token balance snapshots
-          const post = meta.postTokenBalances ?? [];
-          const pre  = meta.preTokenBalances  ?? [];
           const postEntry = post.find(e => e.mint === outputMint && e.owner === _wp);
           const preEntry  = pre.find(e  => e.mint === outputMint && e.owner === _wp);
           if (postEntry) {
