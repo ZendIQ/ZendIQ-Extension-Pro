@@ -2146,7 +2146,8 @@
       if (mevR) {
         const _mc     = _sc(mevR.riskLevel);
         const _mBadge = isSimp ? _rl(mevR.riskLevel) : `${mevR.riskLevel} \u00b7 ${mevR.estimatedLossPercentage?.toFixed(2) ?? '0'}% est. loss`;
-        const _eln    = pfRisk?.estimatedLossNative ?? null;
+        // Derived from the MEV percentage in the badge so amount and percent describe the same quantity.
+        const _eln    = pfc.solAmount > 0 ? pfc.solAmount * ((mevR.estimatedLossPercentage ?? 0) / 100) : null;
         let _estLossHtml = '';
         if (!isSimp) {
           if (_eln == null || _eln < 0.000001) {

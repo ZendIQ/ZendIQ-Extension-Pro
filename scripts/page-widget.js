@@ -972,7 +972,7 @@
         const pct = (risk.swapAmountUsd ?? risk.swapAmount ?? 0) > 0
           ? ((risk.estimatedLoss / (risk.swapAmountUsd ?? risk.swapAmount)) * 100).toFixed(2)
           : '0.00';
-        return `&#10;&#10;\u26a0 You may lose ${fmtN} ${sym} (${pct}%) to bot attacks by skipping ZendIQ optimisation.`;
+        return `&#10;&#10;\u26a0 This trade carries an estimated ${fmtN} ${sym} (${pct}%) execution loss from slippage and price impact.`;
       })() : '';
       const _skipTooltip = `Skip ZendIQ&#39;s analysis and continue with your original jup.ag swap. Your wallet prompt will appear as normal \u2014 ZendIQ will not optimise this trade.${_skipLossSuffix}`;
       riskBadgeHtml = _badgeLabel ? `<div style="display:inline-flex;align-items:center;gap:7px;border:1px solid ${levelColor}44;background:${levelColor}11;border-radius:20px;padding:3px 10px 3px 7px;cursor:help" title="${_riskTooltip}">
@@ -985,20 +985,6 @@
             <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;margin-bottom:5px;padding-bottom:5px;border-bottom:1px solid rgba(255,255,255,0.06);">
               <span style="color:#9945FF;font-weight:600;cursor:help" title="Bot Attack Risk — automated bots can front-run or sandwich your swap to steal value the moment it hits the mempool. Higher score = greater exposure.&#10;Industry term: MEV (Maximal Extractable Value)&#10;Score 0–100: LOW &lt;25 | MEDIUM 25–49 | HIGH 50–74 | CRITICAL 75+">Bot Attack Risk</span>
               <span style="font-weight:700;font-size:12px;font-family:'Space Mono',monospace;color:${_mevLevelColor};cursor:help" title="${_riskTooltip}">${risk?.mev ? (ns.widgetMode === 'simple' ? _riskLabel(risk.mev.riskLevel) : `${risk.mev.riskLevel} · ${risk.mev.riskScore}/100`) : '—'}</span>
-            </div>
-            <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px;">
-              <span style="color:#C2C2D4">Est. Loss</span>
-              ${risk ? (() => {
-                const n = risk.estimatedLossNative; // null when token price unavailable
-                if (n == null || n < 0.000001) {
-                  return `<span style="font-weight:700;font-family:'Space Mono',monospace;font-size:12px;color:#14F195">${n == null ? '—' : 'none'}</span>`;
-                }
-                const sym = risk.inputSymbol ?? 'SOL';
-                const fmtN = n < 0.0001 ? n.toFixed(6) : n < 0.01 ? n.toFixed(4) : n.toFixed(2);
-                const pct = (risk.swapAmountUsd ?? risk.swapAmount ?? 0) > 0 ? ((risk.estimatedLoss / (risk.swapAmountUsd ?? risk.swapAmount)) * 100).toFixed(2) : '0.00';
-                const lossCol = parseFloat(pct) >= 1 ? '#FF4D4D' : '#FFB547';
-                return `<span style="font-weight:700;font-family:'Space Mono',monospace;font-size:12px;color:${lossCol}">${fmtN} ${sym} (${pct}%)</span>`;
-              })() : `<span style="font-weight:700;font-family:'Space Mono',monospace;font-size:12px;color:#C2C2D4">—</span>`}
             </div>
             ${(() => {
               const lq = ns.jupiterLiveQuote;
@@ -1069,7 +1055,21 @@
             const _erc   = ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'})[risk.level] ?? '#C2C2D4';
             const _erbg  = `background:${_erc}11;border:1px solid ${_erc}44`;
             const _erBadge = ns.widgetMode === 'simple' ? _riskLabel(risk.level) : `${risk.level} \u00b7 ${risk.score}/100`;
-            const _erTip = `Execution Risk \u2014 how risky this specific swap is to execute.&#10;Covers: slippage tolerance, price impact, route complexity, network congestion, and trade size.&#10;Score 0\u2013100: LOW <25 | MEDIUM 25\u201349 | HIGH 50\u201374 | CRITICAL 75+`;
+            // Sum of every calculateRisk lossContrib (slippage, price impact, trade size, congestion) — not MEV.
+            const _eln   = risk.estimatedLossNative ?? null;
+            const _elSym = risk.inputSymbol ?? 'SOL';
+            const _elUsd = risk.swapAmountUsd ?? risk.swapAmount ?? 0;
+            const _elPct = _elUsd > 0 ? ((risk.estimatedLoss / _elUsd) * 100).toFixed(2) : null;
+            const _elTxt = _eln == null ? '\u2014'
+              : _eln < 0.000001 ? 'none'
+              : `${_eln < 0.0001 ? _eln.toFixed(6) : _eln < 0.01 ? _eln.toFixed(4) : _eln.toFixed(2)} ${_elSym}${_elPct != null ? ` (${_elPct}%)` : ''}`;
+            const _elCol = (_eln == null || _eln < 0.000001) ? '#14F195'
+              : (_elPct != null && parseFloat(_elPct) >= 1) ? '#FF4D4D' : '#FFB547';
+            const _erTip = `Execution Risk \u2014 how risky this specific swap is to execute.&#10;Covers: slippage tolerance, price impact, route complexity, network congestion, and trade size.&#10;Score 0\u2013100: LOW <25 | MEDIUM 25\u201349 | HIGH 50\u201374 | CRITICAL 75+&#10;&#10;Est. loss: ${_elTxt} \u2014 worst-case value lost to these execution factors. Separate from bot attacks (see Bot Attack Risk).`;
+            const _estLossRow = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px">
+                <span style="color:#C2C2D4;cursor:help" title="Worst-case value lost to slippage, price impact and trade size on this swap. Does not include bot attacks \u2014 those are shown separately under Bot Attack Risk.">Est. Loss</span>
+                <span style="font-weight:700;font-family:'Space Mono',monospace;font-size:12px;color:${_elCol}">${_elTxt}</span>
+              </div>`;
             let _erRows = '';
             if (ns.widgetMode !== 'simple') {
               const _ef = risk.factors ?? [];
@@ -1086,10 +1086,11 @@
               }
             }
             return `<div title="${_erTip}" style="${_erbg};border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help">
-              <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">
+              <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;margin-bottom:5px;padding-bottom:5px;border-bottom:1px solid rgba(255,255,255,0.06)">
                 <span style="color:${_erc};font-weight:600">Execution Risk</span>
                 <span style="font-weight:700;font-size:12px;font-family:'Space Mono',monospace;color:${_erc}">${_erBadge}</span>
               </div>
+              ${_estLossRow}
               ${_erRows}
             </div>`;
           })()}
@@ -1968,26 +1969,6 @@
                 ? _riskLabel(mevRisk.riskLevel)
                 : `${mevRisk.riskLevel} · ${mevRisk.estimatedLossPercentage?.toFixed(2) ?? '0'}% est. loss`;
 
-              // Est. Loss row (full-width, matches Monitor card)
-              const _eln   = ns.lastRiskResult?.estimatedLossNative ?? null;
-              const _elSym = ns.lastRiskResult?.inputSymbol ?? ct.inputSymbol ?? 'SOL';
-              let _estLossHtml = '';
-              if (_eln == null || _eln < 0.000001) {
-                _estLossHtml = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px;">
-                  <span style="color:#C2C2D4">Est. Loss</span>
-                  <span style="font-weight:700;font-family:'Space Mono',monospace;font-size:12px;color:#14F195">${_eln == null ? '—' : 'none'}</span>
-                </div>`;
-              } else {
-                const _elFmt = _eln < 0.0001 ? _eln.toFixed(6) : _eln < 0.01 ? _eln.toFixed(4) : _eln.toFixed(2);
-                const _swapUsd = ns.lastRiskResult?.swapAmountUsd ?? ns.lastRiskResult?.swapAmount ?? 0;
-                const _elPct  = _swapUsd > 0 ? ((ns.lastRiskResult.estimatedLoss / _swapUsd) * 100).toFixed(2) : '0.00';
-                const _elCol  = parseFloat(_elPct) >= 1 ? '#FF4D4D' : '#FFB547';
-                _estLossHtml = `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px;">
-                  <span style="color:#C2C2D4">Est. Loss</span>
-                  <span style="font-weight:700;font-family:'Space Mono',monospace;font-size:12px;color:${_elCol}">${_elFmt} ${_elSym} (${_elPct}%)</span>
-                </div>`;
-              }
-
               // MEV factor rows — Advanced mode only
               let _mevFactorRows = '';
               if (ns.widgetMode !== 'simple') {
@@ -2018,9 +1999,7 @@
               if (ns.widgetMode === 'simple') {
                 const mf = mevRisk.factors ?? [];
                 const mfTip = mf.length ? 'MEV factors:\n' + mf.slice(0,4).map(f => `• ${f.factor} (${f.score})`).join('\n') : 'No bot risk detected';
-                const estLoss = ns.lastRiskResult?.estimatedLossNative; const estSym = ns.lastRiskResult?.inputSymbol ?? ct.inputSymbol ?? 'SOL';
-                const lossTip = estLoss != null ? `Estimated loss: ${estLoss} ${estSym}` : 'Estimated loss: —';
-                const tip = (_mevTip + '\n\n' + lossTip + '\n\n' + mfTip).replace(/"/g,'&quot;');
+                const tip = (_mevTip + '\n\n' + mfTip).replace(/"/g,'&quot;');
                 return `<div title="${tip}" style="${_mbg};border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help">
                   <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;">
                     <span style="color:#9945FF;font-weight:600">Bot Attack Risk</span>
@@ -2033,7 +2012,6 @@
                   <span style="color:#9945FF;font-weight:600">Bot Attack Risk</span>
                   <span style="font-weight:700;font-size:12px;font-family:'Space Mono',monospace;color:${_mc}">${_badge}</span>
                 </div>
-                ${_estLossHtml}
                 ${_mevFactorRows}
                 ${_expHtml}
               </div>`;
@@ -2046,7 +2024,21 @@
               const _erc   = ({CRITICAL:'#FF4D4D',HIGH:'#FFB547',MEDIUM:'#9945FF',LOW:'#14F195'})[_er.level] ?? '#C2C2D4';
               const _erbg  = `background:${_erc}11;border:1px solid ${_erc}44`;
               const _erBadge = ns.widgetMode === 'simple' ? _riskLabel(_er.level) : `${_er.level} \u00b7 ${_er.score}/100`;
-              const _erTip = `Execution Risk \u2014 how risky this specific swap is to execute.&#10;Covers: slippage tolerance, price impact, route complexity, network congestion, and trade size.&#10;Score 0\u2013100: LOW <25 | MEDIUM 25\u201349 | HIGH 50\u201374 | CRITICAL 75+`;
+              // Sum of every calculateRisk lossContrib (slippage, price impact, trade size, congestion) — not MEV.
+              const _eln   = _er.estimatedLossNative ?? null;
+              const _elSym = _er.inputSymbol ?? ct.inputSymbol ?? 'SOL';
+              const _elUsd = _er.swapAmountUsd ?? _er.swapAmount ?? 0;
+              const _elPct = _elUsd > 0 ? ((_er.estimatedLoss / _elUsd) * 100).toFixed(2) : null;
+              const _elTxt = _eln == null ? '\u2014'
+                : _eln < 0.000001 ? 'none'
+                : `${_eln < 0.0001 ? _eln.toFixed(6) : _eln < 0.01 ? _eln.toFixed(4) : _eln.toFixed(2)} ${_elSym}${_elPct != null ? ` (${_elPct}%)` : ''}`;
+              const _elCol = (_eln == null || _eln < 0.000001) ? '#14F195'
+                : (_elPct != null && parseFloat(_elPct) >= 1) ? '#FF4D4D' : '#FFB547';
+              const _erTip = `Execution Risk \u2014 how risky this specific swap is to execute.&#10;Covers: slippage tolerance, price impact, route complexity, network congestion, and trade size.&#10;Score 0\u2013100: LOW <25 | MEDIUM 25\u201349 | HIGH 50\u201374 | CRITICAL 75+&#10;&#10;Est. loss: ${_elTxt} \u2014 worst-case value lost to these execution factors. Separate from bot attacks (see Bot Attack Risk).`;
+              const _estLossRow = ns.widgetMode === 'simple' ? '' : `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:5px">
+                  <span style="color:#C2C2D4;cursor:help" title="Worst-case value lost to slippage, price impact and trade size on this swap. Does not include bot attacks \u2014 those are shown separately under Bot Attack Risk.">Est. Loss</span>
+                  <span style="font-weight:700;font-family:'Space Mono',monospace;font-size:12px;color:${_elCol}">${_elTxt}</span>
+                </div>`;
               let _erRows = '';
               if (ns.widgetMode !== 'simple') {
                 const _ef = _er.factors ?? [];
@@ -2064,10 +2056,11 @@
                 }
               }
               return `<div title="${_erTip}" style="${_erbg};border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help">
-                <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">
+                <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px${_estLossRow ? ';margin-bottom:5px;padding-bottom:5px;border-bottom:1px solid rgba(255,255,255,0.06)' : ''}">
                   <span style="color:${_erc};font-weight:600">Execution Risk</span>
                   <span style="font-weight:700;font-size:12px;font-family:'Space Mono',monospace;color:${_erc}">${_erBadge}</span>
                 </div>
+                ${_estLossRow}
                 ${_erRows}
               </div>`;
             })()}
