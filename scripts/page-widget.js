@@ -25,6 +25,14 @@
       .replace(/'/g, '&#39;');
   }
 
+  // Quote accuracy display rule: 100.00% asserts an exact-or-better fill, so only a confirmed
+  // on-chain comparison may show it. Short fills and pre-execution estimates floor at 99.99%
+  // rather than rounding up into a perfect score.
+  function accForDisplay(v, provenOnChain) {
+    const n = Math.max(0, Math.min(100, v));
+    return (provenOnChain && n >= 100) ? 100 : Math.min(99.99, n);
+  }
+
   // ── Update status text safely ────────────────────────────────────────────
   function updateWidgetStatus(newStatus) {
     const status = document.getElementById('sr-pill-status');
@@ -738,10 +746,10 @@
               {
                 let _qAcc = null, _qOnChain = false;
                 if (h.quoteAccuracy != null && isFinite(parseFloat(h.quoteAccuracy))) {
-                  _qAcc = Math.max(0, Math.min(100, parseFloat(h.quoteAccuracy))); _qOnChain = true;
+                  _qAcc = accForDisplay(parseFloat(h.quoteAccuracy), true); _qOnChain = true;
                 } else if (!h.optimized && h.priceImpactPct != null) {
                   const _qi = Math.abs(parseFloat(h.priceImpactPct));
-                  if (isFinite(_qi)) _qAcc = Math.max(0, 100 - _qi * 100);
+                  if (isFinite(_qi)) _qAcc = accForDisplay(100 - _qi * 100, false);
                 }
                 if (_qAcc != null) {
                   const col = _qAcc>=99?'#14F195':_qAcc>=97?'#FFB547':'#FF4D4D';
@@ -2781,11 +2789,11 @@ ${!ns.axiomVerifyOnly ? '' : `
               if (h.priceImpactPct != null || h.quoteAccuracy != null) {
                 let accVal, accOnChain = false;
                 if (h.quoteAccuracy != null && isFinite(parseFloat(h.quoteAccuracy))) {
-                  accVal = Math.max(0, Math.min(100, parseFloat(h.quoteAccuracy)));
+                  accVal = accForDisplay(parseFloat(h.quoteAccuracy), true);
                   accOnChain = true;
                 } else if (h.priceImpactPct != null) {
                   const impact = Math.abs(parseFloat(h.priceImpactPct));
-                  if (isFinite(impact)) accVal = Math.max(0, 100 - impact * 100);
+                  if (isFinite(impact)) accVal = accForDisplay(100 - impact * 100, false);
                 }
                 if (accVal != null) {
                   const col = accVal >= 99 ? '#14F195' : accVal >= 97 ? '#FFB547' : '#FF4D4D';
@@ -3018,10 +3026,10 @@ ${!ns.axiomVerifyOnly ? '' : `
               {
                 let _qAcc = null, _qOnChain = false;
                 if (h.quoteAccuracy != null && isFinite(parseFloat(h.quoteAccuracy))) {
-                  _qAcc = Math.max(0, Math.min(100, parseFloat(h.quoteAccuracy))); _qOnChain = true;
+                  _qAcc = accForDisplay(parseFloat(h.quoteAccuracy), true); _qOnChain = true;
                 } else if (h.priceImpactPct != null) {
                   const _qi = Math.abs(parseFloat(h.priceImpactPct));
-                  if (isFinite(_qi)) _qAcc = Math.max(0, 100 - _qi * 100);
+                  if (isFinite(_qi)) _qAcc = accForDisplay(100 - _qi * 100, false);
                 }
                 if (_qAcc != null) {
                   const _qCol = _qAcc>=99?'#14F195':_qAcc>=97?'#FFB547':'#FF4D4D';
@@ -3170,8 +3178,8 @@ ${!ns.axiomVerifyOnly ? '' : `
           }
           if (h.priceImpactPct != null || h.quoteAccuracy != null) {
             let accVal, accOnChain = false;
-            if (h.quoteAccuracy != null && isFinite(parseFloat(h.quoteAccuracy))) { accVal = Math.max(0, Math.min(100, parseFloat(h.quoteAccuracy))); accOnChain = true; }
-            else if (h.priceImpactPct != null) { const imp = Math.abs(parseFloat(h.priceImpactPct)); if (isFinite(imp)) accVal = Math.max(0, 100 - imp * 100); }
+            if (h.quoteAccuracy != null && isFinite(parseFloat(h.quoteAccuracy))) { accVal = accForDisplay(parseFloat(h.quoteAccuracy), true); accOnChain = true; }
+            else if (h.priceImpactPct != null) { const imp = Math.abs(parseFloat(h.priceImpactPct)); if (isFinite(imp)) accVal = accForDisplay(100 - imp * 100, false); }
             if (accVal != null) {
               const col = accVal>=99?'#14F195':accVal>=97?'#FFB547':'#FF4D4D';
               const qual = accVal>=99?'Excellent — quoted rate.':accVal>=97?'Good — minor slippage.':'Notable slippage.';
@@ -3307,7 +3315,7 @@ ${!ns.axiomVerifyOnly ? '' : `
             // Quote Accuracy row
             const _xLbl2 = h.routeSource === 'pump.fun' ? (h.jitoBundle ? 'pump.fun + Jito' : 'pump.fun') : h.routeSource === 'raydium' ? (h.jitoBundle ? 'Raydium + Jito' : 'Raydium') : (h.swapType === 'rfq' ? 'RFQ' : h.swapType === 'gasless' ? 'Gasless' : 'DEX');
             if (h.quoteAccuracy != null && isFinite(parseFloat(h.quoteAccuracy))) {
-              const _acc3 = Math.max(0, Math.min(100, parseFloat(h.quoteAccuracy)));
+              const _acc3 = accForDisplay(parseFloat(h.quoteAccuracy), true);
               const _col3 = _acc3>=99?'#14F195':_acc3>=97?'#FFB547':'#FF4D4D';
               t += row(`<span title="Actual on-chain fill accuracy \u2014 actual tokens received vs. the ${_xLbl2}-quoted amount, verified from the confirmed Solana transaction." style="cursor:help">${_xLbl2} Quote Accuracy \u2713</span>`, _acc3.toFixed(2)+'%', _col3);
             } else if (h.quotedOut != null || h.rawOutAmount != null) {

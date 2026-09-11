@@ -171,6 +171,32 @@
     }
   }
 
+  // -- Raydium pre-execution quote ------------------------------------------
+  // Raydium keeps quoting in the background while the page is open, so a bare stored output
+  // can outlive the trade it belongs to. Every source is tagged with its pair and read back
+  // through rdmQuotedOut, which is what lets fetchWidgetQuote keep the value instead of
+  // wiping it: a mismatched or aged quote is rejected at read time rather than at write time.
+  const _RDM_QUOTE_MAX_AGE_MS = 120_000;
+  function rdmQuoteKey(inputMint, outputMint) {
+    return (inputMint && outputMint) ? inputMint + '>' + outputMint : null;
+  }
+  function rdmQuotedOut(inputMint, outputMint) {
+    const _sp = ns._rdmSignParams;
+    if (_sp?._computeOutAmount != null && _sp.inputMint === inputMint && _sp.outputMint === outputMint) {
+      return Number(_sp._computeOutAmount);
+    }
+    const _key = rdmQuoteKey(inputMint, outputMint);
+    if (!_key) return null;
+    if (ns._rdmLastComputeKey === _key && ns._rdmLastComputeOut != null &&
+        (Date.now() - (ns._rdmLastComputeAt ?? 0)) < _RDM_QUOTE_MAX_AGE_MS) {
+      return Number(ns._rdmLastComputeOut);
+    }
+    // Slippage floor decoded from the tx itself. It understates the quote by the slippage
+    // tolerance, so it ranks last and is only worth using when nothing better exists.
+    if (ns._rdmMinAmountOutKey === _key && ns._rdmMinAmountOut != null) return Number(ns._rdmMinAmountOut);
+    return null;
+  }
+
   // -- Raydium Trade API helpers --------------------------------------------
   // Fetch a competitive quote from Raydium's on-chain AMM pools via the Trade API.
   // Returns the raw Raydium compute response data object, or null on any failure.
@@ -178,6 +204,8 @@
   // blocks direct fetch() from MAIN world scripts to third-party origins.
   async function fetchRaydiumQuote(inputMint, outputMint, amountStr, slippageBps) {
     try {
+      // txVersion=V0 is load-bearing: fetchWidgetQuote falls back to this route when Jupiter
+      // returns a v1 transaction the wallet cannot sign. Raising it removes that escape hatch.
       const url = 'https://transaction-v1.raydium.io/compute/swap-base-in' +
         '?inputMint='  + inputMint +
         '&outputMint=' + outputMint +
@@ -462,7 +490,6 @@
       ns.widgetLastOrder       = null;
       ns.widgetLastTxSig       = null;
       ns.widgetLastTxPair      = null;
-      ns._rdmLastComputeOut    = null;  // cleared each new fetch so stale Raydium baseline never bleeds
       ns._rdmSignParams        = null;  // cleared so stale _computeOutAmount from previous trade never contaminates baseline
       ns.widgetPausedForToken  = false;
       ns.renderWidgetPanel();
@@ -587,6 +614,18 @@
       if (!order_raw.requestId)   throw new Error('No requestId in order response');
       let order = order_raw;
 
+      const _hasV1Tx = (o) => {
+        const txs = Array.isArray(o?.transaction) ? o.transaction : (o?.transaction ? [o.transaction] : []);
+        return txs.some(t => {
+          try { return ns.wireTxVersion(Uint8Array.from(atob(t), c => c.charCodeAt(0))) === 1; }
+          catch (_) { return false; }
+        });
+      };
+      // Ultra exposes no way to request a transaction version, so an unsignable v1 order can
+      // only be answered by switching routes. Raydium is pinned to txVersion=V0, making it the
+      // one route we can still sign — worth taking below even when it quotes less than Jupiter.
+      const _jupCantSign = _hasV1Tx(order_raw) && !ns.walletSupportsTxVersion(1);
+
       // -- Raydium vs Jupiter comparison ------------------------------------
       // _rdmComputePromise was fired before Jupiter's /order so it ran in parallel.
       // Replace the order only when Raydium gives strictly more output tokens AND
@@ -657,7 +696,7 @@
           const _rdmNetOut = _rdmOut - _tipToTokens(_rdmBundleTip) + _mevCreditTokens;
           const _jupNetOut = _jupOut - _tipToTokens(_jupTip);
           const _rdmOutAdj = _rdmNetOut; // alias used in the if-block below
-          if (_rdmData && _rdmNetOut > _jupNetOut) {
+          if (_rdmData && (_rdmNetOut > _jupNetOut || _jupCantSign)) {
             // Scale Jupiter's outUsdValue by the output token ratio to get a Raydium estimate
             const _rdmOutUsd = (order_raw.outUsdValue != null && _jupOut > 0)
               ? order_raw.outUsdValue * (_rdmOut / _jupOut) : null;
@@ -760,21 +799,22 @@
           // when Jupiter won (no _rdmSignParams set in that case). On raydium.io there is no
           // jupiterLiveQuote, so widgetBaselineRawOut would otherwise be null, leaving Est.
           // Net Benefit as '?' even though we know exactly what Raydium would have given.
-          ns._rdmLastComputeOut = _rdmData?.outputAmount != null ? String(_rdmData.outputAmount) : null;
+          // Only overwrite on a real result — a skipped or timed-out compute must not erase the
+          // quote Raydium's own page already produced, which is the one a proceed-anyway trade
+          // is measured against.
+          if (_rdmData?.outputAmount != null) {
+            ns._rdmLastComputeOut = String(_rdmData.outputAmount);
+            ns._rdmLastComputeKey = rdmQuoteKey(inputMint, outputMint);
+            ns._rdmLastComputeAt  = Date.now();
+          }
         } catch (_rdmErr) {
         }
       }
 
-      // Decline rather than build a route the wallet cannot sign. Advertisement is absent
-      // on most wallets at the v1 gate, so "unconfirmed" has to mean "no" — the DEX's own
-      // transaction is released untouched instead.
-      const _orderTxs = Array.isArray(order.transaction) ? order.transaction
-                      : (order.transaction ? [order.transaction] : []);
-      const _orderHasV1 = _orderTxs.some(t => {
-        try { return ns.wireTxVersion(Uint8Array.from(atob(t), c => c.charCodeAt(0))) === 1; }
-        catch (_) { return false; }
-      });
-      if (_orderHasV1 && !ns.walletSupportsTxVersion(1)) {
+      // Last resort once no signable route is left. Advertisement is absent on most wallets
+      // at the v1 gate, so "unconfirmed" has to mean "no" — the DEX's own transaction is
+      // released untouched instead.
+      if (_hasV1Tx(order) && !ns.walletSupportsTxVersion(1)) {
         console.warn('[ZendIQ] route returned a v1 transaction and the wallet has not confirmed v1 support — not optimising this trade');
         ns._autoProtectPending = false;
         ns.widgetLastOrder     = null;
@@ -881,18 +921,19 @@
           // ZendIQ's Jupiter order against what Raydium would have given ? not Raydium's
           // slippage floor (minimumAmountOut) which understates the actual output by ~0.5%.
           const _isRdmSite = ns.widgetCapturedTrade?.source === 'raydium';
+          const _rdmQuoted = _isRdmSite ? rdmQuotedOut(inputMint, outputMint) : null;
           if (_isRdmSite && ns._rdmSignParams?._computeOutAmount) {
             // Raydium wins: ZendIQ serves the Raydium order.
             // Baseline = Jupiter's competing quote so Est. Net Benefit shows the real routing
             // gain: "Raydium gave X more tokens than Jupiter would have."
             // order_raw.outAmount is Jupiter's output; order.outAmount is Raydium's output.
             ns.widgetBaselineRawOut = order_raw.outAmount;
-          } else if (_isRdmSite && ns._rdmLastComputeOut) {
+          } else if (_isRdmSite && _rdmQuoted != null) {
             // Jupiter wins on raydium.io: ZendIQ serves Jupiter Ultra instead of Raydium.
             // Baseline = Raydium compute output (what user would have gotten without ZendIQ).
             // Savings = Jupiter Ultra outAmount - Raydium outAmount.
             // jupiterLiveQuote is null on raydium.io so the normal lq.outAmount path gives null.
-            ns.widgetBaselineRawOut = ns._rdmLastComputeOut;
+            ns.widgetBaselineRawOut = String(_rdmQuoted);
           } else if (_isRdmSite) {
             // On raydium.io but Raydium compute timed out ? no comparison available yet.
             // Use ZendIQ's own order as neutral placeholder so the display shows
@@ -1048,10 +1089,10 @@
       if (!silent && !noAutoAccept) {
         if (ns._quickProbeTimer) { clearTimeout(ns._quickProbeTimer); ns._quickProbeTimer = null; }
         // Re-probe when: (a) baseline is null (route-type mismatch on jup.ag), or
-        // (b) on raydium.io and Raydium compute timed out (_rdmLastComputeOut still null) ?
-        //     the neutral order.outAmount placeholder was used; retry to get a real comparison.
+        // (b) on raydium.io and no usable Raydium quote for this pair ? the neutral
+        //     order.outAmount placeholder was used; retry to get a real comparison.
         const _needProbe = ns.widgetBaselineRawOut === null ||
-          (ns.widgetCapturedTrade?.source === 'raydium' && !ns._rdmLastComputeOut);
+          (ns.widgetCapturedTrade?.source === 'raydium' && rdmQuotedOut(inputMint, outputMint) == null);
         if (_needProbe) {
           ns._quickProbeTimer = setTimeout(() => {
             ns._quickProbeTimer = null;
@@ -2623,6 +2664,8 @@
     handleOptimiseTrade,
     fetchWidgetQuote,
     signWidgetSwap,
+    rdmQuoteKey,
+    rdmQuotedOut,
     deriveAta: _deriveATA,
   });
 })();

@@ -514,19 +514,17 @@
             ns._confirmRiskSnapshot = null;
             const _rdmLq     = ns.jupiterLiveQuote;
             const _rdmCt     = ns.widgetCapturedTrade;
-            const _rdmRawOut = ns._rdmOriginalContext?.rawOut
-                            ?? ns._rdmSignParams?._computeOutAmount
-                            ?? (ns._rdmLastComputeOut != null ? Number(ns._rdmLastComputeOut) : null)
-                            ?? ns._rdmMinAmountOut ?? null;
             const _TOKEN_DEC_R = { 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 6, 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 6, 'So11111111111111111111111111111111111111112': 9 };
             const _TOKEN_SYM_R = { 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT', 'So11111111111111111111111111111111111111112': 'SOL' };
             const _rdmInMint  = _rdmCt?.inputMint  ?? window.__zendiq_last_order_params?.inputMint  ?? null;
             const _rdmOutMint = _rdmCt?.outputMint ?? window.__zendiq_last_order_params?.outputMint ?? null;
+            const _rdmRawOut = ns.rdmQuotedOut?.(_rdmInMint, _rdmOutMint) ?? null;
             const _rdmOutDec  = _rdmCt?.outputDecimals ?? (_TOKEN_DEC_R[_rdmOutMint] ?? 6);
             const _rdmInDec   = _rdmCt?.inputDecimals  ?? (_TOKEN_DEC_R[_rdmInMint]  ?? 9);
             const _rdmRawAmt  = window.__zendiq_last_order_params?.amount;
             const _rdmInAmt   = _rdmCt?.amountUI ?? (_rdmRawAmt != null ? Number(_rdmRawAmt) / Math.pow(10, _rdmInDec) : null);
             const _rdmOutAmt  = _rdmRawOut != null ? _rdmRawOut / Math.pow(10, _rdmOutDec) : null;
+            if (_rdmRawOut == null) console.warn('[ZendIQ] Raydium proceed-anyway: no pre-execution quote for this pair — Quote Accuracy will be unavailable for this trade');
             const rdmResp = origFetch(resource, init);
             rdmResp.then(r => r.clone().json().then(data => {
               const sig = (typeof data?.result === 'string' && data.result.length >= 40) ? data.result : null;
@@ -923,12 +921,18 @@
         // so the fetch override never sees it. We store the result in _rdmLastComputeOut
         // so onDecision (Proceed anyway) always has a quotedOut for Quote Accuracy.
         if (url && url.includes('raydium.io') && url.includes('/compute/')) {
+          const _cq  = new URLSearchParams(url.split('?')[1] ?? '');
+          const _ckey = ns.rdmQuoteKey?.(_cq.get('inputMint'), _cq.get('outputMint')) ?? null;
           this.addEventListener('load', function () {
             try {
               const d = ns.tryParseJson(this.responseText);
               const rawOut = d?.data?.outputAmount ?? d?.data?.amountOut ?? d?.data?.outAmount
                           ?? d?.outputAmount ?? d?.amountOut ?? null;
-              if (rawOut != null) ns._rdmLastComputeOut = String(rawOut);
+              if (rawOut != null) {
+                ns._rdmLastComputeOut = String(rawOut);
+                ns._rdmLastComputeKey = _ckey;
+                ns._rdmLastComputeAt  = Date.now();
+              }
             } catch (_) {}
           }, { passive: true });
         }

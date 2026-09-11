@@ -467,13 +467,21 @@ function _exchangeLabel(h) {
     default:          return 'Jupiter · AMM';
   }
 }
+// Quote accuracy display rule: 100.00% asserts an exact-or-better fill, so only a confirmed
+// on-chain comparison may show it. Short fills and pre-execution estimates floor at 99.99%
+// rather than rounding up into a perfect score.
+function _accForDisplay(v, provenOnChain) {
+  const n = Math.max(0, Math.min(100, v));
+  return (provenOnChain && n >= 100) ? 100 : Math.min(99.99, n);
+}
+
 // Quote accuracy: how close to the ZendIQ-quoted rate the execution landed.
 // For optimized trades: only returns the confirmed on-chain value (null = pending).
 // For unoptimized trades: falls back to priceImpactPct estimate.
 function _quoteAccuracy(h) {
   // Prefer actual on-chain accuracy (populated ~3–10s after swap confirms)
   if (h.quoteAccuracy != null && isFinite(parseFloat(h.quoteAccuracy))) {
-    const acc = Math.max(0, Math.min(100, parseFloat(h.quoteAccuracy)));
+    const acc = _accForDisplay(parseFloat(h.quoteAccuracy), true);
     const col = acc >= 99 ? '#14F195' : acc >= 97 ? '#FFB547' : '#FF4D4D';
     return { text: acc.toFixed(2) + '%', color: col, onChain: true };
   }
@@ -483,7 +491,7 @@ function _quoteAccuracy(h) {
   if (h.priceImpactPct != null) {
     const impact = Math.abs(parseFloat(h.priceImpactPct));
     if (isFinite(impact)) {
-      const acc = Math.max(0, 100 - impact * 100);
+      const acc = _accForDisplay(100 - impact * 100, false);
       const col = acc >= 99 ? '#14F195' : acc >= 97 ? '#FFB547' : '#FF4D4D';
       return { text: acc.toFixed(2) + '%', color: col, onChain: false };
     }
@@ -491,7 +499,7 @@ function _quoteAccuracy(h) {
   if (h.rawOutAmount != null && h.baselineRawOut != null) {
     const ratio = (Number(h.rawOutAmount) / Number(h.baselineRawOut)) * 100;
     if (isFinite(ratio) && ratio > 0) {
-      const capped = Math.min(ratio, 100);
+      const capped = _accForDisplay(ratio, false);
       const col = capped >= 99 ? '#14F195' : capped >= 97 ? '#FFB547' : '#FF4D4D';
       return { text: capped.toFixed(2) + '%', color: col, onChain: false };
     }

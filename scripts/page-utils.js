@@ -280,7 +280,12 @@
         let quoteAccuracy = null;
         if (quotedRawOut != null && quotedRawOut > 0 && outputDecimals != null) {
           const quotedOut = Number(quotedRawOut) / Math.pow(10, outputDecimals);
-          if (quotedOut > 0) quoteAccuracy = Math.min(100, (actualOut / quotedOut) * 100);
+          if (quotedOut > 0) {
+            const raw = (actualOut / quotedOut) * 100;
+            // A sub-0.01% shortfall would round to 100.00% and read as a perfect fill next to
+            // the non-zero delta shown above it. 100% is reserved for an exact or better fill.
+            quoteAccuracy = raw >= 100 ? 100 : Math.min(99.99, raw);
+          }
         }
 
         return { actualOut, quoteAccuracy };

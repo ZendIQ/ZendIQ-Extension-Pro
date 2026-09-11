@@ -147,7 +147,13 @@
           }
           // Store minimumAmountOut for emergency fallback — page-trade.js will override
           // widgetBaselineRawOut with the real compute outAmount once the quote arrives.
+          // Tagged with the pair so a decode failure on a later trade cannot leave this
+          // trade's floor in place and turn it into a confident, wrong Quote Accuracy.
           ns._rdmMinAmountOut = minimumAmountOut ?? null;
+          ns._rdmMinAmountOutKey = ns.rdmQuoteKey?.(
+            window.__zendiq_last_order_params?.inputMint  ?? ns.widgetCapturedTrade?.inputMint,
+            window.__zendiq_last_order_params?.outputMint ?? ns.widgetCapturedTrade?.outputMint,
+          ) ?? null;
         }
         // If the decoder couldn't identify the instruction (unknown pool), the amount may
         // already be in __zendiq_last_order_params from onNetworkRequest — that's fine.
@@ -209,13 +215,12 @@
         // Record to Activity
         if (_sig) {
           const _inAmt  = _ct?.amountUI ?? null;
-          // Prefer the Raydium compute API output (stored by fetchWidgetQuote as _computeOutAmount)
-          // over the tx minimum-amount-out (slippage floor). _rdmSignParams is only set when Raydium
-          // wins the comparison; when Jupiter wins, fall back to _rdmLastComputeOut (always stored
-          // after any successful compute fetch) then to _rdmMinAmountOut (slippage floor from tx bytes).
-          const _rdmRawOut = ns._rdmSignParams?._computeOutAmount
-            ?? (ns._rdmLastComputeOut != null ? Number(ns._rdmLastComputeOut) : null)
-            ?? (ns._rdmMinAmountOut  != null ? Number(ns._rdmMinAmountOut)  : null);
+          // Best available pre-execution quote for this pair: our own compute result when
+          // Raydium won the comparison, else the quote Raydium's own page produced, else the
+          // slippage floor decoded from the tx. Null here means no quote genuinely existed,
+          // and the card falls back to the on-chain-only row rather than inventing one.
+          const _rdmRawOut = ns.rdmQuotedOut?.(_inMint, _outMint) ?? null;
+          if (_rdmRawOut == null) console.warn('[ZendIQ] Raydium proceed-anyway: no pre-execution quote for this pair — Quote Accuracy will be unavailable for this trade');
           const _outAmt = _rdmRawOut != null ? _rdmRawOut / Math.pow(10, _outDec) : null;
           const entry = {
             signature:    _sig,
