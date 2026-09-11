@@ -449,6 +449,10 @@
     const bodyInner = widget.querySelector('#sr-body-inner');
     if (!bodyInner) return;
 
+    // Re-fit here rather than at each expand site — every path that opens the
+    // widget renders through this function, several without calling it directly.
+    if (widget.classList.contains('expanded')) _fitBodyHeight(widget);
+
     // ── Auto-refresh timer management ────────────────────────────────────
     // Keep quote fresh while user is reading it; stop when signing or swapped
     const timerActive = ns.widgetSwapStatus === 'ready';
@@ -3594,13 +3598,39 @@ ${!ns.axiomVerifyOnly ? '' : `
   }
 
   // ── _fitBodyHeight — update --sr-body-mh CSS var based on widget position ──
+  const _SR_MARGIN = 16, _SR_MIN_BODY = 240;
+
+  // Raydium applies a CSS zoom to body children. getBoundingClientRect and
+  // innerHeight are visual px, but CSS lengths we set are local px — mixing the
+  // two made every cap too generous by the zoom factor.
+  function _srZoom(el) {
+    const z = parseFloat(getComputedStyle(el).zoom);
+    return Number.isFinite(z) && z > 0 ? z : 1;
+  }
+
   function _fitBodyHeight(widget) {
     if (!widget) return;
-    const rect  = widget.getBoundingClientRect();
-    const pill  = widget.querySelector('#sr-pill');
-    const pillH = pill ? pill.offsetHeight : 44;
-    const available = Math.max(180, window.innerHeight - rect.top - pillH - 16);
+    const body = widget.querySelector('#sr-body');
+    if (!body) return;
+
+    const z = _srZoom(widget);
+    let wRect = widget.getBoundingClientRect();
+    // Measure where the body actually starts rather than assuming a pill height —
+    // this picks up the pill, borders and any adapter chrome above it.
+    const head = Math.max(0, body.getBoundingClientRect().top - wRect.top);
+
+    // A position saved at one window size can leave too little room at another,
+    // so pull the widget up rather than let the body run past the viewport.
+    const maxTop = window.innerHeight - head - (_SR_MIN_BODY * z) - _SR_MARGIN;
+    if (wRect.top > maxTop) {
+      widget.style.top = (Math.max(_SR_MARGIN, maxTop) / z) + 'px';
+      wRect = widget.getBoundingClientRect();
+    }
+
+    const visual = Math.max(_SR_MIN_BODY * z, window.innerHeight - wRect.top - head - _SR_MARGIN);
+    const available = visual / z;
     widget.style.setProperty('--sr-body-mh', available + 'px');
+    widget.style.setProperty('--sr-max-h', (head / z + available) + 'px');
   }
 
   // ── injectStatusIndicator ────────────────────────────────────────────────
@@ -3611,6 +3641,8 @@ ${!ns.axiomVerifyOnly ? '' : `
     style.textContent = `
       #sr-widget {
         position: fixed !important;
+        /* Raydium zooms body children — render at our own scale, not the host's. */
+        zoom: 1 !important;
         top: 16px; right: 16px;
         z-index: 2147483647;
         width: 310px !important;
@@ -3625,7 +3657,14 @@ ${!ns.axiomVerifyOnly ? '' : `
         user-select: none;
       }
       #sr-widget *, #sr-widget *::before, #sr-widget *::after { box-sizing: border-box !important; }
-      #sr-widget.expanded { width: 400px !important; min-width: 400px !important; max-width: 400px !important; }
+      /* Cap the outer box, not just the body — anything below #sr-body-inner
+         (footer, borders) is then inside the cap rather than pushed past it. */
+      #sr-widget.expanded {
+        width: 400px !important; min-width: 400px !important; max-width: 400px !important;
+        display: flex; flex-direction: column;
+        max-height: var(--sr-max-h, calc(100vh - 88px));
+      }
+      #sr-widget.expanded #sr-pill { flex-shrink: 0; }
 
       @keyframes srWidgetIn {
         from { opacity:0; transform: translateX(14px) scale(0.92); }
@@ -3716,7 +3755,8 @@ ${!ns.axiomVerifyOnly ? '' : `
         border-radius:0 0 16px 16px;
       }
       #sr-widget.expanded #sr-body {
-        max-height: var(--sr-body-mh, calc(100vh - 80px));
+        max-height: var(--sr-body-mh, calc(100vh - 132px));
+        flex: 1 1 auto; min-height: 0;
         overflow: hidden;
         display: flex; flex-direction: column;
         border-color: rgba(153,69,255,0.25);
@@ -3823,9 +3863,10 @@ ${!ns.axiomVerifyOnly ? '' : `
       dragging    = true;
       _dragMoved  = false;
       const rect  = el.getBoundingClientRect();
+      const mdZ   = _srZoom(el);
       el.style.right = 'auto';
-      el.style.left  = rect.left + 'px';
-      el.style.top   = rect.top  + 'px';
+      el.style.left  = (rect.left / mdZ) + 'px';
+      el.style.top   = (rect.top  / mdZ) + 'px';
       startX    = e.clientX;
       startY    = e.clientY;
       startLeft = rect.left;
@@ -3839,10 +3880,15 @@ ${!ns.axiomVerifyOnly ? '' : `
       const dy = e.clientY - startY;
       // Mark as a real drag once the pointer moves more than 6px
       if (!_dragMoved && Math.sqrt(dx * dx + dy * dy) > 6) _dragMoved = true;
-      const newLeft = Math.max(0, Math.min(window.innerWidth  - el.offsetWidth,  startLeft + dx));
-      const newTop  = Math.max(0, Math.min(window.innerHeight - el.offsetHeight, startTop  + dy));
-      el.style.left = newLeft + 'px';
-      el.style.top  = newTop  + 'px';
+      // Clamp against the header, not the full widget height — an expanded widget
+      // is as tall as the space beneath it, which would otherwise pin it in place.
+      const z       = _srZoom(el);
+      const pillH   = (el.querySelector('#sr-pill')?.offsetHeight ?? 44) * z;
+      const maxTop  = Math.max(0, window.innerHeight - pillH - (_SR_MIN_BODY * z) - _SR_MARGIN);
+      const newLeft = Math.max(0, Math.min(window.innerWidth - el.offsetWidth * z, startLeft + dx));
+      const newTop  = Math.max(0, Math.min(maxTop, startTop + dy));
+      el.style.left = (newLeft / z) + 'px';
+      el.style.top  = (newTop  / z) + 'px';
     });
 
     document.addEventListener('mouseup', () => {
@@ -3864,7 +3910,7 @@ ${!ns.axiomVerifyOnly ? '' : `
       el.style.right = 'auto';
       el.style.left  = _savedState.left + 'px';
       el.style.top   = _savedState.top  + 'px';
-      if (el.classList.contains('expanded')) ns._fitBodyHeight(el);
+      ns._fitBodyHeight(el);
     } else {
       // First open — wait for entrance animation then auto-expand and position
       // Position to the left of jup.ag's swap card, then auto-expand
