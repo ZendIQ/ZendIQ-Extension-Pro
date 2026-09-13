@@ -84,7 +84,8 @@
     if (ns) ns.axiomChain = c;
     if (c !== _chainLogged) {
       _chainLogged = c;
-      console.log('[ZQ:AXIOM] chain=' + c + (c === _CHAIN_SOL ? '' : ' \u2014 observe only: no intercept, no settings write, no Solana RPC'));
+      console.log('[ZQ:AXIOM] chain=' + c + (c === _CHAIN_SOL ? '' : ' \u2014 observe only: no intercept, no settings write, no Solana RPC'
+        + ' \u2014 url=' + window.location.pathname + window.location.search));
     }
     return c;
   }
@@ -92,6 +93,10 @@
   // Unknown counts as not-Solana everywhere a decision is made. Only positive
   // identification unlocks the intercept and the settings mutation.
   function _isSolana() { return _chain() === _CHAIN_SOL; }
+
+  // The pill is all a collapsed widget says. "Active" on a chain we never check
+  // is a coverage claim, and the explanatory card only appears once expanded.
+  function _pillActiveLabel() { return _chain() === _CHAIN_OTHER ? 'Solana only' : 'Active'; }
 
   // ── Analytics session state ──────────────────────────────────────────────
   // Axiom never loads page-wallet.js, so the session lifecycle that file owns on
@@ -217,7 +222,7 @@
     }
     ns.axiomSessionPubkey = pubkey;    // Update the pill status — same 'Active' label as Jupiter once wallet is known.
     try { ns.setWalletForSession?.(pubkey, 'axiom'); } catch (_) {}
-    try { ns.updateWidgetStatus?.('Active'); } catch (_) {}  }
+    try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {}  }
 
   // Recursively find a Solana pubkey in a parsed JSON object.
   // Only follows object keys that semantically relate to a wallet to reduce
@@ -341,7 +346,7 @@
         ns.axiomPositions.delete(open.wallet);
         console.log('[ZQ:AXIOM] position close resolved: wallet=' + open.wallet.slice(0, 8) + '… token=' + open.token.slice(0, 8) + '…');
       } else if (!ev.tokenAddress) {
-        console.warn('[ZQ:AXIOM] position close: no open position in map (opened before ZendIQ loaded) wallet=' + ev.walletAddress.slice(0, 8) + '…');
+        console.log('[ZQ:AXIOM] position close: no open position in map (opened before ZendIQ loaded) wallet=' + ev.walletAddress.slice(0, 8) + '…');
       }
     }
 
@@ -1005,7 +1010,7 @@
     if (!(await _acquireLock())) {
       // Another tab is mid-cycle. Not our failure, so it must not spend an attempt:
       // the ceiling exists to bound real failures, not contention.
-      console.warn('[ZQ:AXIOM] restore deferred (' + reason + ') — settings lock held elsewhere');
+      console.log('[ZQ:AXIOM] restore deferred (' + reason + ') — settings lock held elsewhere');
       return;
     }
 
@@ -1038,7 +1043,7 @@
     // only preset store this file knows how to read or put back. Off Solana there is
     // also no held click to release, so proceeding is only right if we did intercept.
     if (!_isSolana()) {
-      console.warn('[ZQ:AXIOM] optimization refused \u2014 chain=' + (ns?.axiomChain ?? _CHAIN_UNKNOWN));
+      console.log('[ZQ:AXIOM] optimization refused \u2014 chain=' + (ns?.axiomChain ?? _CHAIN_UNKNOWN));
       if (ns) ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'chain-not-supported' };
       if (ns?.axiomConfirmPending) ns.axiomProceedTrade?.();
       return false;
@@ -1498,7 +1503,9 @@
 
     if (!mint) {
       // Not cached — a later visit may resolve once the token is indexed.
-      console.warn('[ZQ:AXIOM] could not identify token for ' + addr.slice(0, 8) + '\u2026 \u2014 not scoring');
+      // Logged, not warned: this is an expected state for a new token and the widget
+      // reports it. console.warn would file it in the browser's extension error list.
+      console.log('[ZQ:AXIOM] could not identify token for ' + addr.slice(0, 8) + '\u2026 \u2014 not scoring');
       return null;
     }
     _mintCache.set(addr, mint);
@@ -1509,11 +1516,14 @@
   // A collapsed pill on a list page reads as coverage those Buy buttons do not have.
   // Once per page load, and never again once the user has said they know.
   let _listGapShown = false;
-  function _maybeShowListGap() {
+  function _maybeShowListGap(settled) {
     if (!ns || _listGapShown || ns.axiomListGapAck) return;
     if (_readMintFromUrl()) return;
     if (_chain() === _CHAIN_OTHER) return;
-    if (!document.getElementById('sr-widget')) { setTimeout(_maybeShowListGap, 300); return; }
+    // Axiom's router passes through address-less URLs mid-navigation, which would
+    // otherwise pop the list notice open on a token page.
+    if (!settled) { setTimeout(function () { _maybeShowListGap(true); }, 700); return; }
+    if (!document.getElementById('sr-widget')) { setTimeout(function () { _maybeShowListGap(true); }, 300); return; }
     _listGapShown = true;
     try { ns.openZendIQPanel?.(); } catch (_) {}
   }
@@ -1539,10 +1549,15 @@
     ns.axiomPendingBtnRef  = null;
     ns.axiomMintUnresolved = false;
     ns.axiomScoreFailed    = false;
+    // Both describe the token being left. Recompute is not guaranteed — the MEV
+    // block is skipped when the mint cannot be resolved — so a stale verdict would
+    // otherwise be shown, logged and optimised against under the new token's name.
+    ns.axiomMevRisk    = null;
+    ns.axiomRiskResult = null;
     if (!routeAddr) {
       // Left the token page for a list. ns._tokenScoreMint is deliberately left
       // set: the trade logger reads it to attribute a buy that is still settling.
-      if (ns.axiomSessionPubkey) { try { ns.updateWidgetStatus?.('Active'); } catch (_) {} }
+      if (ns.axiomSessionPubkey) { try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {} }
       try { ns.renderWidgetPanel?.(); } catch (_) {}
       _maybeShowListGap();
       return;
@@ -1560,7 +1575,7 @@
         return;
       }
       ns._tokenScoreMint = mint;
-      if (ns.axiomSessionPubkey) { try { ns.updateWidgetStatus?.('Active'); } catch (_) {} }
+      if (ns.axiomSessionPubkey) { try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {} }
       try { ns.renderWidgetPanel?.(); } catch (_) {}
       // Pre-fetch before the user buys — score is ready by the time the trade fires.
       if (ns.fetchTokenScore) {
@@ -1599,7 +1614,7 @@
         // page-wallet.js is not in the Axiom manifest — walletHooked is never set,
         // so the pill stays 'Connecting...' forever. Set 'Active' immediately since
         // we are monitoring regardless; _setPubkey upgrades nothing (already Active).
-        try { ns?.updateWidgetStatus?.('Active'); } catch (_) {}
+        try { ns?.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {}
       }
       if (document.readyState === 'loading') {
         window.addEventListener('DOMContentLoaded', _go, { once: true });
@@ -1959,15 +1974,18 @@
       const _uncheckedCard = _tokenUnchecked
         ? '<div style="background:rgba(255,181,71,0.07);border:1px solid rgba(255,181,71,0.35);border-radius:10px;padding:11px 13px;margin-bottom:10px">'
           + '<div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:6px">Token risk could not be checked</div>'
-          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:6px">'
-          +   (ns.axiomMintUnresolved
-                ? 'ZendIQ could not work out which token this page refers to — very new tokens are often not listed anywhere yet. '
-                : 'The token risk check did not complete. ')
-          +   'No mint authority, holder, liquidity or token age check has run.'
-          + '</div>'
+          + (_isSimple ? '' :
+              '<div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:6px">'
+              + (ns.axiomMintUnresolved
+                  ? 'ZendIQ could not work out which token this page refers to \u2014 very new tokens are often not listed anywhere yet. '
+                  : 'The token risk check did not complete. ')
+              + 'No mint authority, holder, liquidity or token age check has run.'
+              + '</div>')
           + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6">'
           +   '<b style="color:#E8E8F0">Treat this buy as unprotected on token risk.</b> '
-          +   'Your buy settings are still checked below. Reload to retry, or check the token yourself before buying.'
+          +   (_isSimple
+                ? 'Your buy settings are still checked below.'
+                : 'Your buy settings are still checked below. Reload to retry, or check the token yourself before buying.')
           + '</div></div>'
         : '';
 
@@ -2005,13 +2023,34 @@
       const _compLvl = _cmp.level;
       const _cc      = _c(_compLvl);
       const _hasAnyRisk = mevRisk || execRisk || hasScore;
+      // An unloaded dimension contributes 0 to the weighted sum, so a partial score
+      // is not comparable to a full one. Name the basis rather than let the badge imply three.
+      const _dims    = [
+        { key: 'Execution',  loaded: !!execRisk },
+        { key: 'Bot Attack', loaded: !!mevRisk  },
+        { key: 'Token Risk', loaded: !!hasScore },
+      ];
+      const _onNames = _dims.filter(d => d.loaded).map(d => d.key);
+      const _offName = _dims.filter(d => !d.loaded).map(d => d.key);
       const _compBadge = _hasAnyRisk
         ? (_isSimple ? _rl(_compLvl) : (_compLvl + ' \u00b7 ' + _comp + '/100'))
         : '<span style="font-size:12px;color:#FFB547">scanning\u2026</span>';
-      const _compTip = 'Overall Risk Score \u2014 weighted composite of all three risk dimensions.'
+      const _basisHtml = !_hasAnyRisk ? '' : (_offName.length
+        ? '<div style="color:#FFB547;font-size:11px;line-height:1.5;margin-top:4px">Scored on '
+          + _onNames.join(' + ') + ' only \u2014 ' + _offName.join(' and ')
+          + (_offName.length > 1 ? ' are' : ' is') + ' not included</div>'
+        : '<div style="color:#8A8AA3;font-size:11px;line-height:1.5;margin-top:4px">Execution 40% \u00b7 Bot Attack 35% \u00b7 Token Risk 25%</div>');
+      const _compTip = 'Overall Risk Score \u2014 '
+        + (_offName.length
+            ? 'only ' + _onNames.length + ' of 3 dimensions could be scored.'
+            : 'weighted composite of all three risk dimensions.')
         + '&#10;Formula: Execution \u00d7 40% + Bot Attack \u00d7 35% + Token Risk \u00d7 25%'
-        + '&#10;&#10;Execution: ' + _exSc + '/100 \u00b7 Bot Attack: ' + _botSc + '/100 \u00b7 Token Risk: '
-        + (hasScore ? _tkSc + '/100' : 'pending\u2026')
+        + (_offName.length
+            ? '&#10;&#10;A dimension that did not run counts as 0, so the weighted figure on its own would understate the risk. The level here is set by the worst dimension that did run.'
+            : '')
+        + '&#10;&#10;Execution: ' + (execRisk ? _exSc + '/100' : 'not checked')
+        + ' \u00b7 Bot Attack: ' + (mevRisk ? _botSc + '/100' : 'not checked')
+        + ' \u00b7 Token Risk: ' + (hasScore ? _tkSc + '/100' : 'not checked')
         + (_cmp.floored
             ? '&#10;&#10;Raised to ' + _compLvl + ': one dimension is ' + _compLvl
               + ' on its own. The worst risk sets the headline \u2014 averaging would hide it.'
@@ -2047,6 +2086,7 @@
         +   '<span style="color:' + _cc + ';font-weight:600">Overall Risk</span>'
         +   '<span style="font-weight:700;font-size:12px;font-family:Space Mono,monospace;color:' + _cc + '">' + _compBadge + '</span>'
         + '</div>'
+        + _basisHtml
         + _subRows
         + '</div>';
 
@@ -2062,11 +2102,27 @@
       // mevProtection=false (the observed default) means raw RPC broadcast — fully exposed.
       let _botCard = '';
       if (!mevRisk) {
-        _botCard = '<div style="background:linear-gradient(135deg,rgba(20,241,149,0.05),rgba(153,69,255,0.05));border:1px solid rgba(20,241,149,0.18);border-radius:10px;padding:10px 12px;margin-bottom:10px">'
-          + '<div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">'
-          + '<span style="color:#9945FF;font-weight:600">Bot Attack Risk</span>'
-          + _waiting(!!ns.axiomMintUnresolved)
-          + '</div></div>';
+        // Green on a check that never ran reads as a pass, so the unresolved case
+        // takes the same amber treatment as the token card.
+        _botCard = ns.axiomMintUnresolved
+          ? '<div style="background:rgba(255,181,71,0.07);border:1px solid rgba(255,181,71,0.35);border-radius:10px;padding:11px 13px;margin-bottom:10px">'
+            + '<div style="display:flex;justify-content:space-between;align-items:center;font-size:13px;margin-bottom:6px">'
+            +   '<span style="color:#FFB547;font-weight:700">Bot attack risk could not be checked</span>'
+            + '</div>'
+            + (_isSimple ? '' :
+                '<div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:6px">'
+                + 'Sandwich scoring needs the token\u2019s pair type and liquidity depth, and neither can be read '
+                + 'without identifying the token first. No route, trade-size or pair check has run.'
+                + '</div>')
+            + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6">'
+            +   '<b style="color:#E8E8F0">Assume this buy is exposed.</b> '
+            +   'Axiom broadcasts direct to RPC with no Jito, and your slippage setting is checked below.'
+            + '</div></div>'
+          : '<div style="background:linear-gradient(135deg,rgba(20,241,149,0.05),rgba(153,69,255,0.05));border:1px solid rgba(20,241,149,0.18);border-radius:10px;padding:10px 12px;margin-bottom:10px">'
+            + '<div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">'
+            + '<span style="color:#9945FF;font-weight:600">Bot Attack Risk</span>'
+            + _waiting(false)
+            + '</div></div>';
       } else {
         const _mc   = _c(mevRisk.riskLevel);
         const _mbg  = 'background:' + _mc + '11;border:1px solid ' + _mc + '44';
@@ -2216,7 +2272,8 @@
       const _impactHtml = (_warnLvl && !ns.axiomRiskAcknowledged)
         ? '<div style="background:' + _c(_warnLvl) + '11;border:1px solid ' + _c(_warnLvl) + '33;border-radius:8px;padding:9px 12px;margin-bottom:10px">'
           + '<div style="color:' + _c(_warnLvl) + ';font-size:13px;font-weight:700;margin-bottom:3px">\u26a0 '
-          + (_warnLvl === 'CRITICAL' ? 'Critical' : 'High') + ' sandwich risk on this token</div>'
+          + (_warnLvl === 'CRITICAL' ? 'Critical' : 'High') + ' sandwich risk on '
+          + (ns.axiomMintUnresolved ? 'these buy settings' : 'this token') + '</div>'
           + '<div style="color:#C2C2D4;font-size:12px;line-height:1.5">Axiom broadcasts direct to RPC (no Jito by default). ZendIQ will show this panel before each buy \u2014 use Cancel if concerned.</div>'
           + '</div>'
         : '';
@@ -2254,14 +2311,14 @@
           + '</div>';
       })() : '';
 
-      const _footer = ns.axiomAutoAccepting
-        ? '<div style="font-size:12px;color:#C2C2D4;margin-bottom:8px;text-align:center">' + _amtLabel + '</div>'
-          + _optCard
-          + '<div style="width:100%;padding:11px;border:1px solid rgba(20,241,149,0.35);border-radius:8px;background:rgba(20,241,149,0.06);color:#14F195;font-size:13px;font-weight:700;text-align:center;font-family:\'DM Sans\',sans-serif">\u23f3 Optimizing your buy\u2026</div>'
+      // Trade summary and optimization breakdown scroll; the buttons do not.
+      const _footerInfo = (ns.axiomAutoAccepting || ns.axiomConfirmPending)
+        ? '<div style="font-size:12px;color:#C2C2D4;margin-bottom:8px;text-align:center">' + _amtLabel + '</div>' + _optCard
+        : '';
+      const _footerBtns = ns.axiomAutoAccepting
+        ? '<div style="width:100%;padding:11px;border:1px solid rgba(20,241,149,0.35);border-radius:8px;background:rgba(20,241,149,0.06);color:#14F195;font-size:13px;font-weight:700;text-align:center;font-family:\'DM Sans\',sans-serif">\u23f3 Optimizing your buy\u2026</div>'
         : ns.axiomConfirmPending
-        ? '<div style="font-size:12px;color:#C2C2D4;margin-bottom:8px;text-align:center">' + _amtLabel + '</div>'
-          + _optCard
-          + (_opt
+        ? (_opt
               ? '<button id="sr-ax-optimize" style="width:100%;padding:11px;border:none;border-radius:8px;background:linear-gradient(135deg,#14F195,#0cc97a);color:#061a10;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;margin-bottom:7px">Optimize &amp; Buy</button>'
                 + '<button id="sr-ax-proceed" style="width:100%;padding:9px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:none;color:#C2C2D4;font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;margin-bottom:7px">Proceed without optimizing</button>'
               : '<button id="sr-ax-proceed" style="width:100%;padding:10px;border:none;border-radius:8px;background:linear-gradient(135deg,#14F195,#0cc97a);color:#061a10;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;margin-bottom:7px">\u2713 Proceed with trade</button>')
@@ -2283,7 +2340,7 @@
               ? '<div style="font-size:11px;color:#FFB547;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ intercepts each buy, but the token risk check did not run on this one.</div>'
               : '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ intercepts each buy to show this risk check.</div>';
 
-      return '<div style="padding:14px 16px">'
+      return '<div style="padding:14px 16px 0">'
         + (_token ? '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.7px;color:#6B6B8A;margin-bottom:10px">TOKEN RISK \u00b7 ' + _sym + '</div>' : '')
         + _consentHtml
         + _obHtml
@@ -2294,8 +2351,11 @@
         + _botCard
         + _execCard
         + _impactHtml
+        + _footerInfo
         + _disclaimer
-        + _footer
+        + (_footerBtns
+            ? '<div style="position:sticky;bottom:0;z-index:10;margin:0 -16px;padding:9px 16px 12px;background:#12121E;border-top:1px solid rgba(255,255,255,0.06)">' + _footerBtns + '</div>'
+            : '<div style="height:14px"></div>')
         + '</div>';
     },
   });
