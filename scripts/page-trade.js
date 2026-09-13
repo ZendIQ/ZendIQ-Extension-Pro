@@ -1173,10 +1173,12 @@
 
         // Pause auto-accept when the output token has HIGH/CRITICAL risk score (loaded).
         // Prevents silently signing into a rug/honeypot without the user reviewing the panel.
+        // `unknown` pauses too: a low score built from unreadable sources is a coverage gap,
+        // and auto-signing on it would be trusting a check that never ran.
         const _tokenLevel    = ns.tokenScoreResult?.level;
         const _pauseForToken = (ns.pauseOnHighRisk !== false) &&
           ns.tokenScoreResult?.loaded === true &&
-          (_tokenLevel === 'HIGH' || _tokenLevel === 'CRITICAL');
+          (_tokenLevel === 'HIGH' || _tokenLevel === 'CRITICAL' || ns.tokenScoreResult?.unknown === true);
         // Track whether we're showing Review & Sign specifically because token risk blocked auto-accept.
         // Widget uses this to show an explanatory banner so the user understands why auto-sign paused.
         ns.widgetPausedForToken = (ns.autoAccept === true && _pauseForToken === true);

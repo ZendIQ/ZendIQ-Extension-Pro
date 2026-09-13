@@ -1523,6 +1523,7 @@
       if (ns.pauseOnHighRisk === false) return true;
       const r = ns.tokenScoreResult;
       if (!r?.loaded) return false;
+      if (r.unknown === true) return false;   // too little read to call it anything
       return r.level !== 'HIGH' && r.level !== 'CRITICAL';
     }
 

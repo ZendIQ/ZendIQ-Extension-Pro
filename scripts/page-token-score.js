@@ -66,17 +66,19 @@
   // ── Known speculative memecoins — get a base market-risk factor ─────────────
   // On-chain hygiene (burned auth, decent distribution) doesn't mean safe to hold.
   // These tokens have no fundamental value and are purely sentiment/speculation driven.
+  // Every address below was verified on-chain and against DexScreener FDV on 2026-09-13.
+  // Five of the original ten were impostors or dead addresses, so this list scored the wrong
+  // tokens for months without failing anything. Re-verify before adding — an entry that no
+  // longer resolves is silent, and MEMECOIN_KW already covers most of what belongs here.
   const KNOWN_MEMECOINS = new Set([
     'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', // WIF  (dogwifhat)
     'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263', // BONK
-    'A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump', // Fartcoin
+    '9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump', // Fartcoin
     '7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr', // POPCAT
     'MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5',  // MEW
     'ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82',  // BOME
-    'nQMSJCFepwLdRnGbQCuoTZvu3MiQR3OwLMpFBKqupQz',  // MYRO
-    '8wXtPeU6557ETkp9WHFY1n1EcU6NxDvbAggHGqgooGPo', // GECKO
-    'GiG7Hr61RVm4CSUxJmgiCoySFQtdiwxtqf64MsRppump', // PNUT
-    '5z3EqYQo9HiCEs3R84RCDMu2n7anpDMxRhdK31CR8zjt', // PEPE (SOL)
+    'HhJpBhRRn4g56VsyLuT8DL5Bv31HkXqsrahTTUCZeZg4', // MYRO
+    '2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump', // PNUT (Peanut the Squirrel)
   ]);
 
   // Name/symbol keywords — catch memecoins not in the hardcoded list above.
@@ -558,12 +560,26 @@
   // and pushed healthy tokens past the HIGH gate on price history alone.
   const PRICE_ACTION_CAP = 30;
 
+  // Ceiling on everything charged for data we could not read. Uncharged, a token with every
+  // source dead reached 70 — five short of CRITICAL, built entirely from absence. Each charge
+  // still earns its keep individually; what has to stop is them summing into a verdict.
+  const UNCERTAINTY_CAP = 20;
+
+  // Number of unreadable signals past which the score stops being an assessment of the token.
+  const UNKNOWN_SIGNAL_LIMIT = 3;
+
   function _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleLaunchData, srcStatus = {}) {
     let score   = 0;
     const factors = [];
     // A source that errored, timed out or came back unusable is not the same as one we
     // deliberately skipped; only the former means a check the user expects did not run.
     const _failed = (k) => srcStatus[k] != null && srcStatus[k] !== 'ok' && srcStatus[k] !== 'skipped';
+
+    // Charges for missing data accumulate here rather than in `score`, so they can be capped
+    // and counted separately from things we actually observed about the token.
+    let _uncertainty    = 0;
+    let _unknownSignals = 0;
+    const _unsure = (pts, factor) => { _uncertainty += pts; _unknownSignals++; factors.push(factor); };
 
     // ── 1. Mint authority ──────────────────────────────────────────────────────
     // Resolution order:
@@ -585,8 +601,7 @@
 
     if (mintAuth === undefined) {
       // Severity must not be LOW: LOW draws a green tick, which reads as "checked and fine".
-      score += 5;
-      factors.push({ name: 'Mint authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether devs can print more tokens. Neither confirmed nor ruled out; check manually before buying.' });
+      _unsure(5, { name: 'Mint authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether devs can print more tokens. Neither confirmed nor ruled out; check manually before buying.' });
     } else if (mintAuth === null || mintAuth === '') {
       factors.push({ name: 'Supply fixed (mint burned)', severity: 'LOW', detail: 'Mint authority revoked — devs cannot print more tokens' });
     } else {
@@ -605,8 +620,7 @@
     }
 
     if (freezeAuth === undefined) {
-      score += 5;
-      factors.push({ name: 'Freeze authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether the contract can freeze your tokens. Neither confirmed nor ruled out; check manually before buying.' });
+      _unsure(5, { name: 'Freeze authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether the contract can freeze your tokens. Neither confirmed nor ruled out; check manually before buying.' });
     } else if (freezeAuth === null || freezeAuth === '') {
       factors.push({ name: 'No freeze authority', severity: 'LOW', detail: 'Freeze authority revoked — your tokens cannot be frozen by the contract' });
     } else {
@@ -646,8 +660,7 @@
     } else {
       // Priced to match the 15-30% tier so unknown concentration never looks better
       // than known concentration.
-      score += 10;
-      factors.push({ name: 'Top holder: data unavailable', severity: 'MEDIUM', detail: 'Holder distribution could not be read, so insider supply is neither confirmed nor ruled out. This is not an all-clear — check the holder list manually.' });
+      _unsure(10, { name: 'Top holder: data unavailable', severity: 'MEDIUM', detail: 'Holder distribution could not be read, so insider supply is neither confirmed nor ruled out. This is not an all-clear — check the holder list manually.' });
     }
 
     if (top5Pct != null && isFinite(top5Pct) && top5Pct > 0) {
@@ -712,8 +725,7 @@
       }
     } else if (rugCheck == null ? _failed('rugcheck') : !RUGCHECK_SHAPE.some(k => k in rugCheck)) {
       // Without this the entire rug-risk section simply vanishes and the card reads clean.
-      score += 5;
-      factors.push({
+      _unsure(5, {
         name: 'Rug analysis unavailable',
         severity: 'MEDIUM',
         detail: 'RugCheck could not be reached, so known rug patterns, insider flags and LP lock status were not checked on this token. This is not an all-clear.',
@@ -723,25 +735,42 @@
     // ── 5. Speculative / memecoin market risk ─────────────────────────────────
     // Good on-chain hygiene (burned auth, decent distribution) does NOT mean the
     // token is safe to hold — memecoins can still collapse from sentiment alone.
+    // Age is derived here rather than in §10 because the launch-venue charge decays with it.
+    const _isPumpFunSite = window.location.hostname?.includes('pump.fun');
+    const _createdAt = dexData?.pairCreatedAt ?? bundleLaunchData?.createdAtMs ?? null;
+    const _ageDays   = _createdAt ? (Date.now() - _createdAt) / 86400000 : null;
     {
       // Meme-launch context: pump.fun native, axiom.trade (all meme launches),
       // or any mint address ending in 'pump' (pump.fun vanity address pattern).
-      const _isMemeContext = window.location.hostname?.includes('pump.fun')
+      const _isMemeContext = _isPumpFunSite
         || window.location.hostname?.includes('axiom.trade')
         || mint.endsWith('pump');
-      const tName = (rugCheck?.tokenMeta?.name   ?? '').toLowerCase();
-      const tSym  = (rugCheck?.tokenMeta?.symbol ?? '').toLowerCase();
-      const isMeme = KNOWN_MEMECOINS.has(mint) ||
-        MEMECOIN_KW.some(k => tName.includes(k) || tSym.includes(k));
+      // `||` not `??`: an empty string from a provider that answered without metadata must
+      // still fall through to the other one.
+      const tName = (rugCheck?.tokenMeta?.name   || dexData?.name   || '').toLowerCase();
+      const tSym  = (rugCheck?.tokenMeta?.symbol || dexData?.symbol || '').toLowerCase();
+      const isMeme = MEMECOIN_KW.some(k => tName.includes(k) || tSym.includes(k));
       if (_isMemeContext) {
-        // Every token on these platforms is a speculative meme launch — site context
-        // is a stronger signal than keyword detection.
-        score += 35;
-        factors.push({
-          name: 'Meme launch \u2014 extreme speculative risk',
-          severity: 'CRITICAL',
-          detail: 'Token launched on a meme/bonding-curve platform. All such tokens are speculative launches with no fundamental value floor. High probability of total loss.',
-        });
+        // The 'pump' suffix is permanent; the risk it stands for — brand new, unproven, still
+        // near the curve — is not. Undecayed this held eight-figure graduates at CRITICAL for
+        // life. Floor is the plain memecoin tier: past a year the venue says nothing that
+        // "this is a memecoin" has not already said.
+        const _fresh = _ageDays == null || _ageDays < 30;
+        if (_fresh) {
+          score += 35;
+          factors.push({
+            name: 'Meme launch \u2014 extreme speculative risk',
+            severity: 'CRITICAL',
+            detail: 'Token launched on a meme/bonding-curve platform within the last 30 days. All such tokens are speculative launches with no fundamental value floor. High probability of total loss.',
+          });
+        } else {
+          score += _ageDays < 365 ? 30 : 25;
+          factors.push({
+            name: 'Meme launch (bonding curve)',
+            severity: 'HIGH',
+            detail: `Token launched on a meme/bonding-curve platform and has traded for ${Math.round(_ageDays)} days. Surviving the launch phase is not a value floor \u2014 expect high volatility and potential for total loss.`,
+          });
+        }
       } else if (isMeme) {
         score += 25;
         factors.push({
@@ -868,8 +897,7 @@
     // GeckoTerminal is deliberately skipped on meme-launch sites (no OHLCV exists there),
     // which is not a failure. A genuine outage silently drops all three signals above.
     if (geckoData == null && _failed('gecko')) {
-      score += 5;
-      factors.push({
+      _unsure(5, {
         name: 'Price history unavailable',
         severity: 'MEDIUM',
         detail: 'Historical price and volume data could not be fetched, so sustained decline and collapsing trading activity were not checked on this token. This is not an all-clear.',
@@ -883,17 +911,14 @@
     // Suppressed on pump.fun — every token there is <24h old by design;
     // the site-context CRITICAL factor (§5) already captures that risk fully.
     // Not suppressed for axiom.trade — graduated tokens there can be weeks/months old.
-    const _isPumpFunSite  = window.location.hostname?.includes('pump.fun');
     const _isMemeContext2 = _isPumpFunSite
       || window.location.hostname?.includes('axiom.trade')
       || mint.endsWith('pump');
-    const _createdAt = dexData?.pairCreatedAt ?? bundleLaunchData?.createdAtMs ?? null;
     if (_createdAt && !_isPumpFunSite) {
-      const ageMs   = Date.now() - _createdAt;
-      const ageDays = ageMs / (1000 * 60 * 60 * 24);
+      const ageDays = _ageDays;
       if (ageDays < 1) {
         score += 25;
-        factors.push({ name: 'New token: <24h old', severity: 'HIGH', detail: `Trading pair created ${(ageMs/3600000).toFixed(1)}h ago. Rug pulls most commonly occur within the first 24 hours of a token launch.` });
+        factors.push({ name: 'New token: <24h old', severity: 'HIGH', detail: `Trading pair created ${(ageDays * 24).toFixed(1)}h ago. Rug pulls most commonly occur within the first 24 hours of a token launch.` });
       } else if (ageDays < 7) {
         score += 15;
         factors.push({ name: `New token: ${ageDays.toFixed(0)}d old`, severity: 'HIGH', detail: `Trading pair is ${ageDays.toFixed(0)} days old. Tokens under 7 days old carry elevated rug risk.` });
@@ -1096,9 +1121,14 @@
 
     // ── Fallback: no data at all ──────────────────────────────────────────────
     if (!mintInfo && !holderData && !rugCheck && !dexData && !geckoData) {
-      score += 15;
-      factors.push({ name: 'Token data unavailable', severity: 'MEDIUM', detail: 'Could not fetch on-chain, RugCheck, or DexScreener data — proceed with caution' });
+      _unsure(15, { name: 'Token data unavailable', severity: 'MEDIUM', detail: 'Could not fetch on-chain, RugCheck, or DexScreener data — proceed with caution' });
     }
+
+    score += Math.min(_uncertainty, UNCERTAINTY_CAP);
+    // Past this many unreadable signals the number describes our coverage, not the token.
+    // Surfaced as its own flag rather than folded into the band: callers must be able to tell
+    // "we looked and it is fine" from "we could not look", and a score alone cannot say that.
+    const unknown = _unknownSignals >= UNKNOWN_SIGNAL_LIMIT;
 
     const finalScore = Math.max(0, Math.min(100, score));
     const level      = finalScore >= 75 ? 'CRITICAL'
@@ -1112,7 +1142,7 @@
 
     return {
       mint, symbol, score: finalScore, level, factors, loaded: true, error: null, dataSource,
-      sources: srcStatus,
+      sources: srcStatus, unknown, unknownSignals: _unknownSignals,
       deployer: deployerData?.address ?? null, deployerTokenCount: deployerData?.tokenCount ?? null,
     };
   }

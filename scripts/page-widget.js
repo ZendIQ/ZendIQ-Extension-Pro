@@ -229,6 +229,14 @@
     // Simple-mode plain-English risk label — available across all panels (Monitor, Review & Sign).
     const _riskLabel = l => ({'LOW':'✓ Low risk','MEDIUM':'⚠ Moderate risk','HIGH':'⚠ High risk','CRITICAL':'⛔ Critical risk'}[l] ?? l ?? '—');
 
+    // A score assembled from sources that did not answer is not a verdict, and the band alone
+    // cannot say so — "Low Risk" reads identically whether we checked ten signals or two.
+    // Shown alongside the score rather than replacing it: the number is still the best we have.
+    const _unknownNote = (ts) => (ts?.unknown !== true) ? '' :
+      `<div style="margin-top:8px;padding:6px 8px;border-radius:6px;background:rgba(255,181,71,0.12);border:1px solid rgba(255,181,71,0.35);font-size:11px;line-height:1.45;color:#FFD9A0">`
+      + `<strong style="color:#FFB547">Not fully assessed</strong> \u2014 ${ts.unknownSignals} check${ts.unknownSignals === 1 ? '' : 's'} could not be completed for this token. `
+      + `This reflects what we could read, not a clean bill of health.</div>`;
+
     // Weighted composite of the three risk dimensions, floored at the worst one.
     // Averaging alone lets a CRITICAL dimension read as HIGH: a token whose creator rugged
     // 10/10 previous launches scores 100 on Token Risk but only 25 of the headline, and a
@@ -248,6 +256,7 @@
     // Shared with page-axiom.js, which renders its own composite card.
     ns._compositeRisk = _compositeRisk;
     ns._riskLabel     = _riskLabel;
+    ns._unknownNote   = _unknownNote;
 
     // ── Shared Review & Sign panel builders ──────────────────────────────────
     // These helpers produce the standard card HTML used by every DEX integration
@@ -418,7 +427,7 @@
         <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px${divider}">
           <span style="color:${tsc};font-weight:600">Token Risk Score</span>
           <span style="display:flex;align-items:center">${badge}</span>
-        </div>${rows}${loaded ? _sourcesRow(tokenScore) : ''}
+        </div>${rows}${loaded ? _sourcesRow(tokenScore) + _unknownNote(tokenScore) : ''}
       </div>`;
     };
 
@@ -1099,7 +1108,7 @@
                 <span style="display:flex;align-items:center">${tsBadge}</span>
               </div>
               ${_tsFactorRows}
-              ${tsLoaded ? _sourcesRow(ts) : ''}
+              ${tsLoaded ? _sourcesRow(ts) + _unknownNote(ts) : ''}
             </div>`;
           })()}
 
@@ -1884,6 +1893,9 @@
             ${ns.widgetPausedForToken ? (() => {
               const _ts  = ns.tokenScoreResult;
               const _lvl = _ts?.level ?? 'HIGH';
+              // Two different reasons land here; saying "HIGH token risk" for a token we simply
+              // could not read would be inventing a verdict to justify the pause.
+              const _unk = _ts?.unknown === true && _lvl !== 'HIGH' && _lvl !== 'CRITICAL';
               const _clr = _lvl === 'CRITICAL' ? '#FF4D4D' : '#FFB547';
               const _bg  = _lvl === 'CRITICAL' ? 'rgba(255,77,77,0.08)' : 'rgba(255,181,71,0.08)';
               const _bdr = _lvl === 'CRITICAL' ? 'rgba(255,77,77,0.4)'  : 'rgba(255,181,71,0.4)';
@@ -1891,10 +1903,12 @@
               return `<div style="background:${_bg};border:1px solid ${_bdr};border-radius:8px;padding:10px 12px;margin-bottom:10px">
                 <div style="display:flex;align-items:center;gap:7px;margin-bottom:5px">
                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="${_clr}" stroke-width="2" style="flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-                  <span style="color:${_clr};font-size:13px;font-weight:700">Auto-sign paused &mdash; ${_lvl} token risk</span>
+                  <span style="color:${_clr};font-size:13px;font-weight:700">Auto-sign paused &mdash; ${_unk ? 'token not fully checked' : _lvl + ' token risk'}</span>
                   <span style="margin-left:auto;font-size:12px;font-weight:700;color:${_clr};font-family:'Space Mono',monospace">${_ts?.score ?? '?'}/100</span>
                 </div>
-                <div style="font-size:12px;color:#C2C2D4;line-height:1.55">ZendIQ detected a <strong style="color:${_clr}">${_lvl}</strong> risk score for <strong style="color:#E8E8F0">${_sym}</strong>. Auto-sign was paused so you can review before committing. Check the Token Risk Score row below for details.</div>
+                <div style="font-size:12px;color:#C2C2D4;line-height:1.55">${_unk
+                  ? `<strong style="color:${_clr}">${_ts?.unknownSignals ?? 'Several'}</strong> safety checks could not be completed for <strong style="color:#E8E8F0">${_sym}</strong>, so the score below is incomplete. Auto-sign was paused rather than treating an unfinished check as a pass.`
+                  : `ZendIQ detected a <strong style="color:${_clr}">${_lvl}</strong> risk score for <strong style="color:#E8E8F0">${_sym}</strong>. Auto-sign was paused so you can review before committing. Check the Token Risk Score row below for details.`}</div>
               </div>`;
             })() : ''}
             <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.8px;color:#C2C2D4;margin-bottom:8px">ZendIQ Quote</div>
@@ -1993,7 +2007,7 @@
                   <span style="display:flex;align-items:center">${tsBadge}</span>
                 </div>
                 ${_tsFactorRows}
-                ${tsLoaded ? _sourcesRow(_ts) : ''}
+                ${tsLoaded ? _sourcesRow(_ts) + _unknownNote(_ts) : ''}
               </div>`;
             })()}
 
@@ -2348,7 +2362,7 @@ ${!ns.axiomVerifyOnly ? '' : `
                 Pause on high token risk
                 <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="#C2C2D4" stroke-width="1.5" style="flex-shrink:0"><circle cx="8" cy="8" r="7"/><path d="M8 7v4m0-5.5v.5" stroke-linecap="round"/></svg>
               </div>
-              <div style="font-size:12px;color:#C2C2D4;margin-top:2px;line-height:1.4">Stops auto-accept when output token risk is HIGH or CRITICAL.</div>
+              <div style="font-size:12px;color:#C2C2D4;margin-top:2px;line-height:1.4">Stops auto-accept when output token risk is HIGH or CRITICAL, or when too little could be read to judge it.</div>
             </div>
             <label style="position:relative;display:inline-block;width:36px;height:20px;cursor:pointer;flex-shrink:0;margin-left:10px">
               <input id="sr-set-pausehighrisk" type="checkbox" ${(ns.pauseOnHighRisk !== false)?'checked':''} style="opacity:0;width:0;height:0;position:absolute">
