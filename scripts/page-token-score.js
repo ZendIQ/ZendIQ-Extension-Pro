@@ -533,9 +533,17 @@
     'metadata',           // catch-all for pure metadata mutability warnings
   ];
 
-  function _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleLaunchData) {
+  // Ceiling on the combined price/volume contribution. Uncapped it reached +66, which
+  // outvoted every structural safety signal (mint authority +35, holder concentration +30)
+  // and pushed healthy tokens past the HIGH gate on price history alone.
+  const PRICE_ACTION_CAP = 30;
+
+  function _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleLaunchData, srcStatus = {}) {
     let score   = 0;
     const factors = [];
+    // A source that errored, timed out or came back unusable is not the same as one we
+    // deliberately skipped; only the former means a check the user expects did not run.
+    const _failed = (k) => srcStatus[k] != null && srcStatus[k] !== 'ok' && srcStatus[k] !== 'skipped';
 
     // ── 1. Mint authority ──────────────────────────────────────────────────────
     // Resolution order:
@@ -630,6 +638,10 @@
       } else {
         factors.push({ name: `Top 5 hold ${top5Pct.toFixed(1)}% of supply`, severity: 'LOW', detail: 'Supply distribution looks reasonable' });
       }
+    } else {
+      // Both holder reads share the same two sources and fail together, so the top-1
+      // branch above has already charged for this outage. Shown, but not charged twice.
+      factors.push({ name: 'Top 5 holders: data unavailable', severity: 'MEDIUM', detail: 'Combined supply held by the top 5 wallets could not be read, so coordinated insider supply is neither confirmed nor ruled out. This is not an all-clear — check the holder list manually.' });
     }
 
     // ── 4. RugCheck risk items ────────────────────────────────────────────────
@@ -673,6 +685,14 @@
           detail: g.detail,
         });
       }
+    } else if (rugCheck == null && _failed('rugcheck')) {
+      // Without this the entire rug-risk section simply vanishes and the card reads clean.
+      score += 5;
+      factors.push({
+        name: 'Rug analysis unavailable',
+        severity: 'MEDIUM',
+        detail: 'RugCheck could not be reached, so known rug patterns, insider flags and LP lock status were not checked on this token. This is not an all-clear.',
+      });
     }
 
     // ── 5. Speculative / memecoin market risk ─────────────────────────────────
@@ -734,6 +754,12 @@
       }
     }
 
+    // ── 7-9. Price action: 3M, long-term, volume ──────────────────────────────
+    // Scored into locals, not straight into `score`. The long-term window contains the
+    // 3M window, so summing them charged a single decline twice; only the heavier of the
+    // two is taken. The block total is then capped — see PRICE_ACTION_CAP.
+    let _p3m = 0, _pLong = 0, _pVol = 0;
+
     // ── 7. 3-month price change ────────────────────────────────────────────────
     // Source: GeckoTerminal daily OHLCV, candle ~90 days back vs latest close.
     // Thresholds: -15% MEDIUM (+8) | -35% HIGH (+15) | -60% CRITICAL (+22)
@@ -742,13 +768,13 @@
     if (geckoData?.change3m != null && geckoData.weeksOfData >= 13) {
       const chg = geckoData.change3m;
       if (chg <= -60) {
-        score += 22;
+        _p3m = 22;
         factors.push({ name: `3M price: −${Math.abs(chg).toFixed(0)}%`, severity: 'CRITICAL', detail: `Token has lost ${Math.abs(chg).toFixed(1)}% of its value over the last 3 months. Severe sustained structural decline.` });
       } else if (chg <= -35) {
-        score += 15;
+        _p3m = 15;
         factors.push({ name: `3M price: −${Math.abs(chg).toFixed(0)}%`, severity: 'HIGH', detail: `Down ${Math.abs(chg).toFixed(1)}% over 3 months. Significant sustained selling pressure.` });
       } else if (chg <= -15) {
-        score += 8;
+        _p3m = 8;
         factors.push({ name: `3M price: −${Math.abs(chg).toFixed(0)}%`, severity: 'MEDIUM', detail: `Down ${Math.abs(chg).toFixed(1)}% over 3 months. Notable downward trend.` });
       } else {
         const sign = chg >= 0 ? '+' : '';
@@ -771,13 +797,13 @@
       const months = Math.round((geckoData.daysOfData ?? (geckoData.weeksOfData * 7)) / 30);
       const label = months >= 11 ? '1Y' : `${months}M`;
       if (chg <= -70) {
-        score += 22;
+        _pLong = 22;
         factors.push({ name: `${label} price: −${Math.abs(chg).toFixed(0)}%`, severity: 'CRITICAL', detail: `Token has lost ${Math.abs(chg).toFixed(1)}% over ${label}. Near-total collapse — structural long-term decline.` });
       } else if (chg <= -45) {
-        score += 15;
+        _pLong = 15;
         factors.push({ name: `${label} price: −${Math.abs(chg).toFixed(0)}%`, severity: 'HIGH', detail: `Down ${Math.abs(chg).toFixed(1)}% over ${label}. Severe long-term decline.` });
       } else if (chg <= -20) {
-        score += 8;
+        _pLong = 8;
         factors.push({ name: `${label} price: −${Math.abs(chg).toFixed(0)}%`, severity: 'MEDIUM', detail: `Down ${Math.abs(chg).toFixed(1)}% over ${label}. Significant long-term depreciation.` });
       } else {
         const sign = chg >= 0 ? '+' : '';
@@ -799,17 +825,30 @@
       const dropPct = Math.round((1 - ratio) * 100);
       const _fmtV = (v) => v >= 1_000_000 ? `$${(v/1_000_000).toFixed(1)}M` : v >= 1_000 ? `$${(v/1000).toFixed(0)}k` : `$${v.toFixed(0)}`;
       if (ratio < 0.05) {
-        score += 22;
+        _pVol = 22;
         factors.push({ name: `Volume collapsed: −${dropPct}%`, severity: 'CRITICAL', detail: `Recent 7d avg ${_fmtV(recentAvg)}/day vs ${_fmtV(baselineAvg)}/day historically. Trading activity has essentially stopped — strong dying-coin signal.` });
       } else if (ratio < 0.15) {
-        score += 15;
+        _pVol = 15;
         factors.push({ name: `Volume dying: −${dropPct}%`, severity: 'HIGH', detail: `Recent 7d avg ${_fmtV(recentAvg)}/day vs ${_fmtV(baselineAvg)}/day historically. Sharp decline in trading activity.` });
       } else if (ratio < 0.35) {
-        score += 8;
+        _pVol = 8;
         factors.push({ name: `Volume fading: −${dropPct}%`, severity: 'MEDIUM', detail: `Recent 7d avg ${_fmtV(recentAvg)}/day vs ${_fmtV(baselineAvg)}/day. Declining interest from traders.` });
       } else {
         factors.push({ name: `Volume: active`, severity: 'LOW', detail: `Recent 7d avg ${_fmtV(recentAvg)}/day. No significant decline in trading activity detected.` });
       }
+    }
+
+    score += Math.min(Math.max(_p3m, _pLong) + _pVol, PRICE_ACTION_CAP);
+
+    // GeckoTerminal is deliberately skipped on meme-launch sites (no OHLCV exists there),
+    // which is not a failure. A genuine outage silently drops all three signals above.
+    if (geckoData == null && _failed('gecko')) {
+      score += 5;
+      factors.push({
+        name: 'Price history unavailable',
+        severity: 'MEDIUM',
+        detail: 'Historical price and volume data could not be fetched, so sustained decline and collapsing trading activity were not checked on this token. This is not an all-clear.',
+      });
     }
 
     // ── 10. Token age ──────────────────────────────────────────────────────────
@@ -1048,6 +1087,7 @@
 
     return {
       mint, symbol, score: finalScore, level, factors, loaded: true, error: null, dataSource,
+      sources: srcStatus,
       deployer: deployerData?.address ?? null, deployerTokenCount: deployerData?.tokenCount ?? null,
     };
   }
@@ -1121,22 +1161,19 @@
     }
 
     try {
-      // Helper: cap any fetch at ms ms; logs ERR on rejection, TIMEOUT only when the
-      // deadline actually wins the race (suppresses orphaned timer noise when a
-      // fast-failing promise resolves well before the cap).
+      // Every outcome used to collapse to the same null, so a dead API was
+      // indistinguishable from a source we never called. Status is recorded per label.
+      const _srcStatus = {};
       const _t = (label, p, ms = 8000) => {
-        let _done = false;
         const trackedP = p
-          .catch(() => null)
-          .then(v  => { _done = true; return v; });
+          .then(v  => { _srcStatus[label] ??= (v == null ? 'empty' : 'ok'); return v; })
+          .catch(() => { _srcStatus[label] ??= 'failed'; return null; });
         return Promise.race([
           trackedP,
-          new Promise(r => setTimeout(() => r(null), ms)),
+          new Promise(r => setTimeout(() => { _srcStatus[label] ??= 'timeout'; r(null); }, ms)),
         ]);
       };
-
-      // On pump.fun / axiom.trade, GeckoTerminal is always empty (new tokens, no OHLCV)
-      // and would add 2 extra bridge round-trips for nothing. Skip for both.
+      const _skip = (label) => { _srcStatus[label] = 'skipped'; return Promise.resolve(null); };
       const _isPump  = window.location.hostname?.includes('pump.fun');
       const _isAxiom = window.location.hostname?.includes('axiom.trade');
       // For meme launch contexts, also try the pump.fun coin API as a fallback
@@ -1151,9 +1188,9 @@
         _t('rugcheck', _fetchRugCheck(mint)),
         _t('dex',      _fetchDexScreener(mint)),
         // GeckoTerminal: 2 sequential HTTP calls — skip for meme contexts (always empty)
-        (_isPump || _isAxiom) ? Promise.resolve(null) : _t('gecko', _fetchGeckoTerminal(mint), 12000),
+        (_isPump || _isAxiom) ? _skip('gecko') : _t('gecko', _fetchGeckoTerminal(mint), 12000),
         // pump.fun coin API: immediate data for brand-new tokens before DexScreener indexes
-        _isMeme ? _t('pump', _fetchPumpFunCoin(mint)) : Promise.resolve(null),
+        _isMeme ? _t('pump', _fetchPumpFunCoin(mint)) : _skip('pump'),
       ]);
       const mintInfo   = _onchain?.mintInfo   ?? null;
       const holderData = _onchain?.holderData ?? null;
@@ -1161,7 +1198,7 @@
       const dexData = dexRaw ?? pumpCoin;
 
       // Phase 1: publish result immediately — bundle + deployer still pending.
-      const _partial = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, null, null, null);
+      const _partial = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, null, null, null, _srcStatus);
       _partial.factors.push({ name: 'Bundle check — scanning on-chain…', severity: 'LOW', _pending: true, detail: 'Checking whether multiple wallets bought in the token\'s creation block (Jito bundle rug pattern).' });
       _partial.factors.push({ name: 'Creator history — scanning on-chain…', severity: 'LOW', _pending: true, detail: 'Checking how many tokens this wallet has deployed and how many went to zero.' });
       _partial._deployerPending = true;
@@ -1224,7 +1261,7 @@
 
       // Publish bundle result immediately — don't wait for the slower deployer lookup.
       // Replaces the "Bundle check — scanning…" spinner row with the real verdict.
-      const _bundlePartial = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, null, null, bundleFinal);
+      const _bundlePartial = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, null, null, bundleFinal, _srcStatus);
       _bundlePartial.factors.push({ name: 'Creator history — scanning on-chain…', severity: 'LOW', _pending: true, detail: 'Checking how many tokens this wallet has deployed and how many went to zero.' });
       _bundlePartial._deployerPending = true;
       if (_stillActive()) {
@@ -1252,7 +1289,7 @@
         }
       } catch (_) { deployerFailed = true; }
 
-      const result = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleFinal);
+      const result = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleFinal, _srcStatus);
       // Deployer address itself could not be resolved, so _computeScore pushed no creator row.
       // Add an explicit "unavailable" row so the pending spinner is replaced (not left hanging).
       if (deployerFailed && !deployerData) {
