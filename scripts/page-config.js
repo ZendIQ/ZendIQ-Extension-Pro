@@ -147,6 +147,7 @@
     axiomAutoAccepting:  false,    // true while auto-accept optimizes without waiting for a click
     axiomPendingBtnRef:  null,     // DOM reference to the intercepted Buy button
     axiomRiskAcknowledged: false,  // true after user clicks "Got it"; cleared on token change or new buy
+    axiomListGapAck:     false,    // true after the user dismisses the list-page coverage notice
     // ── Axiom preset-optimization (snapshot + restore) ───────────────────
     // Off until the user opts in. `axiomOptimizeConsent` is null until answered —
     // absence of a choice is not a choice, so it must be distinguishable from 'off'.

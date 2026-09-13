@@ -2591,6 +2591,13 @@ ${!ns.axiomVerifyOnly ? '' : `
         if (_el) { _el.classList.remove('expanded', 'alert'); savePillState(_el); }
       };
 
+      const _axListGap = bodyInner.querySelector('#sr-ax-listgap-ok');
+      if (_axListGap) _axListGap.onclick = () => {
+        if (ns) ns.axiomListGapAck = true;
+        const _el = document.getElementById('sr-widget');
+        if (_el) { _el.classList.remove('expanded', 'alert'); savePillState(_el); }
+      };
+
       // Confirm-intercept buttons (shown when user clicked Buy).
       const _axProceed = bodyInner.querySelector('#sr-ax-proceed');
       if (_axProceed) _axProceed.onclick = () => {
@@ -3640,16 +3647,16 @@ ${!ns.axiomVerifyOnly ? '' : `
   }
 
   // ── openZendIQPanel ──────────────────────────────────────────────────────
+  // Only ever opens. Callers are risk warnings firing on async results, and a
+  // toggle here closes the panel on anyone who opened it first.
   function openZendIQPanel() {
     const widget = document.getElementById('sr-widget');
     if (!widget) return;
     widget.style.display = ''; // un-hide if user previously closed with X
-    widget.classList.toggle('expanded');
-    if (widget.classList.contains('expanded')) {
-      if (ns.pendingTransaction) ns.widgetActiveTab = 'monitor';
-      ns._fitBodyHeight(widget);
-      renderWidgetPanel();
-    }
+    widget.classList.add('expanded');
+    if (ns.pendingTransaction) ns.widgetActiveTab = 'monitor';
+    ns._fitBodyHeight(widget);
+    renderWidgetPanel();
   }
 
   // ── _fitBodyHeight — update --sr-body-mh CSS var based on widget position ──
@@ -3862,7 +3869,8 @@ ${!ns.axiomVerifyOnly ? '' : `
     const pill = el.querySelector('#sr-pill');
 
     const openPanel = () => {
-      openZendIQPanel();
+      if (el.classList.contains('expanded')) el.classList.remove('expanded');
+      else openZendIQPanel();
       savePillState(el);
     };
 

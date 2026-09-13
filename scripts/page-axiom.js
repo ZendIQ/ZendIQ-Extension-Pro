@@ -35,6 +35,64 @@
   let _axiomBuyAmountSol = null;   // last SOL amount the user entered in the amount field
   const _AXIOM_SOL_FALLBACK = 150; // USD per SOL when no live price is available
 
+  // ── Chain detection (OPS-243) ────────────────────────────────────────────
+  // Axiom added a chain selector on 25 Aug 2026. Everything this file reads or
+  // writes is Solana-specific — the preset store, the RPC we enrich from, the
+  // address shapes we parse — so anything not positively identified as Solana is
+  // treated as out of scope rather than assumed to be Solana.
+  const _CHAIN_SOL     = 'solana';
+  const _CHAIN_OTHER   = 'other';
+  const _CHAIN_UNKNOWN = 'unknown';
+
+  const _B58_ADDR_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+  // A Solana signature is 64 base58-encoded bytes. An EVM tx hash is 0x + 64 hex,
+  // which cannot match: base58 excludes '0'.
+  const _SOL_SIG_RE  = /^[1-9A-HJ-NP-Za-km-z]{80,96}$/;
+  // Matched against the whole path rather than a known segment: the BNB and Base
+  // token routes are not documented, and an address is self-identifying anyway.
+  const _EVM_IN_PATH = /\/(0x[0-9a-fA-F]{40})(?:[/?#]|$)/;
+  const _B58_IN_PATH = /\/([1-9A-HJ-NP-Za-km-z]{32,44})(?:[/?#]|$)/;
+
+  // Verified 13 Sep 2026 against the live settings blob (314 keys): no field names
+  // the active chain, and Discover carries ?chains=sol,bnb,base — a filter, not a
+  // selection. Axiom also fetches get-settings for every enabled chain at once, so
+  // the ?evmChain= parameter is a race between concurrent requests rather than a
+  // current-chain signal. Chain is a property of the token, read from its address.
+  //
+  // Matched against the whole pathname rather than a known segment: the BNB and
+  // Base token routes are undocumented, and an address is self-identifying.
+  function _chainFromUrl() {
+    const p = window.location.pathname;
+    if (_EVM_IN_PATH.test(p)) return _CHAIN_OTHER;
+    if (_B58_IN_PATH.test(p)) return _CHAIN_SOL;
+    return null;
+  }
+
+  // Singular ?chain=sol, distinct from Discover's ?chains=sol,bnb,base filter list.
+  // Ranked below the path address, which names the token actually being traded.
+  function _chainFromQuery() {
+    try {
+      const v = new URLSearchParams(window.location.search).get('chain');
+      if (!v) return null;
+      return /^sol/i.test(v.trim()) ? _CHAIN_SOL : _CHAIN_OTHER;
+    } catch (_) { return null; }
+  }
+
+  let _chainLogged = null;
+  function _chain() {
+    const c = _chainFromUrl() ?? _chainFromQuery() ?? _CHAIN_UNKNOWN;
+    if (ns) ns.axiomChain = c;
+    if (c !== _chainLogged) {
+      _chainLogged = c;
+      console.log('[ZQ:AXIOM] chain=' + c + (c === _CHAIN_SOL ? '' : ' \u2014 observe only: no intercept, no settings write, no Solana RPC'));
+    }
+    return c;
+  }
+
+  // Unknown counts as not-Solana everywhere a decision is made. Only positive
+  // identification unlocks the intercept and the settings mutation.
+  function _isSolana() { return _chain() === _CHAIN_SOL; }
+
   // ── Analytics session state ──────────────────────────────────────────────
   // Axiom never loads page-wallet.js, so the session lifecycle that file owns on
   // the other DEXes has to be driven from here instead.
@@ -288,7 +346,10 @@
     }
 
     // Step 4: trigger token risk scoring on buy; deduped by ns._tokenScoreMint.
-    if (ev.type === 'meme-open-single-position-v2' && ev.tokenAddress && ns?.fetchTokenScore) {
+    // Base58 only: an EVM token address has no Solana scorer, and assigning it would
+    // clobber the mint the Activity writer below reads.
+    if (ev.type === 'meme-open-single-position-v2' && ev.tokenAddress && ns?.fetchTokenScore
+        && _B58_ADDR_RE.test(ev.tokenAddress)) {
       if (ev.tokenAddress !== ns._tokenScoreMint) {
         ns._tokenScoreMint  = ev.tokenAddress;
         ns.tokenScoreResult = null;
@@ -302,6 +363,14 @@
     // navigation before the user buys). Risk score from ns.tokenScoreResult (pre-fetched
     // the moment the user navigates to the token page).
     if (ev.type === 'log-tx-v3' && ev.signature && ns) {
+      // Chain evidence from the payload itself — stronger than the URL here. _tokenScoreMint
+      // is deliberately never cleared, so an unguarded BNB trade would be filed as
+      // "SOL → <last Solana token viewed>" with that token's risk score attached.
+      if (!_SOL_SIG_RE.test(ev.signature)) {
+        console.log('[ZQ:AXIOM] non-Solana trade — not recorded: ' + String(ev.signature).slice(0, 12) + '\u2026');
+        ns.axiomLastOpIsClose = false;
+        return;
+      }
       // Skip sell trades — log-tx-v3 fires for both buys and sells. When a
       // handle-position-close-v2 signal precedes it, it's a sell; we don't intercept
       // or add value to those, so skip recording to Activity.
@@ -317,6 +386,7 @@
       const _SOL   = 'So11111111111111111111111111111111111111112';
       const _entry = {
         source:      'axiom',
+        chain:       _chain(),
         optimized:   _wasOptimized,
         signature:   ev.signature,
         success:     ev.success,
@@ -403,7 +473,7 @@
 
       // Sandwich detection — assumed buy direction (SOL→token) which is the common case.
       // For sells the direction is reversed; detection may miss but never false-positives.
-      if (ns.detectSandwich && _token) {
+      if (ns.detectSandwich && _token && _isSolana()) {
         ns.detectSandwich(ev.signature, _SOL, _token).then(function (sw) {
           if (!sw) return;
           try {
@@ -417,7 +487,8 @@
 
       // Async: fetch actual SOL spent + tokens received from the confirmed transaction.
       // Posts a second HISTORY_UPDATE to enrich the Activity card once on-chain data arrives.
-      if (ns.rpcCall) {
+      // Solana-only: off-chain this is 8 retries against a signature that cannot resolve.
+      if (ns.rpcCall && _isSolana()) {
         const _sig = ev.signature;
         const _wp  = ns.axiomSessionPubkey;
         (async function () {
@@ -595,6 +666,7 @@
   // Returns null when settings are unreadable or there is nothing worth changing.
   function _computeOptimization() {
     if (!ns?.axiomOptimizeEnabled) return null;
+    if (!_isSolana()) return null;
     const settings = _readSettings();
     if (!settings) return null;
     const key = settings.currentSolPresetKey;
@@ -962,6 +1034,15 @@
     // Second gate. _computeOptimization already checks the flag, but this is the only
     // function that writes to the user's settings — it must not depend on a caller.
     if (!ns?.axiomOptimizeEnabled) { ns?.axiomProceedTrade?.(); return; }
+    // Consent is Solana-scoped: it describes a mutation of solPresets, which is the
+    // only preset store this file knows how to read or put back. Off Solana there is
+    // also no held click to release, so proceeding is only right if we did intercept.
+    if (!_isSolana()) {
+      console.warn('[ZQ:AXIOM] optimization refused \u2014 chain=' + (ns?.axiomChain ?? _CHAIN_UNKNOWN));
+      if (ns) ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'chain-not-supported' };
+      if (ns?.axiomConfirmPending) ns.axiomProceedTrade?.();
+      return false;
+    }
     const opt = _computeOptimization();
     if (!opt || !ns) { ns?.axiomProceedTrade?.(); return; }
 
@@ -1210,7 +1291,9 @@
     ns.settingsProfile     = s.profile      ?? 'alert';
     ns.settingsLoaded      = true;
     // Unanswered: put the prompt in front of the user rather than waiting for a Buy click.
-    if (ns.axiomOptimizeConsent === null) {
+    // Not on a chain we have already ruled out — the prompt describes a Solana-only
+    // action, so asking there would be asking for consent to something that cannot run.
+    if (ns.axiomOptimizeConsent === null && _chain() !== _CHAIN_OTHER) {
       const _w = document.getElementById('sr-widget');
       if (_w) { _w.style.display = ''; _w.classList.add('expanded'); ns.widgetActiveTab = 'monitor'; }
       else ns.ensureWidgetInjected?.();
@@ -1233,8 +1316,10 @@
   const _SOL_MINT = 'So11111111111111111111111111111111111111112';
   // amountUSD is optional — pass the real USD value when the user has entered an amount.
   // Omit (or pass null/undefined) for the proactive scan before any amount is set.
+  // mint may be null: the slippage and congestion checks describe the user's buy
+  // settings, not the token, so they still hold when the token cannot be identified.
   async function _computeAxiomRisk(mint, amountUSD) {
-    if (!ns || !mint) return;
+    if (!ns) return;
 
     // Slippage: localStorage → last log-tx-v3 signal → observed default (20%).
     const _slipDecimal = _readAxiomSlippage() ?? ns.axiomLastSlippage ?? 0.20;
@@ -1244,7 +1329,9 @@
     // thin liquidity — all factors that make sandwich attacks profitable.
     // Use routeType 'bonding_curve' for pump.fun mints (end in 'pump'),
     // else 'unknown' (Raydium AMM post-graduation).
-    if (ns.calculateMEVRisk) {
+    // Skipped without a mint: the memecoin-pair test would fall through to the
+    // safer branch and report a low score it has no basis for.
+    if (mint && ns.calculateMEVRisk) {
       ns.axiomMevRisk = ns.calculateMEVRisk({
         inputMint:  _SOL_MINT,
         outputMint: mint,
@@ -1376,55 +1463,130 @@
   // NOT fire popstate — the setInterval poll is the primary detection path.
   // popstate covers browser back/forward navigation.
   //
-  // URL pattern: axiom.trade/meme/{mint}
-  //   e.g. axiom.trade/meme/CQa5WuQMcGszuyfv59sA2QZ3CrCLhiY9HBpymPADpump
+  // URL pattern: axiom.trade/meme/{addr}, where addr is the pool address for some
+  // tokens and the mint for others — the two are indistinguishable by shape.
   const _MINT_PATH_RE = /\/meme\/([1-9A-HJ-NP-Za-km-z]{32,44})(?:[/?#]|$)/;
   function _readMintFromUrl() {
     const m = _MINT_PATH_RE.exec(window.location.pathname + window.location.search);
     return m ? m[1] : null;
   }
 
+  // Axiom's /meme/ route carries the pool address for some tokens and the mint for
+  // others. A new token returns no DexScreener pair simply because it is not indexed
+  // yet, so "no pair" cannot be read as "this is the mint" — the account type has to
+  // be confirmed on-chain. Unresolved stays null and blocks scoring: a partial
+  // verdict computed against a pool address reads to the user as an all-clear.
+  const _mintCache = new Map();
+  async function _resolveMint(addr) {
+    if (!addr) return null;
+    if (_mintCache.has(addr)) return _mintCache.get(addr);
+
+    let mint = null;
+    try {
+      const info = await ns.rpcCall('getAccountInfo', [addr, { encoding: 'jsonParsed' }]);
+      if (info?.value?.data?.parsed?.type === 'mint') mint = addr;
+    } catch (_) {}
+
+    if (!mint && ns?.pageJsonFetch) {
+      try {
+        const d    = await ns.pageJsonFetch('https://api.dexscreener.com/latest/dex/pairs/solana/' + addr);
+        const pair = Array.isArray(d?.pairs) ? d.pairs[0] : (d?.pair ?? null);
+        const base = pair?.baseToken?.address ?? null;
+        if (base && _B58_ADDR_RE.test(base)) mint = base;
+      } catch (_) {}
+    }
+
+    if (!mint) {
+      // Not cached — a later visit may resolve once the token is indexed.
+      console.warn('[ZQ:AXIOM] could not identify token for ' + addr.slice(0, 8) + '\u2026 \u2014 not scoring');
+      return null;
+    }
+    _mintCache.set(addr, mint);
+    if (mint !== addr) console.log('[ZQ:AXIOM] pool ' + addr.slice(0, 8) + '\u2026 \u2192 mint ' + mint.slice(0, 8) + '\u2026');
+    return mint;
+  }
+
+  // A collapsed pill on a list page reads as coverage those Buy buttons do not have.
+  // Once per page load, and never again once the user has said they know.
+  let _listGapShown = false;
+  function _maybeShowListGap() {
+    if (!ns || _listGapShown || ns.axiomListGapAck) return;
+    if (_readMintFromUrl()) return;
+    if (_chain() === _CHAIN_OTHER) return;
+    if (!document.getElementById('sr-widget')) { setTimeout(_maybeShowListGap, 300); return; }
+    _listGapShown = true;
+    try { ns.openZendIQPanel?.(); } catch (_) {}
+  }
+
   let _currentAxiomMint = null;
 
-  function _onMintChange(mint) {
-    if (mint === _currentAxiomMint) return;
-    _currentAxiomMint  = mint;
+  // A collapsed pill reading "Active" is a coverage claim. When a check cannot run,
+  // say so on the pill and open the panel — silence here reads as a pass.
+  function _flagNotCovered(flag) {
+    if (!ns) return;
+    ns[flag] = true;
+    try { ns.updateWidgetStatus?.('Not covered'); } catch (_) {}
+    try { (ns.openZendIQPanel ?? ns.renderWidgetPanel)?.(); } catch (_) {}
+  }
+
+  function _onMintChange(routeAddr) {
+    if (routeAddr === _currentAxiomMint) return;
+    _currentAxiomMint  = routeAddr;
     _axiomBuyAmountSol = null;  // reset amount on token navigation
     if (!ns) return;
     // Reset any pending intercept state from the previous token.
     ns.axiomConfirmPending = false;
     ns.axiomPendingBtnRef  = null;
-    if (!mint) {
+    ns.axiomMintUnresolved = false;
+    ns.axiomScoreFailed    = false;
+    if (!routeAddr) {
       // Left the token page for a list. ns._tokenScoreMint is deliberately left
       // set: the trade logger reads it to attribute a buy that is still settling.
+      if (ns.axiomSessionPubkey) { try { ns.updateWidgetStatus?.('Active'); } catch (_) {} }
       try { ns.renderWidgetPanel?.(); } catch (_) {}
+      _maybeShowListGap();
       return;
     }
-    // Clear stale score so the widget shows "Scanning…" for the new token.
-    if (ns._tokenScoreMint !== mint) {
-      ns._tokenScoreMint  = mint;
-      ns.tokenScoreResult = null;
-    }
+    // Clear stale score so the widget shows "Scanning…" while the mint resolves.
+    ns._tokenScoreMint  = null;
+    ns.tokenScoreResult = null;
     try { ns.renderWidgetPanel?.(); } catch (_) {}
-    // Pre-fetch before the user buys — score is ready by the time the trade fires.
-    if (ns.fetchTokenScore) {
-      ns.fetchTokenScore(mint, null).then(function (r) {
-        if (!r || !r.loaded) return;
-        // Compute execution + MEV risk now that the token score is available.
-        _computeAxiomRisk(mint).catch(function () {});
-        // Open the widget proactively on HIGH/CRITICAL so user sees the warning
-        // before they click Buy. MEDIUM and below = pill stays closed.
-        if ((r.level === 'HIGH' || r.level === 'CRITICAL') && ns.openZendIQPanel) {
-          ns.openZendIQPanel();
-        } else if (ns.renderWidgetPanel) {
-          // Refresh pill badge colour and Monitor content for lower-risk tokens.
-          ns.renderWidgetPanel();
-        }
-      }).catch(function () {});
-    }
-    // Also run a lightweight MEV risk estimate immediately (slippage known, token known).
-    // Gives the widget something to show before token score finishes loading.
-    _computeAxiomRisk(mint).catch(function () {});
+
+    _resolveMint(routeAddr).then(function (mint) {
+      if (_currentAxiomMint !== routeAddr) return;  // navigated away mid-resolve
+      if (!mint) {
+        _flagNotCovered('axiomMintUnresolved');
+        _computeAxiomRisk(null).catch(function () {});
+        return;
+      }
+      ns._tokenScoreMint = mint;
+      if (ns.axiomSessionPubkey) { try { ns.updateWidgetStatus?.('Active'); } catch (_) {} }
+      try { ns.renderWidgetPanel?.(); } catch (_) {}
+      // Pre-fetch before the user buys — score is ready by the time the trade fires.
+      if (ns.fetchTokenScore) {
+        ns.fetchTokenScore(mint, null).then(function (r) {
+          if (_currentAxiomMint !== routeAddr) return;
+          if (!r || !r.loaded) { _flagNotCovered('axiomScoreFailed'); return; }
+          // Compute execution + MEV risk now that the token score is available.
+          _computeAxiomRisk(mint).catch(function () {});
+          // Open the widget proactively on HIGH/CRITICAL so user sees the warning
+          // before they click Buy — and on a partial scan, which the collapsed pill
+          // cannot distinguish from a clean one.
+          if ((r.level === 'HIGH' || r.level === 'CRITICAL' || r.unknown === true) && ns.openZendIQPanel) {
+            ns.openZendIQPanel();
+          } else if (ns.renderWidgetPanel) {
+            // Refresh pill badge colour and Monitor content for lower-risk tokens.
+            ns.renderWidgetPanel();
+          }
+        }).catch(function () {
+          if (_currentAxiomMint !== routeAddr) return;
+          _flagNotCovered('axiomScoreFailed');
+        });
+      }
+      // Also run a lightweight MEV risk estimate immediately (slippage known, token known).
+      // Gives the widget something to show before token score finishes loading.
+      _computeAxiomRisk(mint).catch(function () {});
+    });
   }
 
   // Reads initial mint on load, then polls every 250 ms for SPA navigation.
@@ -1447,14 +1609,27 @@
     })();
 
     _onMintChange(_readMintFromUrl());
+    _maybeShowListGap();
+    // Chain is tracked separately from the mint: a Solana list page and a BNB token
+    // page both read as "no mint", so _onMintChange would short-circuit and the widget
+    // would keep showing the previous chain's verdict.
+    let _lastChain = _chain();
+    function _syncChain() {
+      const c = _chain();
+      if (c === _lastChain) return;
+      _lastChain = c;
+      try { ns.renderWidgetPanel?.(); } catch (_) {}
+    }
     let _lastHref = window.location.href;
     setInterval(function () {
       if (window.location.href !== _lastHref) {
         _lastHref = window.location.href;
+        _syncChain();
         _onMintChange(_readMintFromUrl());
       }
     }, 250);
     window.addEventListener('popstate', function () {
+      _syncChain();
       _onMintChange(_readMintFromUrl());
     });
 
@@ -1480,6 +1655,14 @@
       if (!btn) return null;
       const txt = (btn.textContent ?? '').trim().toLowerCase();
       return txt.startsWith('buy ') ? btn : null;
+    }
+
+    // Discover/Pulse quick-buy buttons also read "Buy <amount>", and off a token
+    // page _tokenScoreMint still holds the last token viewed — intercepting there
+    // would show one token's verdict over another token's buy.
+    function _onScoredTokenPage() {
+      const addr = _readMintFromUrl();
+      return !!addr && !ns?.axiomMintUnresolved && !!ns?._tokenScoreMint;
     }
 
     function _showPanel(btn) {
@@ -1518,6 +1701,7 @@
     // evaluated against a verdict that has not arrived yet.
     function _shouldAutoAccept() {
       if (!ns?.autoAccept) return false;
+      if (!_isSolana()) return false;
       if (!ns.axiomOptimizeEnabled || ns.axiomOptimizeConsent !== 'on') return false;
       if (ns.axiomObligation) return false;      // a restore is still owed
       if (ns.pauseOnHighRisk === false) return true;
@@ -1549,6 +1733,8 @@
     // event their React component listens to (onClick, onMouseDown, onPointerDown).
     document.addEventListener('pointerdown', function (e) {
       if (_axiomBypassNext) return; // proceed-path: flag cleared by click handler; all events pass through
+      if (!_isSolana()) return;     // never block a buy we cannot assess
+      if (!_onScoredTokenPage()) return;
       const btn = _buyBtn(e);
       if (!btn) return;
       e.preventDefault();
@@ -1560,6 +1746,8 @@
     // the pointer event chain, and serves as the bypass path for axiomProceedTrade.
     document.addEventListener('click', function (e) {
       if (_axiomBypassNext) { _axiomBypassNext = false; return; }
+      if (!_isSolana()) return;     // never block a buy we cannot assess
+      if (!_onScoredTokenPage()) return;
       const btn = _buyBtn(e);
       if (!btn) return;
       e.preventDefault();
@@ -1694,6 +1882,25 @@
         ? _esc(tokenScore.symbol || (_token ? _token.slice(0,8) + '\u2026' : '?'))
         : (_token ? _token.slice(0,8) + '\u2026' : '?');
 
+      // ── Not a Solana pair (OPS-243) ─────────────────────────────────────
+      // An idle Monitor panel reads as an all-clear. Say the check did not run.
+      if (_chain() === _CHAIN_OTHER) {
+        return `<div style="padding:14px 16px;">
+          <div style="background:rgba(255,181,71,0.07);border:1px solid rgba(255,181,71,0.35);border-radius:10px;padding:12px 13px">
+            <div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:7px">ZendIQ does not cover this chain</div>
+            <div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:7px">
+              This pair is not on Solana. ZendIQ&rsquo;s risk scoring, bot-attack detection and buy-setting
+              optimisation are Solana-only, so <b style="color:#E8E8F0">no check runs here</b> — nothing is
+              scored, nothing is intercepted, and no Axiom setting is changed.
+            </div>
+            <div style="color:#C2C2D4;font-size:12px;line-height:1.6">
+              Your buy goes through Axiom exactly as it would without ZendIQ. Switch to a Solana pair to get
+              ZendIQ&rsquo;s checks back.
+            </div>
+          </div>
+        </div>`;
+      }
+
       // ── Consent gate (OPS-185) — shown until the user answers ────────────
       // Neither button is styled as the default: the choice is not pre-made.
       const _consentHtml = (ns.settingsLoaded && ns.axiomOptimizeConsent == null) ? (function () {
@@ -1741,11 +1948,30 @@
               Open the token first if you want it scored before you commit.
             </div>
           </div>
+          <button id="sr-ax-listgap-ok" style="width:100%;margin-top:10px;padding:10px;border:1px solid rgba(255,255,255,0.1);border-radius:8px;background:rgba(255,255,255,0.04);color:#C2C2D4;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif">\u2713 Got it \u2014 close</button>
         </div>`;
       }
 
-      // On a token page but state not populated yet (first paint before _onMintChange).
-      if (!_token) {
+      // Token identity or its score is missing. The buy-setting checks below do not
+      // depend on either, so they still run — a 20% slippage preset is worth flagging
+      // whether or not we know what is being bought.
+      const _tokenUnchecked = !!(ns.axiomMintUnresolved || ns.axiomScoreFailed);
+      const _uncheckedCard = _tokenUnchecked
+        ? '<div style="background:rgba(255,181,71,0.07);border:1px solid rgba(255,181,71,0.35);border-radius:10px;padding:11px 13px;margin-bottom:10px">'
+          + '<div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:6px">Token risk could not be checked</div>'
+          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:6px">'
+          +   (ns.axiomMintUnresolved
+                ? 'ZendIQ could not work out which token this page refers to — very new tokens are often not listed anywhere yet. '
+                : 'The token risk check did not complete. ')
+          +   'No mint authority, holder, liquidity or token age check has run.'
+          + '</div>'
+          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6">'
+          +   '<b style="color:#E8E8F0">Treat this buy as unprotected on token risk.</b> '
+          +   'Your buy settings are still checked below. Reload to retry, or check the token yourself before buying.'
+          + '</div></div>'
+        : '';
+
+      if (!_token && !_tokenUnchecked) {
         return `<div style="padding:14px 16px;">
           ${_consentHtml}
           <div style="font-size:13px;color:#C2C2D4;text-align:center;padding:12px 0;line-height:1.6">
@@ -1791,25 +2017,27 @@
               + ' on its own. The worst risk sets the headline \u2014 averaging would hide it.'
             : '');
       const _sc = lvl => _c(lvl ?? 'LOW');
+      // A check that failed is not still running — "scanning…" would promise a verdict.
+      const _waiting = un => '<span style="font-size:12px;color:#FFB547">' + (un ? 'not checked' : 'scanning\u2026') + '</span>';
       const _subRows = _isSimple ? '' : (
         '<div style="margin-top:8px;border-top:1px solid ' + _cc + '22;padding-top:7px">'
         + '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0">'
         +   '<span style="color:#C8C8D8;font-size:12px">Execution</span>'
         +   (_exLvl
               ? '<span style="color:' + _sc(_exLvl) + ';font-size:12px;font-weight:700;font-family:Space Mono,monospace">' + _exLvl + ' \u00b7 ' + _exSc + '/100</span>'
-              : '<span style="font-size:12px;color:#FFB547">scanning\u2026</span>')
+              : _waiting(false))
         + '</div>'
         + '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0">'
         +   '<span style="color:#C8C8D8;font-size:12px">Bot Attack</span>'
         +   (_botLvl
               ? '<span style="color:' + _sc(_botLvl) + ';font-size:12px;font-weight:700;font-family:Space Mono,monospace">' + _botLvl + ' \u00b7 ' + _botSc + '/100</span>'
-              : '<span style="font-size:12px;color:#FFB547">scanning\u2026</span>')
+              : _waiting(!!ns.axiomMintUnresolved))
         + '</div>'
         + '<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0">'
         +   '<span style="color:#C8C8D8;font-size:12px">Token Risk</span>'
         +   (hasScore
               ? '<span style="color:' + _sc(_tkLvl) + ';font-size:12px;font-weight:700;font-family:Space Mono,monospace">' + _tkLvl + ' \u00b7 ' + _tkSc + '/100</span>'
-              : '<span style="font-size:12px;color:#FFB547">scanning\u2026</span>')
+              : _waiting(_tokenUnchecked))
         + '</div>'
         + '</div>'
       );
@@ -1823,9 +2051,11 @@
         + '</div>';
 
       // ── Token Risk Score — shared builder from page-widget.js ─────────────
-      const _tokenRiskCard = ns._buildTokenRiskCard
-        ? ns._buildTokenRiskCard(hasScore ? tokenScore : null, _isSimple)
-        : '<div style="text-align:center;padding:12px 0;color:#C2C2D4;font-size:12px">Scanning token risk\u2026</div>';
+      const _tokenRiskCard = _tokenUnchecked
+        ? _uncheckedCard
+        : (ns._buildTokenRiskCard
+            ? ns._buildTokenRiskCard(hasScore ? tokenScore : null, _isSimple)
+            : '<div style="text-align:center;padding:12px 0;color:#C2C2D4;font-size:12px">Scanning token risk\u2026</div>');
 
       // ── Bot Attack Risk — real score from calculateMEVRisk ───────────────
       // Axiom is ranked among the most sandwiched DEX UIs (sandwiched.me).
@@ -1835,7 +2065,7 @@
         _botCard = '<div style="background:linear-gradient(135deg,rgba(20,241,149,0.05),rgba(153,69,255,0.05));border:1px solid rgba(20,241,149,0.18);border-radius:10px;padding:10px 12px;margin-bottom:10px">'
           + '<div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">'
           + '<span style="color:#9945FF;font-weight:600">Bot Attack Risk</span>'
-          + '<span style="color:#FFB547;font-size:12px">scanning\u2026</span>'
+          + _waiting(!!ns.axiomMintUnresolved)
           + '</div></div>';
       } else {
         const _mc   = _c(mevRisk.riskLevel);
@@ -2047,7 +2277,11 @@
             : '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">Your preset is already safe. ZendIQ cannot re-route Axiom trades \u2014 cancel and lower slippage manually to reduce risk further.</div>')
         : ns.axiomRiskAcknowledged
           ? ''
-          : '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ intercepts each buy to show this risk check.</div>';
+          : ns.axiomMintUnresolved
+            ? '<div style="font-size:11px;color:#FFB547;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ cannot identify this token, so it will not step in front of your buy \u2014 clicking Buy goes straight to Axiom, unchecked.</div>'
+            : _tokenUnchecked
+              ? '<div style="font-size:11px;color:#FFB547;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ intercepts each buy, but the token risk check did not run on this one.</div>'
+              : '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ intercepts each buy to show this risk check.</div>';
 
       return '<div style="padding:14px 16px">'
         + (_token ? '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.7px;color:#6B6B8A;margin-bottom:10px">TOKEN RISK \u00b7 ' + _sym + '</div>' : '')
