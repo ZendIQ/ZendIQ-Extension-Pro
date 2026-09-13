@@ -349,6 +349,14 @@
     // Advanced view only. A score built from three sources reads identically to one
     // built from four unless we say which ones answered.
     const _SRC_LBL = { onchain: 'on-chain', rugcheck: 'RugCheck', dex: 'DexScreener', gecko: 'GeckoTerminal', pump: 'pump.fun' };
+    const _SRC_WHY = {
+      ok: 'answered',
+      skipped: 'not applicable for this token',
+      empty: 'no data for this token',
+      ratelimited: 'we were rate-limited \u2014 says nothing about this token',
+      failed: 'request failed',
+      timeout: 'timed out',
+    };
     const _sourcesRow = (tokenScore) => {
       const src = tokenScore?.sources;
       if (!src || ns.widgetMode === 'simple') return '';
@@ -360,7 +368,7 @@
         `<span style="color:${clr[v] ?? '#FFB547'}">${dot[v] ?? '\u25b2'} ${escapeHtml(_SRC_LBL[k] ?? k)}</span>`
       ).join('<span style="color:#3A3A55"> · </span>');
       const tip = 'Data sources for this score:\u000a'
-        + entries.map(([k, v]) => `\u2022 ${_SRC_LBL[k] ?? k}: ${v === 'ok' ? 'answered' : v === 'skipped' ? 'not applicable for this token' : v === 'empty' ? 'no data returned' : v}`).join('\u000a')
+        + entries.map(([k, v]) => `\u2022 ${_SRC_LBL[k] ?? k}: ${_SRC_WHY[v] ?? v}`).join('\u000a')
         + '\u000a\u000aAnything not marked answered means part of the analysis did not run. That is not an all-clear.';
       return `<div title="${escapeHtml(tip)}" style="margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.06);display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:help">
         <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;color:#6B6B8A">Sources</span>

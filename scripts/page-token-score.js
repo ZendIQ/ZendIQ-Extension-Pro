@@ -447,7 +447,10 @@
         dexId:           p.dexId             ?? null,
         pairUrl:         p.url               ?? null,
       };
-    } catch (_) { return null; }
+    } catch (e) {
+      // Swallowing this reported a throttled request as "no data" — a claim about the token.
+      throw new Error('dexscreener: ' + (e?.message ?? 'fetch failed'));
+    }
   }
   // ── GeckoTerminal: daily OHLCV for 3-month + 6-month price change ──────────
   // Uses GeckoTerminal's free DEX API (no API key required).
@@ -511,7 +514,10 @@
       // Return using change1y key so existing scoring logic works unchanged;
       // weeksOfData mapped from daysOfData for threshold guards in _computeScore.
       return { change3m, change1y: changeLong, daysOfData, weeksOfData: Math.floor(daysOfData / 7), latestClose, volTrend };
-    } catch (_) { return null; }
+    } catch (e) {
+      // Genuine "no pool" / "too few candles" already return null above; reaching here is transport.
+      throw new Error('geckoterminal: ' + (e?.message ?? 'fetch failed'));
+    }
   }
 
   // ── RugCheck API: comprehensive risk report ───────────────────────────────────
@@ -521,7 +527,9 @@
       const data = await ns.pageJsonFetch(url);
       if (!data || typeof data !== 'object') return null;
       return data;
-    } catch (_) { return null; }
+    } catch (e) {
+      throw new Error('rugcheck: ' + (e?.message ?? 'fetch failed'));
+    }
   }
 
   // ── Score calculator ─────────────────────────────────────────────────────────
@@ -531,6 +539,14 @@
     'mutable metadata',   // almost every token has this — not a rug signal
     'metadata updatable', // same concept, alternate phrasing
     'metadata',           // catch-all for pure metadata mutability warnings
+  ];
+
+  // RugCheck's own verdicts on the holder table that signal 3 already scores, from the same
+  // report. Dropped only when we read that table — our row carries the actual percentage.
+  const RUGCHECK_CONCENTRATION = [
+    'single holder ownership',
+    'holder concentration',
+    'holders high ownership',
   ];
 
   // Keys we know a RugCheck report carries. Used as a positive shape check: testing for the
@@ -602,6 +618,7 @@
     // Prefer RugCheck's topHolders (they filter out exchange wallets); fallback to on-chain
     let top1Pct  = null;
     let top5Pct  = null;
+    let _readHolderTable = false;
     if (rugCheck?.topHolders?.length) {
       const th = rugCheck.topHolders;
       top1Pct = parseFloat(th[0]?.pct ?? th[0]?.amount ?? NaN);
@@ -613,6 +630,7 @@
 
     // A top holder of exactly 0% is not a real reading — treat it as missing, never as a pass.
     if (top1Pct != null && isFinite(top1Pct) && top1Pct > 0) {
+      _readHolderTable = true;
       if (top1Pct > 50) {
         score += 30;
         factors.push({ name: `Whale risk: ${top1Pct.toFixed(1)}% in one wallet`, severity: 'CRITICAL', detail: 'A single wallet controls the majority of supply — a dump would decimate price' });
@@ -667,6 +685,9 @@
         // Skip common low-signal items present on almost every legitimate token.
         // Mutable metadata is normal — not a rug signal on its own.
         if (RUGCHECK_NOISE.some(n => rNameLow.includes(n))) continue;
+        // Same holder table, already scored above — charging it again ranked concentration
+        // above liquidity and price collapse.
+        if (_readHolderTable && RUGCHECK_CONCENTRATION.some(n => rNameLow.includes(n))) continue;
         const g = grouped.get(rNameLow);
         if (!g) {
           grouped.set(rNameLow, { name: rName, level: lvl, detail: r.description ?? '', count: 1 });
@@ -1171,7 +1192,8 @@
       const _t = (label, p, ms = 8000) => {
         const trackedP = p
           .then(v  => { _srcStatus[label] ??= (v == null ? 'empty' : 'ok'); return v; })
-          .catch(() => { _srcStatus[label] ??= 'failed'; return null; });
+          // Our own request rate is not a property of the token — keep the two apart.
+          .catch((e) => { _srcStatus[label] ??= /\b429\b|rate.?limit/i.test(e?.message ?? '') ? 'ratelimited' : 'failed'; return null; });
         return Promise.race([
           trackedP,
           new Promise(r => setTimeout(() => { _srcStatus[label] ??= 'timeout'; r(null); }, ms)),
