@@ -652,7 +652,7 @@
       const _revokeHtml = (_r.unlimitedApprovals?.length > 0)
         ? `<a href="https://revoke.cash" target="_blank" rel="noopener" style="display:block;margin-top:8px;font-size:13px;font-weight:700;color:#9945FF;text-decoration:none">&#x1F517; Review &amp; revoke at revoke.cash &rarr;</a>` : '';
       return `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:10px">
-          <div title="Score starts at 100. Deductions: −30 per known drainer contract (max −60), −20 per unlimited approval (max −40), −20 if wallet settings not reviewed." style="cursor:help">
+          <div title="Score starts at 100. Deductions: −20 per unlimited approval (max −40), −20 if wallet settings not reviewed." style="cursor:help">
             <div style="font-size:13px;text-transform:uppercase;letter-spacing:0.8px;color:#C2C2D4;margin-bottom:4px">Wallet Security Score</div>
             <div style="display:flex;align-items:baseline;gap:4px"><span style="font-size:32px;font-weight:900;color:${_scColor};font-family:'Space Mono',monospace;line-height:1">${_dsc??'&mdash;'}</span><span style="font-size:13px;font-weight:700;color:#6B6B8A">&thinsp;/ 100</span></div>
             <div style="font-size:13px;color:${_openAct===0?'#14F195':'#FFB547'};font-weight:600;margin-top:2px">${_scSubline}</div>

@@ -614,7 +614,9 @@
         factors.push({ name: `Top holder: ${top1Pct.toFixed(1)}%`, severity: 'LOW', detail: 'Supply appears reasonably distributed' });
       }
     } else {
-      score += 5;
+      // Priced to match the 15-30% tier so unknown concentration never looks better
+      // than known concentration.
+      score += 10;
       factors.push({ name: 'Top holder: data unavailable', severity: 'MEDIUM', detail: 'Holder distribution could not be read, so insider supply is neither confirmed nor ruled out. This is not an all-clear — check the holder list manually.' });
     }
 
@@ -636,22 +638,40 @@
       factors.unshift({ name: 'PREVIOUSLY RUGGED', severity: 'CRITICAL', detail: 'RugCheck has flagged this token as a confirmed rug pull' });
     }
     if (Array.isArray(rugCheck?.risks)) {
+      // RugCheck emits one entry per flagged holder, so a name like 'Single holder ownership'
+      // repeats arbitrarily. Scoring each copy let one condition dominate purely on how many
+      // holders sat above RugCheck's cutoff, and rendered identical rows the user can't tell apart.
+      const grouped = new Map();
       for (const r of rugCheck.risks) {
-        const lvl      = r.level ?? '';
-        const rName    = r.name ?? '';
+        // 'info' items are just informational — no score impact
+        const lvl = r.level ?? '';
+        if (lvl !== 'danger' && lvl !== 'warn') continue;
+        const rName    = r.name || (lvl === 'danger' ? 'Flagged risk' : 'Warning');
         const rNameLow = rName.toLowerCase();
         // Skip common low-signal items present on almost every legitimate token.
         // Mutable metadata is normal — not a rug signal on its own.
         if (RUGCHECK_NOISE.some(n => rNameLow.includes(n))) continue;
-        // 'danger' items add HIGH signal; 'warn' adds MEDIUM noise
-        if (lvl === 'danger') {
-          score += 15;
-          factors.push({ name: rName || 'Flagged risk', severity: 'HIGH', detail: r.description ?? '' });
-        } else if (lvl === 'warn') {
-          score += 5;
-          factors.push({ name: rName || 'Warning', severity: 'MEDIUM', detail: r.description ?? '' });
+        const g = grouped.get(rNameLow);
+        if (!g) {
+          grouped.set(rNameLow, { name: rName, level: lvl, detail: r.description ?? '', count: 1 });
+          continue;
         }
-        // 'info' items are just informational — no score impact
+        g.count++;
+        if (lvl === 'danger' && g.level !== 'danger') {
+          g.level  = 'danger';
+          g.detail = r.description ?? g.detail;
+        }
+      }
+      for (const g of grouped.values()) {
+        // 'danger' items add HIGH signal; 'warn' adds MEDIUM noise
+        const per = g.level === 'danger' ? 15 : 5;
+        // Repeats still carry some breadth signal, so allow one escalation but no more.
+        score += Math.min(per * g.count, per * 2);
+        factors.push({
+          name: g.count > 1 ? `${g.name} (${g.count}\u00D7)` : g.name,
+          severity: g.level === 'danger' ? 'HIGH' : 'MEDIUM',
+          detail: g.detail,
+        });
       }
     }
 

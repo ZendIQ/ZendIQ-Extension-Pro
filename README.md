@@ -47,7 +47,7 @@ A movable panel injected directly into the DEX page (4 tabs):
 | **Monitor** | Live risk score, token risk score, bot-attack risk, estimated savings |
 | **Review & Sign** | Rate, selling/buying amounts, price impact, route, risk cards, savings & costs breakdown, action buttons |
 | **Activity** | Swap history with pair, gain/loss, exchange type, quote accuracy |
-| **Wallet Security** | On-chain approval audit, Security Score, drainer detection, per-wallet guidance |
+| **Wallet Security** | On-chain approval audit, Security Score, unlimited-delegation detection, per-wallet guidance |
 | **Settings** | Protection profile, Auto-optimise, Auto-accept, Priority fee / Jito mode, thresholds |
 
 ### Protection profiles
@@ -92,7 +92,6 @@ Analyses the pending swap for mempool-facing exposure using route structure, liq
 
 Scans your connected wallet for:
 - SPL Token and Token-2022 accounts with **unlimited delegations** (most common drainer vector)
-- Matches against a list of known drainer contract addresses
 - **Security Score** (0–100) with per-finding breakdown and a direct link to [revoke.cash](https://revoke.cash)
 - Wallet-specific step-by-step guidance for disabling auto-approve in Phantom, Backpack, Solflare, Glow, Brave Wallet, and Jupiter Wallet
 

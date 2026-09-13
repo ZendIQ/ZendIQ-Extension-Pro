@@ -14,7 +14,6 @@
  * Result schema:
  *   { score, checkedAt, pubkey, walletType, totalAccounts,
  *     unlimitedApprovals: [{ delegate, mint, delegatedRaw }],
- *     badContracts:       [{ delegate, mint, delegatedRaw }],
  *     findings:           [{ severity, text, detail }],
  *     error? }
  *
@@ -24,24 +23,6 @@
 (function () {
   'use strict';
   const ns = window.__zq;
-
-  // ── Known drain / malicious delegate contracts ───────────────────────────
-  // Community-sourced; expand from Solana security community lists.
-  // These are contract addresses that have been identified as drainers in
-  // on-chain security incident reports (2023–2025).
-  const KNOWN_DRAIN_CONTRACTS = new Set([
-    '3CCLniuEGnMBWbE3FQiRQEhDGSRUnfFBWX9eV8GiJgJ2',
-    'BVVdBbGmtMqDhFNpRKCBMCDmqD6a8NNvjFE6czHGJT5E',
-    'GcF8pREjdFbXr4h4sMXNNNyicP2A9QN6LWsPpKMVADep',
-    '9DtmUXVZhEFPGq6CQRS4RBfMkNDqVwVumtBXo3HLPF7w',
-    'FGbGTPJLsLEBJW4JnK8gNqUQRiDkdQAaTfqG6G5PkR7o',
-    '5sJqX3GhmdmfJC4uqoT3ZGagKByVSYo9CqTvWuLK8aCj',
-    '8W8XSFxXc4RAUXCq8AyjC2k7YZ7Q6zY3GAnG2RqAqbdB',
-    'AXEfAFqk4uqzC6Gy6SzZCfEJz8RKf8HnHqE8uoXYPyNZ',
-    'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsRUe9efou',
-    '4xQwteRzMPKJM1FS1H4fxVcLaGJy8W8PvbVTEm3XXTXB',
-    '6Y5ynC3v6F8i5PHN8SfJg9JbNrjxqBmKfQdqZ7dBDVy4',
-  ]);
 
   // Raw delegatedAmount at or above this threshold is treated as "unlimited".
   // (u64 max = 18_446_744_073_709_551_615; any amount >= 1e15 is effectively
@@ -117,7 +98,7 @@
       ns.walletSecurityResult = {
         score: null, error: 'Wallet not connected',
         findings: [{ severity: 'WARN', text: 'Connect your wallet to run a security check', detail: '' }],
-        checkedAt: null, pubkey: null, unlimitedApprovals: [], badContracts: [], walletType: detectWalletType(),
+        checkedAt: null, pubkey: null, unlimitedApprovals: [], walletType: detectWalletType(),
       };
       try { ns.renderWidgetPanel?.(); } catch (_) {}
       return;
@@ -131,7 +112,6 @@
     const findings      = [];
     let   score         = 100;
     let   unlimitedList = [];
-    let   knownBadList  = [];
     let   totalAccounts = 0;
 
     try {
@@ -157,7 +137,8 @@
       }
       // Nothing was actually read, so there is no basis for a verdict. Scoring 100 here
       // would read as "no approvals found" when it really means "not checked".
-      if (programsOk === 0) throw new Error('Could not reach Solana RPC \u2014 approvals were not checked');
+      // The caller appends the "approvals were not checked" caveat, so it is not repeated here.
+      if (programsOk === 0) throw new Error('Could not reach Solana RPC');
       const partialScan = programsOk < PROGRAMS.length;
       totalAccounts = allAccounts.length;
 
@@ -168,35 +149,20 @@
         const { delegate, delegatedAmount, mint } = info;
         if (!delegate) continue; // no approval set — skip
         const delegatedRaw = Number(delegatedAmount?.amount ?? 0);
-        if (delegatedRaw < UNLIMITED_THRESHOLD) continue; // limited approval — skip
         const entry = { delegate, mint: mint ?? 'Unknown', delegatedRaw };
-        unlimitedList.push(entry);
-        if (KNOWN_DRAIN_CONTRACTS.has(delegate)) {
-          knownBadList.push(entry);
-        }
+        if (delegatedRaw >= UNLIMITED_THRESHOLD) unlimitedList.push(entry);
       }
 
       // ── 3. Score deductions ──────────────────────────────────────────────
-      // −30 per known bad contract (hard floor: −60)
-      // −20 per unlimited approval not on the known-bad list (hard floor: −40)
-      // Floor at 0 regardless.
-      const unknownUnlimited = unlimitedList.length - knownBadList.length;
-      score -= Math.min(knownBadList.length  * 30, 60);
-      score -= Math.min(unknownUnlimited     * 20, 40);
+      // −20 per unlimited approval (hard floor: −40). Floor at 0 regardless.
+      score -= Math.min(unlimitedList.length * 20, 40);
       score  = Math.max(0, score);
 
       // ── 4. Build findings ────────────────────────────────────────────────
-      if (knownBadList.length > 0) {
-        findings.push({
-          severity: 'CRITICAL',
-          text:     `${knownBadList.length} known drainer contract${knownBadList.length > 1 ? 's' : ''} has token approval`,
-          detail:   'Revoke immediately — these contracts are confirmed wallet drainers',
-        });
-      }
-      if (unknownUnlimited > 0) {
+      if (unlimitedList.length > 0) {
         findings.push({
           severity: 'HIGH',
-          text:     `${unknownUnlimited} unlimited token approval${unknownUnlimited > 1 ? 's' : ''} active`,
+          text:     `${unlimitedList.length} unlimited token approval${unlimitedList.length > 1 ? 's' : ''} active`,
           detail:   'Review and revoke any you don\'t recognise at revoke.cash',
         });
       }
@@ -265,8 +231,8 @@
         findings.unshift({
           severity: 'OK',
           text:     unlimitedList.length === 0
-            ? `${totalAccounts} accounts scanned — 0 harmful accounts found`
-            : `${unlimitedList.length} approval${unlimitedList.length > 1 ? 's' : ''} found — none match known drainers`,
+            ? `${totalAccounts} accounts scanned — no unlimited approvals found`
+            : `${unlimitedList.length} approval${unlimitedList.length > 1 ? 's' : ''} found`,
           detail:   'Approval scan complete',
         });
       }
@@ -279,7 +245,6 @@
         walletType,
         totalAccounts,
         unlimitedApprovals: unlimitedList,
-        badContracts:       knownBadList,
         findings,
       };
 
@@ -291,7 +256,6 @@
         walletType:         detectWalletType(_pubkey),
         totalAccounts,
         unlimitedApprovals: [],
-        badContracts:       [],
         findings:           [{ severity: 'WARN', text: 'Security check could not run', detail: (e.message?.slice(0, 120) ?? 'Unknown error') + ' — your approvals were not checked, so this is not an all-clear.' }],
         error:              e.message,
       };
@@ -309,7 +273,6 @@
           wallet_type:     _r.walletType ?? 'unknown',
           score_tier:      _st,
           unlimited_count: (_r.unlimitedApprovals?.length ?? 0),
-          contract_count:  (_r.badContracts?.length ?? 0),
         });
       } } catch (_) {}
       // Load the reviewed-state for this wallet type from chrome.storage via bridge

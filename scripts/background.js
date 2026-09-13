@@ -433,15 +433,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // that as a win makes the race below systematically return the least caught-up endpoint.
     const _nullIsNotReady = msg.method === 'getTransaction';
     const _trace = [];
-    const _fetchOne = (url) => {
-      const t0 = Date.now();
+    // Redundancy for getTokenAccountsByOwner is 1 (see the endpoint list above), so a burst
+    // 429 on solanavibestation collapses the whole race and fails the wallet scan. Throttling
+    // clears in well under a second, so retry the same host before giving up on it. OPS-205.
+    const _rawFetch = (url, attempt = 0) => {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), 12_000); // 12 s per endpoint
       return fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: _body, signal: ac.signal })
-        .then(r => { clearTimeout(timer); if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(r => {
+          clearTimeout(timer);
+          if ((r.status === 429 || r.status === 503) && attempt < 2) {
+            return new Promise(res => setTimeout(res, 600 * (attempt + 1)))
+              .then(() => _rawFetch(url, attempt + 1));
+          }
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .catch(e => { clearTimeout(timer); throw e; });
+    };
+    const _fetchOne = (url) => {
+      const t0 = Date.now();
+      return _rawFetch(url)
         .then(data => {
           if (data?.error) throw new Error(data.error.message ?? 'RPC error');
-          clearTimeout(timer);
           if (_nullIsNotReady && data?.result == null) {
             const e = new Error('result null — not indexed yet');
             e._notReady = true;
@@ -451,7 +465,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return data;
         })
         .catch(e => {
-          clearTimeout(timer);
           _trace.push({ url, ms: Date.now() - t0, ok: false, err: e.message });
           throw e;
         });

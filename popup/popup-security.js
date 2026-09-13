@@ -8,21 +8,6 @@
  * Public API: loadSecurity()
  */
 
-// ── Known drain / malicious delegate contracts ──────────────────────────────
-const DRAIN_CONTRACTS = new Set([
-  '3CCLniuEGnMBWbE3FQiRQEhDGSRUnfFBWX9eV8GiJgJ2',
-  'BVVdBbGmtMqDhFNpRKCBMCDmqD6a8NNvjFE6czHGJT5E',
-  'GcF8pREjdFbXr4h4sMXNNNyicP2A9QN6LWsPpKMVADep',
-  '9DtmUXVZhEFPGq6CQRS4RBfMkNDqVwVumtBXo3HLPF7w',
-  'FGbGTPJLsLEBJW4JnK8gNqUQRiDkdQAaTfqG6G5PkR7o',
-  '5sJqX3GhmdmfJC4uqoT3ZGagKByVSYo9CqTvWuLK8aCj',
-  '8W8XSFxXc4RAUXCq8AyjC2k7YZ7Q6zY3GAnG2RqAqbdB',
-  'AXEfAFqk4uqzC6Gy6SzZCfEJz8RKf8HnHqE8uoXYPyNZ',
-  'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsRUe9efou',
-  '4xQwteRzMPKJM1FS1H4fxVcLaGJy8W8PvbVTEm3XXTXB',
-  '6Y5ynC3v6F8i5PHN8SfJg9JbNrjxqBmKfQdqZ7dBDVy4',
-]);
-
 const UNLIMITED_THRESHOLD = 1_000_000_000_000_000; // effective unlimited
 
 // ── Helper: background RPC (popup has direct chrome.runtime access) ─────────
@@ -133,7 +118,7 @@ function renderSecurityPanel() {
     return;
   }
 
-  const { score: rawScore, autoApproveDeduction = 0, checkedAt, unlimitedApprovals = [], badContracts = [], findings = [], totalAccounts, walletType } = _secResult;
+  const { score: rawScore, autoApproveDeduction = 0, checkedAt, unlimitedApprovals = [], findings = [], totalAccounts, walletType } = _secResult;
 
   const displayScore = rawScore == null ? null : Math.max(0, rawScore - (_reviewedAutoApprove ? 0 : autoApproveDeduction));
 
@@ -154,7 +139,7 @@ function renderSecurityPanel() {
   const sevColor = { CRITICAL: 'var(--danger)', HIGH: '#FF6B00', WARN: 'var(--orange)', OK: 'var(--green)' };
   const sevIcon  = { CRITICAL: '⛔', HIGH: '⚠', WARN: '⚠', OK: '✓' };
 
-  const revokeLink = unlimitedApprovals.length > 0
+  const revokeLink = (unlimitedApprovals.length > 0)
     ? `<a href="https://revoke.cash" target="_blank" rel="noopener" class="sec-revoke-link">
         🔗 Review &amp; revoke at revoke.cash →
        </a>`
@@ -237,8 +222,8 @@ function renderSecurityPanel() {
     <div class="section">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:8px">
         <div>
-          <div class="section-title" title="Score = 100 minus deductions: −30 per known drainer (max −60), −20 per unknown unlimited approval (max −40), −20 if wallet auto-approve settings have not been reviewed. 80–100 = Secure, 60–79 = Review, 40–59 = At Risk, 0–39 = Critical." style="cursor:help">Wallet Security Score</div>
-          <div class="sec-score-hover-wrap" style="cursor:help" data-tip="Score starts at 100. Deductions: −30 per known drainer contract (max −60), −20 per unlimited approval (max −40), −20 if wallet settings not reviewed.">
+          <div class="section-title" title="Score = 100 minus deductions: −20 per unlimited approval (max −40), −20 if wallet auto-approve settings have not been reviewed. 100 = Secure, 80–99 = Review, 60–79 = At Risk, below 60 = Critical." style="cursor:help">Wallet Security Score</div>
+          <div class="sec-score-hover-wrap" style="cursor:help" data-tip="Score starts at 100. Deductions: −20 per unlimited approval (max −40), −20 if wallet settings not reviewed.">
             <div style="display:flex;align-items:baseline;gap:4px">
               <span style="font-size:32px;font-weight:900;color:${scoreColor};font-family:'Space Mono',monospace;line-height:1">${displayScore ?? '—'}</span>
               <span style="font-size:13px;font-weight:700;color:var(--muted)">&thinsp;/ 100</span>
@@ -247,7 +232,7 @@ function renderSecurityPanel() {
             ${timeAgo ? `<div style="font-size:12px;color:var(--muted);margin-top:1px">Last scanned: ${timeAgo}</div>` : ''}
           </div>
         </div>
-        <button id="sec-run-btn" class="btn-q" title="Re-scan all token accounts on-chain for active unlimited approvals and known drainer contracts" style="width:auto;padding:7px 12px;margin:0;font-size:13px;flex-shrink:0" ${_secChecking ? 'disabled' : ''}>
+        <button id="sec-run-btn" class="btn-q" title="Re-scan all token accounts on-chain for active unlimited delegate approvals" style="width:auto;padding:7px 12px;margin:0;font-size:13px;flex-shrink:0" ${_secChecking ? 'disabled' : ''}>
           ${_secChecking ? 'Scanning…' : '↺ Re-scan'}
         </button>
       </div>
@@ -325,7 +310,7 @@ async function runCheck() {
     // No prior results — show the full no-wallet state
     _secResult = {
       score: null, checkedAt: Date.now(), pubkey: null, walletType: 'unknown',
-      totalAccounts: 0, unlimitedApprovals: [], badContracts: [],
+      totalAccounts: 0, unlimitedApprovals: [],
       findings: [{ severity: 'WARN', text: 'No wallet detected', detail: 'Visit jup.ag and connect your wallet there — ZendIQ will detect the public address automatically.' }],
     };
     renderSecurityPanel();
@@ -341,7 +326,6 @@ async function runCheck() {
 
   const findings      = [];
   let   unlimitedList = [];
-  let   knownBadList  = [];
   let   totalAccounts = 0;
 
   try {
@@ -364,7 +348,8 @@ async function runCheck() {
     }
     // Nothing was actually read, so there is no basis for a verdict. Scoring 100 here
     // would read as "no approvals found" when it really means "not checked".
-    if (programsOk === 0) throw new Error('Could not reach Solana RPC \u2014 approvals were not checked');
+    // The caller appends the "approvals were not checked" caveat, so it is not repeated here.
+    if (programsOk === 0) throw new Error('Could not reach Solana RPC');
     const partialScan = programsOk < PROGRAMS.length;
     totalAccounts = allAccounts.length;
 
@@ -374,31 +359,19 @@ async function runCheck() {
       const { delegate, delegatedAmount, mint } = info;
       if (!delegate) continue;
       const delegatedRaw = Number(delegatedAmount?.amount ?? 0);
-      if (delegatedRaw < UNLIMITED_THRESHOLD) continue;
       const entry = { delegate, mint: mint ?? 'Unknown', delegatedRaw };
-      unlimitedList.push(entry);
-      if (DRAIN_CONTRACTS.has(delegate)) knownBadList.push(entry);
+      if (delegatedRaw >= UNLIMITED_THRESHOLD) unlimitedList.push(entry);
     }
 
-    const unknownUnlimited = unlimitedList.length - knownBadList.length;
     let rawScore = 100;
-    rawScore -= Math.min(knownBadList.length  * 30, 60);
-    rawScore -= Math.min(unknownUnlimited     * 20, 40);
+    rawScore -= Math.min(unlimitedList.length * 20, 40);
     rawScore  = Math.max(0, rawScore);
     const score = rawScore; // kept for _secResult.score compat
 
-    if (knownBadList.length > 0) {
-      findings.push({
-        severity: 'CRITICAL',
-        text:     `${knownBadList.length} known drainer contract${knownBadList.length > 1 ? 's' : ''} has token approval`,
-        detail:   'Revoke immediately — these contracts are confirmed wallet drainers',
-        tooltip:  'CRITICAL RISK: These contract addresses are in ZendIQ\'s known-drainer database. A wallet drainer is a smart contract deliberately designed to steal funds. It already has unlimited permission to move your tokens — it can and likely will execute a full drain at any time. Go to revoke.cash NOW, connect your wallet, and revoke all approvals to these addresses. Do not make any more transactions until this is done.',
-      });
-    }
-    if (unknownUnlimited > 0) {
+    if (unlimitedList.length > 0) {
       findings.push({
         severity: 'HIGH',
-        text:     `${unknownUnlimited} unlimited token approval${unknownUnlimited > 1 ? 's' : ''} active`,
+        text:     `${unlimitedList.length} unlimited token approval${unlimitedList.length > 1 ? 's' : ''} active`,
         detail:   "Review and revoke any you don't recognise at revoke.cash",
         tooltip:  'HIGH RISK: You have given at least one contract unlimited permission to transfer your tokens. Even if the contract is legitimate today, it retains this permission forever unless you revoke it. If the contract is later compromised, upgraded maliciously, or was always a scam, it can drain every token that has this approval — without any further action from you. Visit revoke.cash to review and revoke approvals you no longer need.',
       });
@@ -534,14 +507,14 @@ async function runCheck() {
       findings.unshift({
         severity: 'OK',
         text:     unlimitedList.length === 0
-          ? `0 harmful accounts found`
-          : `${unlimitedList.length} approval${unlimitedList.length > 1 ? 's' : ''} found — none match known drainers`,
+          ? `No unlimited approvals found`
+          : `${unlimitedList.length} approval${unlimitedList.length > 1 ? 's' : ''} found`,
         detail:   'Approval scan complete',
-        tooltip:  'All SPL Token and Token-2022 program accounts were checked for active delegate approvals. None with unlimited amounts were found, which means no third-party contract currently has blanket permission to transfer your tokens. Continue practicing good hygiene: revoke approvals after every interaction and review regularly.',
+        tooltip:  'All SPL Token and Token-2022 program accounts were checked for active delegate approvals. None with unlimited amounts were found, which means no third-party contract currently has blanket permission to transfer your tokens. This checks approval scope only — it cannot tell you whether a specific approved address is trustworthy. Continue practicing good hygiene: revoke approvals after every interaction and review regularly.',
       });
     }
 
-    _secResult = { score, rawScore, autoApproveDeduction, checkedAt: Date.now(), pubkey, walletType: detectedType, totalAccounts, unlimitedApprovals: unlimitedList, badContracts: knownBadList, findings };
+    _secResult = { score, rawScore, autoApproveDeduction, checkedAt: Date.now(), pubkey, walletType: detectedType, totalAccounts, unlimitedApprovals: unlimitedList, findings };
     // Persist so the tab badge survives popup close/reopen
     chrome.storage.local.set({ secLastResult: _secResult });
     // Notify the active jup.ag page so the widget wallet tab updates immediately
@@ -550,7 +523,7 @@ async function runCheck() {
   } catch (e) {
     _secResult = {
       score: null, checkedAt: Date.now(), pubkey, walletType: 'unknown',
-      totalAccounts, unlimitedApprovals: [], badContracts: [],
+      totalAccounts, unlimitedApprovals: [],
       findings: [{ severity: 'WARN', text: 'Security check could not run', detail: (e.message?.slice(0, 120) ?? 'Unknown error') + ' — your approvals were not checked, so this is not an all-clear.' }],
     };
   } finally {
@@ -575,32 +548,23 @@ function refreshSecurityDisplay(newResult) {
 }
 
 // ── Public: restore tab badge colour on every popup open ────────────────
-// Called after detectWallet() resolves so walletPubkey is guaranteed to be set.
+// Display-only. Never scans: the pubkey must not reach an RPC node unless the user asked.
 function initSecurityBadge() {
   chrome.storage.local.get(['secLastResult'], ({ secLastResult }) => {
-    if (secLastResult) {
-      // If the stored scan belongs to a different wallet, discard it and scan the new one.
-      const pubkeyMismatch = walletPubkey && secLastResult.pubkey && secLastResult.pubkey !== walletPubkey;
-      if (pubkeyMismatch) {
-        _secResult = null;
-        _reviewedAutoApprove = false;
-        _updateSecurityTabColor();
-        if (!_secChecking) runCheck();
-        return;
-      }
-      _secResult = secLastResult;
-      const key = `secReviewed_${_secResult.walletType ?? 'unknown'}`;
-      // Inner callback: restore reviewed state, paint badge, THEN start scan.
-      // This ensures _lastKnownTabColor is seeded before runCheck() blanks _secResult.
-      chrome.storage.local.get([key], (data) => {
-        _reviewedAutoApprove = !!data[key];
-        _updateSecurityTabColor(); // seeds _lastKnownTabColor
-        if (walletPubkey && !_secChecking) runCheck();
-      });
-    } else {
-      // No stored result — start scan immediately; icon stays grey until done
-      if (walletPubkey && !_secChecking) runCheck();
+    if (!secLastResult) return; // no cached scan — badge stays grey until the user runs one
+    // A scan belonging to a different wallet tells us nothing; loadSecurity() re-scans on tab open.
+    if (walletPubkey && secLastResult.pubkey && secLastResult.pubkey !== walletPubkey) {
+      _secResult = null;
+      _reviewedAutoApprove = false;
+      _updateSecurityTabColor();
+      return;
     }
+    _secResult = secLastResult;
+    const key = `secReviewed_${_secResult.walletType ?? 'unknown'}`;
+    chrome.storage.local.get([key], (data) => {
+      _reviewedAutoApprove = !!data[key];
+      _updateSecurityTabColor();
+    });
   });
 }
 

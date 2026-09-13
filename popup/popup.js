@@ -42,16 +42,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
   }
   if (changes.secLastResult) {
-    // Wallet scan result updated (e.g. widget ran a scan) — update display only.
-    // Do NOT call initSecurityBadge() here: it always calls runCheck() which saves
-    // secLastResult again, firing this handler again → infinite scan/blink loop.
+    // Wallet scan result updated (e.g. widget ran a scan) — display only, never re-scan.
     if (typeof refreshSecurityDisplay === 'function') {
       refreshSecurityDisplay(changes.secLastResult.newValue);
     }
   }
-  // secReviewed_<type> changed (e.g. widget reviewed toggle flipped) — refresh display
+  // secReviewed_<type> changed (e.g. widget reviewed toggle flipped) — refresh display.
+  // Gated on the panel being open: loadSecurity() scans when no result is cached.
   if (Object.keys(changes).some(k => k.startsWith('secReviewed_'))) {
-    if (typeof loadSecurity === 'function') loadSecurity();
+    if (document.getElementById('panel-security')?.classList.contains('active') && typeof loadSecurity === 'function') {
+      loadSecurity();
+    }
   }
 });
 
