@@ -533,6 +533,10 @@
     'metadata',           // catch-all for pure metadata mutability warnings
   ];
 
+  // Keys we know a RugCheck report carries. Used as a positive shape check: testing for the
+  // absence of `risks` alone cannot tell a clean token from a payload we no longer understand.
+  const RUGCHECK_SHAPE = ['risks', 'rugged', 'token', 'tokenMeta', 'topHolders', 'markets', 'score', 'score_normalised'];
+
   // Ceiling on the combined price/volume contribution. Uncapped it reached +66, which
   // outvoted every structural safety signal (mint authority +35, holder concentration +30)
   // and pushed healthy tokens past the HIGH gate on price history alone.
@@ -685,7 +689,7 @@
           detail: g.detail,
         });
       }
-    } else if (rugCheck == null && _failed('rugcheck')) {
+    } else if (rugCheck == null ? _failed('rugcheck') : !RUGCHECK_SHAPE.some(k => k in rugCheck)) {
       // Without this the entire rug-risk section simply vanishes and the card reads clean.
       score += 5;
       factors.push({

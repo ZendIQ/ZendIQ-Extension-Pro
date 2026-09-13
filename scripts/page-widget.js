@@ -345,6 +345,29 @@
       }).join('') + '</div>';
     };
 
+    // ── Row: Token Score data sources ─────────────────────────────────────────
+    // Advanced view only. A score built from three sources reads identically to one
+    // built from four unless we say which ones answered.
+    const _SRC_LBL = { onchain: 'on-chain', rugcheck: 'RugCheck', dex: 'DexScreener', gecko: 'GeckoTerminal', pump: 'pump.fun' };
+    const _sourcesRow = (tokenScore) => {
+      const src = tokenScore?.sources;
+      if (!src || ns.widgetMode === 'simple') return '';
+      const entries = Object.entries(src);
+      if (!entries.length) return '';
+      const clr = { ok: '#14F195', skipped: '#6B6B8A' };
+      const dot = { ok: '\u25cf', skipped: '\u25cb' };
+      const cells = entries.map(([k, v]) =>
+        `<span style="color:${clr[v] ?? '#FFB547'}">${dot[v] ?? '\u25b2'} ${escapeHtml(_SRC_LBL[k] ?? k)}</span>`
+      ).join('<span style="color:#3A3A55"> · </span>');
+      const tip = 'Data sources for this score:\u000a'
+        + entries.map(([k, v]) => `\u2022 ${_SRC_LBL[k] ?? k}: ${v === 'ok' ? 'answered' : v === 'skipped' ? 'not applicable for this token' : v === 'empty' ? 'no data returned' : v}`).join('\u000a')
+        + '\u000a\u000aAnything not marked answered means part of the analysis did not run. That is not an all-clear.';
+      return `<div title="${escapeHtml(tip)}" style="margin-top:6px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.06);display:flex;justify-content:space-between;align-items:center;gap:8px;cursor:help">
+        <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;color:#6B6B8A">Sources</span>
+        <span style="font-size:9px;font-family:'Space Mono',monospace">${cells}</span>
+      </div>`;
+    };
+
     // ── Card: Order / Trade Summary ──────────────────────────────────────────
     // rows: [{ label, value, valueColor?, tooltip? }, ...]
     // section: optional section title override (default "ZendIQ Optimisation")
@@ -387,7 +410,7 @@
         <div style="display:flex;justify-content:space-between;align-items:center;font-size:13px${divider}">
           <span style="color:${tsc};font-weight:600">Token Risk Score</span>
           <span style="display:flex;align-items:center">${badge}</span>
-        </div>${rows}
+        </div>${rows}${loaded ? _sourcesRow(tokenScore) : ''}
       </div>`;
     };
 
@@ -1068,6 +1091,7 @@
                 <span style="display:flex;align-items:center">${tsBadge}</span>
               </div>
               ${_tsFactorRows}
+              ${tsLoaded ? _sourcesRow(ts) : ''}
             </div>`;
           })()}
 
@@ -1961,6 +1985,7 @@
                   <span style="display:flex;align-items:center">${tsBadge}</span>
                 </div>
                 ${_tsFactorRows}
+                ${tsLoaded ? _sourcesRow(_ts) : ''}
               </div>`;
             })()}
 
