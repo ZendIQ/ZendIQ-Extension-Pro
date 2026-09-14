@@ -213,10 +213,16 @@
         const _applied = ns.axiomOptimizing === true && ns.axiomLastOptimization;
         const _st  = _applied ? null : _readSettings();
         const _own = _st ? _preset(_st, _st.currentSolPresetKey, _side) : null;
+        const _ownSlip = _own ? parseFloat(_own.slippage) : NaN;
+        // A preset that already meets the target needed no write, so nothing was applied —
+        // but the trade is at safe values and must not be labelled unprotected for it.
+        const _safeAlready = !_applied && _presetAtTarget(_side) === true;
         ns.axiomTradeProtection = _applied
-          ? { state: 'protected',   slippage: ns.axiomLastOptimization.slipTo, mev: 'Secure', at: Date.now(), verdict: null }
-          : { state: 'unprotected', slippage: _own ? parseFloat(_own.slippage) : null,
-              mev: _own?.enhancedMevProtection ? 'Secure' : 'off', at: Date.now(), verdict: null };
+          ? { state: 'protected', slippage: ns.axiomLastOptimization.slipTo, mev: 'Secure', at: Date.now(), verdict: null }
+          : _safeAlready
+            ? { state: 'protected', slippage: _ownSlip, mev: 'Secure', alreadySafe: true, at: Date.now(), verdict: null }
+            : { state: 'unprotected', slippage: isNaN(_ownSlip) ? null : _ownSlip,
+                mev: _own?.enhancedMevProtection ? 'Secure' : 'off', at: Date.now(), verdict: null };
       }
       try { ns.renderWidgetPanel?.(); } catch (_) {}
       // Fire the full pointer → mouse → click chain so Axiom's handler fires
@@ -820,6 +826,26 @@
     return worst;
   }
 
+  // Slippage ZendIQ would put this token at, from the worst of bot-attack and token risk.
+  function _slipTargetNow() {
+    const botLvl = ns.axiomMevRisk?.riskLevel ?? null;
+    const tkLvl  = (ns.tokenScoreResult?.loaded) ? (ns.tokenScoreResult.level ?? null) : null;
+    const worst  = _worstLevel(botLvl, tkLvl);
+    return worst === 'CRITICAL' ? 10 : worst === 'HIGH' ? 15 : 20;
+  }
+
+  // Whether the active preset already sits at or below that target with MEV Secure.
+  // null when the preset cannot be read — an unknown preset is not a safe one, and
+  // _computeOptimization returns the same null for that as it does for nothing-to-do.
+  function _presetAtTarget(side) {
+    const st = _readSettings();
+    if (!st) return null;
+    const p = _preset(st, st.currentSolPresetKey, side === 'sell' ? 'sell' : 'buy');
+    const s = p ? parseFloat(p.slippage) : NaN;
+    if (isNaN(s)) return null;
+    return s <= _slipTargetNow() && _mevModeLabel(p) === 'Secure';
+  }
+
   // Compute the proposed safe changes for the active preset on the given side.
   // Returns null when settings are unreadable or there is nothing worth changing.
   function _computeOptimization(side) {
@@ -835,12 +861,7 @@
     const slipFrom = parseFloat(preset.slippage);
     if (isNaN(slipFrom) || slipFrom <= 0) return null;
 
-    // Target slippage from the worst of bot-attack and token risk.
-    const botLvl = ns.axiomMevRisk?.riskLevel ?? null;
-    const tkLvl  = (ns.tokenScoreResult?.loaded) ? (ns.tokenScoreResult.level ?? null) : null;
-    const worst  = _worstLevel(botLvl, tkLvl);
-    const slipTarget = worst === 'CRITICAL' ? 10 : worst === 'HIGH' ? 15 : 20;
-    const slipTo = Math.min(slipFrom, slipTarget); // only ever lower
+    const slipTo = Math.min(slipFrom, _slipTargetNow()); // only ever lower
 
     const mevFrom = _mevModeLabel(preset);
 
@@ -2707,7 +2728,9 @@
           _head = 'Protected \u2014 ' + _pct + ' slippage, MEV Secure';
           _sub  = _tp.verdict === 'confirmed'
             ? 'Confirmed against Axiom\u2019s own record of this trade.'
-            : 'Sent using ZendIQ\u2019s preset. Your own settings go back the moment it settles.';
+            : _tp.alreadySafe
+              ? 'Your own preset already met ZendIQ\u2019s target for this token, so nothing needed changing.'
+              : 'Sent using ZendIQ\u2019s preset. Your own settings go back the moment it settles.';
         } else {
           _col  = '#FFB547';
           _head = 'Not protected \u2014 your own preset';
@@ -2849,7 +2872,13 @@
         : ns.axiomConfirmPending
         ? (_opt
             ? '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">ZendIQ tightens your preset for this trade only and restores your original settings the moment it settles.</div>'
-            : '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">Your preset is already safe. ZendIQ cannot re-route Axiom trades \u2014 cancel and lower slippage manually to reduce risk further.</div>')
+            : '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">'
+              + (_presetAtTarget(_isSellSide ? 'sell' : 'buy') === true
+                  ? 'Your preset already meets ZendIQ\u2019s target for this token. ZendIQ cannot re-route Axiom trades \u2014 cancel and lower slippage manually to reduce risk further.'
+                  : !ns.axiomOptimizeEnabled
+                    ? 'Optimization is turned off, so ZendIQ will not change your preset for this trade.'
+                    : 'ZendIQ could not read your Axiom preset, so it has nothing to change \u2014 cancel and check your slippage manually if you are concerned.')
+              + '</div>')
         : ns.axiomRiskAcknowledged
           ? ''
           : ns.axiomMintUnresolved

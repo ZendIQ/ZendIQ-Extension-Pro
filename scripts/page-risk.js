@@ -50,6 +50,17 @@
     'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm', // WIF
   ]);
 
+  // Slippage bands per venue: [minPercent, scoreAdd, severity, label].
+  // jup.ag routes through an aggregator on auto-slippage, so a few percent is already
+  // deliberate. Memecoin venues are hand-set and work at 10-20%, where that ladder puts
+  // every trade in one CRITICAL band and separates none of them — including the ones
+  // ZendIQ itself just set. Ordered high to low; first match wins.
+  const SLIPPAGE_BANDS = {
+    default: [[5, 40, 'CRITICAL', 'High'], [3, 25, 'HIGH', 'Elevated'], [0, 5, 'LOW', 'Normal']],
+    axiom:   [[50, 40, 'CRITICAL', 'Extreme'], [25, 25, 'HIGH', 'High'],
+              [15, 12, 'MEDIUM', 'Elevated'], [0, 5, 'LOW', 'Normal']],
+  };
+
   async function calculateRisk(txInfo, context) {
     let score = 0;
     const factors = [];
@@ -96,15 +107,16 @@
     // Using the full tolerance as loss overstates Est. Loss — Jupiter rarely fills
     // at the worst-case boundary. Score bands still reflect exposure correctly.
     const SLIPPAGE_FILL_RATE = 0.15;
-    if (swapSlippage >= 5) {
-      score += 40;
-      factors.push({ name: `High slippage (${swapSlippage.toFixed(2)}%)`, severity: 'CRITICAL', lossContrib: (swapAmountUsd ?? 0) * (swapSlippage / 100) * SLIPPAGE_FILL_RATE });
-    } else if (swapSlippage >= 3) {
-      score += 25;
-      factors.push({ name: `Elevated slippage (${swapSlippage.toFixed(2)}%)`, severity: 'HIGH', lossContrib: (swapAmountUsd ?? 0) * (swapSlippage / 100) * SLIPPAGE_FILL_RATE });
-    } else if (swapSlippage > 0) {
-      score += 5;
-      factors.push({ name: `Normal slippage (${swapSlippage.toFixed(2)}%)`, severity: 'LOW', lossContrib: (swapAmountUsd ?? 0) * (swapSlippage / 100) * SLIPPAGE_FILL_RATE });
+    if (swapSlippage > 0) {
+      const _srcBands = SLIPPAGE_BANDS[swapInfo?.source];
+      const bands = Array.isArray(_srcBands) ? _srcBands : SLIPPAGE_BANDS.default;
+      const [, add, severity, label] = bands.find(b => swapSlippage >= b[0]) ?? bands[bands.length - 1];
+      score += add;
+      factors.push({
+        name: `${label} slippage (${swapSlippage.toFixed(2)}%)`,
+        severity,
+        lossContrib: (swapAmountUsd ?? 0) * (swapSlippage / 100) * SLIPPAGE_FILL_RATE,
+      });
     } else {
       factors.push({ name: 'Slippage: none / auto', severity: 'LOW', lossContrib: 0 });
     }
