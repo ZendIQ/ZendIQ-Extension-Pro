@@ -129,7 +129,7 @@
             { programId },
             { encoding: 'jsonParsed' },
           ]);
-          const value = resp?.result?.value;
+          const value = resp?.value;
           if (!Array.isArray(value)) throw new Error('malformed RPC response');
           allAccounts = allAccounts.concat(value);
           programsOk++;

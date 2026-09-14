@@ -204,7 +204,7 @@
             sig,
             { encoding: 'jsonParsed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION, commitment: 'confirmed' },
           ]);
-          if (_r?.result) { _confirmedTx = _r; break; }
+          if (_r) { _confirmedTx = _r; break; }
         } catch (_) {}
       }
       if (!_confirmedTx) {
@@ -217,7 +217,7 @@
         // ── Step 1: resolve slot from the user's tx ───────────────────────
         // Reuse the already-confirmed tx from the polling step above.
         const txRes = _confirmedTx;
-        const slot = txRes.result.slot;
+        const slot = txRes.slot;
 
         // ── Step 2: find adjacent signatures in the same block ───────────────
         // getBlock is blocked on public free-tier RPCs.
@@ -227,7 +227,7 @@
         // touches the same vaults, including attacker sandwich txs.
         // getSignaturesForAddress on a busy vault with limit:20 filtered to
         // the same slot reliably surfaces same-block neighbours.
-        const userTx   = txRes.result;
+        const userTx   = txRes;
         const feePayer = _feePayer(userTx);
         if (!feePayer) return { error: 'unavailable' };
 
@@ -285,7 +285,7 @@
 
         // Keep only sigs that landed in the same slot as the user's tx.
         const _inSlot = (res) =>
-          (res?.result ?? [])
+          (res ?? [])
             .filter(item => item.slot === slot && item.signature !== sig)
             .map(item => item.signature);
 
@@ -310,7 +310,7 @@
               cSig,
               { encoding: 'jsonParsed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION, commitment: 'confirmed' },
             ]);
-            return { cSig, offset, data: r?.result ?? null };
+            return { cSig, offset, data: r ?? null };
           })
         );
 

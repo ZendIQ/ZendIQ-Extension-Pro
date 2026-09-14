@@ -540,7 +540,7 @@
               const txRes = await ns.rpcCall('getTransaction', [
                 _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
               ]);
-              if (txRes?.result?.meta?.err) {
+              if (txRes?.meta?.err) {
                 window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE',
                   payload: { signature: _sig, txFailed: true, optimized: false },
                 }}, '*');

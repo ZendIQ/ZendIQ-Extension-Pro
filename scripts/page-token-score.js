@@ -131,7 +131,7 @@
       for (let page = 0; page < 3; page++) {
         const params = [mint, { limit: 1000, ...(before ? { before } : {}) }];
         const resp = await ns.rpcCall('getSignaturesForAddress', params);
-        const sigs = resp?.result ?? [];
+        const sigs = resp ?? [];
         if (!sigs.length) break;
         oldest = sigs[sigs.length - 1].signature;
         if (sigs.length < 1000) break;
@@ -140,15 +140,15 @@
       if (!oldest) {
         // Fallback: mint authority as deployer proxy (null if burned)
         const resp = await ns.rpcCall('getAccountInfo', [mint, { encoding: 'jsonParsed' }]);
-        return resp?.result?.value?.data?.parsed?.info?.mintAuthority ?? null;
+        return resp?.value?.data?.parsed?.info?.mintAuthority ?? null;
       }
       // Fee-payer of the oldest tx (accountKeys[0]) = real deployer
       const txResp = await ns.rpcCall('getTransaction', [
         oldest,
         { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
       ]);
-      const keys = txResp?.result?.transaction?.message?.staticAccountKeys
-                ?? txResp?.result?.transaction?.message?.accountKeys ?? [];
+      const keys = txResp?.transaction?.message?.staticAccountKeys
+                ?? txResp?.transaction?.message?.accountKeys ?? [];
       return (typeof keys[0] === 'string' ? keys[0] : keys[0]?.pubkey) ?? null;
     } catch (_) { return null; }
   }
@@ -162,7 +162,7 @@
     try {
       const cutoff  = Math.floor((Date.now() - windowDays * 24 * 3600 * 1000) / 1000);
       const resp    = await ns.rpcCall('getSignaturesForAddress', [deployerAddress, { limit: 200 }]);
-      const recent  = (resp?.result ?? []).filter(s => (s.blockTime ?? 0) >= cutoff);
+      const recent  = (resp ?? []).filter(s => (s.blockTime ?? 0) >= cutoff);
       if (!recent.length) return { tokenCount: 0, mints: [], complete: true };
 
       // Prefer all 200 recent txs, but cap API calls at 50.
@@ -178,17 +178,21 @@
           )
         : recent;
       const toCheck = _spread.slice(0, 50);
-      // Process in batches of 5 to avoid rate-limiting publicnode with 50 simultaneous RPC calls.
+      // One HTTP request per chunk rather than one per signature: ns.rpcCall races three
+      // endpoints, so 50 lookups meant 150 requests in 10 sequential waves and lost the 6s
+      // budget on heavy pages. rpcBatch keeps the envelope, so entries stay { result }.
       const txResps = [];
-      for (let _i = 0; _i < toCheck.length; _i += 5) {
-        const _batch = toCheck.slice(_i, _i + 5);
-        const _batchResults = await Promise.all(
-          _batch.map(s => ns.rpcCall('getTransaction', [
+      for (let _i = 0; _i < toCheck.length; _i += 10) {
+        const _chunk = toCheck.slice(_i, _i + 10);
+        const _res = await ns.rpcBatch(_chunk.map(s => ({
+          method: 'getTransaction',
+          params: [
             s.signature,
             { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
-          ]).catch(() => ({ _failed: true })))
-        );
-        txResps.push(..._batchResults);
+          ],
+        }))).catch(() => null);
+        // A chunk that fails wholesale is a transport failure for every signature in it.
+        txResps.push(...(_res ?? _chunk.map(() => ({ _failed: true }))));
       }
 
       const mints = [];
@@ -211,7 +215,7 @@
       }
       // A transport failure means the tx was never scanned. A `result: null` (pruned from the
       // endpoint's ledger) is an inherent limit of the method, present in healthy scans too.
-      const _failed = txResps.filter(r => r?._failed).length;
+      const _failed = txResps.filter(r => r == null || r._failed || r.error).length;
       return { tokenCount: mints.length, mints, complete: _failed === 0 };
     } catch (_) { return { tokenCount: null, mints: [], complete: false }; }
   }
@@ -258,7 +262,7 @@
   async function _fetchBundleLaunch(mint) {
     try {
       const resp1   = await ns.rpcCall('getSignaturesForAddress', [mint, { limit: 1000 }]);
-      const allSigs = resp1?.result ?? [];
+      const allSigs = resp1 ?? [];
 
       if (!allSigs.length) return null;
 
@@ -335,7 +339,7 @@
 
     // ── Parse mintInfo ─────────────────────────────────────────────────────────
     let mintInfo = null;
-    const info = accountR?.result?.value?.data?.parsed?.info;
+    const info = accountR?.value?.data?.parsed?.info;
     if (info) {
       mintInfo = {
         mintAuthority:   info.mintAuthority   ?? null,
@@ -343,9 +347,9 @@
         supply:          info.supply          ?? null,
         decimals:        info.decimals        ?? 9,
       };
-    } else if (accountR?.result?.value) {
+    } else if (accountR?.value) {
       // Fallback: some endpoints return base64 even when jsonParsed is requested.
-      const rawData = accountR.result.value.data;
+      const rawData = accountR.value.data;
       const b64 = Array.isArray(rawData) ? rawData[0] : null;
       if (b64) mintInfo = _parseMintBytes(b64);
     }
@@ -359,11 +363,11 @@
     // If mintInfo fetch failed entirely, fall back to getTokenSupply (rare).
     // Skip when accountR explicitly returned value:null — the account doesn't exist
     // on-chain and getTokenSupply would also fail with "could not find account".
-    const _accountNotFound = accountR !== null && accountR?.result?.value === null;
+    const _accountNotFound = accountR !== null && accountR?.value === null;
     if (!mintInfo && !_accountNotFound) {
       const supplyR = await ns.rpcCall('getTokenSupply', [mint])
         .catch(() => null);
-      totalSupply = parseFloat(supplyR?.result?.value?.uiAmount ?? 0);
+      totalSupply = parseFloat(supplyR?.value?.uiAmount ?? 0);
     }
 
     // ── Parse holderData ───────────────────────────────────────────────────────
@@ -371,7 +375,7 @@
     // case: a real token always has a top holder, so 0% means "not read", not "well spread".
     let holderData = null;
     if (totalSupply) {
-      const holders = largestR?.result?.value ?? [];
+      const holders = largestR?.value ?? [];
       const holderPcts = holders.map(h => ({
         address: h.address,
         pct:     (parseFloat(h.uiAmount ?? 0) / totalSupply) * 100,
@@ -911,26 +915,30 @@
     // Primary source: DexScreener/pump.fun pairCreatedAt (Unix ms).
     // Fallback: creation-slot blockTime from bundle detection — on-chain and
     // always available even when external APIs haven't indexed the token yet.
-    // Suppressed on pump.fun — every token there is <24h old by design;
-    // the site-context CRITICAL factor (§5) already captures that risk fully.
-    // Not suppressed for axiom.trade — graduated tokens there can be weeks/months old.
     const _isMemeContext2 = _isPumpFunSite
       || window.location.hostname?.includes('axiom.trade')
       || mint.endsWith('pump');
-    if (_createdAt && !_isPumpFunSite) {
+    if (_createdAt) {
       const ageDays = _ageDays;
+      // §5 charges a fresh meme launch 35 for being new. Scoring age again here would
+      // price the same fact twice, so the row is still shown and the points are not.
+      // Keyed on whether newness was already counted, never on which site is open:
+      // the same mint must score the same on pump.fun and axiom.trade.
+      const _countedBy5 = _isMemeContext2 && ageDays < 30;
+      let _agePts = 0;
       if (ageDays < 1) {
-        score += 25;
+        _agePts = 25;
         factors.push({ name: 'New token: <24h old', severity: 'HIGH', detail: `Trading pair created ${(ageDays * 24).toFixed(1)}h ago. Rug pulls most commonly occur within the first 24 hours of a token launch.` });
       } else if (ageDays < 7) {
-        score += 15;
+        _agePts = 15;
         factors.push({ name: `New token: ${ageDays.toFixed(0)}d old`, severity: 'HIGH', detail: `Trading pair is ${ageDays.toFixed(0)} days old. Tokens under 7 days old carry elevated rug risk.` });
       } else if (ageDays < 30) {
-        score += 5;
+        _agePts = 5;
         factors.push({ name: `Recent token: ${ageDays.toFixed(0)}d old`, severity: 'MEDIUM', detail: `Trading pair is ${ageDays.toFixed(0)} days old. Under 30 days — some early-exit risk remains.` });
       } else {
         factors.push({ name: `Token age: ${Math.floor(ageDays)}d`, severity: 'LOW', detail: `Trading pair has existed for ${Math.floor(ageDays)} days. Established enough that a sudden rug is less likely.` });
       }
+      if (!_countedBy5) score += _agePts;
     }
 
     // ── 11. 24h price change ──────────────────────────────────────────────────
@@ -1292,7 +1300,7 @@
           const lastSig = bundleFinal._page1[bundleFinal._page1.length - 1]?.signature;
           if (lastSig) {
             const resp2 = await _t2(ns.rpcCall('getSignaturesForAddress', [mint, { limit: 1000, before: lastSig }]), 6000);
-            const page2 = resp2?.result ?? [];
+            const page2 = resp2 ?? [];
             if (page2.length < 1000) {
               const allSigs = bundleFinal._page1.concat(page2);
               const valid = allSigs.filter(s => s.slot && !s.err);

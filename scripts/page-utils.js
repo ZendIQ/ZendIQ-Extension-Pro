@@ -139,6 +139,9 @@
   // Route RPC calls through bridge → background service worker.
   // Direct fetch() from the MAIN world is blocked by jup.ag's Content-Security-Policy,
   // but the background service worker has no such restriction.
+  // Resolves the JSON-RPC `result` payload, never the envelope: a caller that reaches for
+  // `.result` itself gets undefined through optional chaining and reports a confident false
+  // with no error anywhere. rpcBatch keeps the envelope — its contract is per-call errors.
   function rpcCall(method, params = []) {
     return new Promise((resolve, reject) => {
       const _id = Math.random().toString(36).slice(2);
@@ -151,7 +154,7 @@
         clearTimeout(_timeout);
         window.removeEventListener('message', _handler);
         const res = ev.data.msg.result;
-        if (res?.ok) resolve(res.data);
+        if (res?.ok) resolve(res.data?.result);
         else reject(new Error(res?.error ?? 'RPC failed'));
       }
       window.addEventListener('message', _handler);
@@ -217,11 +220,10 @@
     for (let attempt = 0; attempt < 15; attempt++) {
       await new Promise(r => setTimeout(r, attempt === 0 ? 5000 : 3000));
       try {
-        const res = await ns.rpcCall('getTransaction', [
+        const tx = await ns.rpcCall('getTransaction', [
           signature,
           { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
         ]);
-        const tx = res?.result;
         if (!tx?.meta) continue; // not confirmed yet — retry
 
         const meta = tx.meta;

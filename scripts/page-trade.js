@@ -27,7 +27,7 @@
     if (_rentExemptInFlight) return _rentExemptInFlight;
     _rentExemptInFlight = ns.rpcCall('getMinimumBalanceForRentExemption', [0])
       .then(res => {
-        const v = res?.result;
+        const v = res;
         if (typeof v === 'number' && v > 0) {
           _rentExemptLamports  = v;
           _rentExemptFetchedAt = Date.now();
@@ -285,7 +285,7 @@
     for (const { addr: _candidate, label: _label } of _candidates) {
       try {
         const _info = await ns.rpcCall('getAccountInfo', [_candidate, { encoding: 'jsonParsed' }]);
-        if (_info?.result?.value?.data?.parsed?.info?.mint === mint) {
+        if (_info?.value?.data?.parsed?.info?.mint === mint) {
           _ataCache[_key] = _candidate; _ataCacheOnChain[_key] = true;
           return _candidate;
         }
@@ -1895,7 +1895,7 @@
         if (_isRdmBundle && _bundleWallet) {
           try {
             const _balRes = await ns.rpcCall('getBalance', [_bundleWallet, { commitment: 'confirmed' }]);
-            const _balLam = _balRes?.result?.value ?? 0;
+            const _balLam = _balRes?.value ?? 0;
             const _priFee = ns.widgetLastOrderFees?.priorityFeeLamports ?? 0;
             const _baseFee = 5_000; // 1 signature (tip injected into swap tx â€” no separate tip tx)
             const _rentReserve = _rentExemptMin();
@@ -2055,7 +2055,8 @@
                   body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getLatestBlockhash', params: [{ commitment: 'finalized' }] }),
                   signal: AbortSignal.timeout(5000)
                 });
-                _bhJson = await _bhFetchR.json();
+                // Unwrapped to match ns.rpcCall below — both branches must hand back the same shape.
+                _bhJson = (await _bhFetchR.json())?.result;
               } else {
                 // Nothing sniffed yet. The previous fallback was a hardcoded mainnet-beta URL,
                 // which 403s every request carrying an Origin header — it could never return a
@@ -2063,7 +2064,7 @@
                 // little slot-lag risk and actually works.
                 _bhJson = await ns.rpcCall('getLatestBlockhash', [{ commitment: 'finalized' }]);
               }
-              const _bhStr = _bhJson?.result?.value?.blockhash;
+              const _bhStr = _bhJson?.value?.blockhash;
               if (_bhStr) _freshBlockhashBytes = ns.b58Decode(_bhStr);
             } catch (_bhE) {
               console.warn('[ZendIQ RDM Bundle] blockhash fetch failed:', _bhE.message);
@@ -2117,7 +2118,7 @@
               _preSimB64 = btoa(_preSimB64);
               const _psd = await ns.rpcCall('simulateTransaction',
                 [_preSimB64, { encoding: 'base64', commitment: 'processed', sigVerify: false, replaceRecentBlockhash: true }]);
-              const _psv = _psd?.result?.value;
+              const _psv = _psd?.value;
               if (_psv?.err) {
                 const _psErr = JSON.stringify(_psv.err);
                 if (/AccountNotFound|BlockhashNotFound|NodeBehindLastValid|AddressLookupTable|sanitize accounts offsets/i.test(_psErr)) {
@@ -2129,7 +2130,6 @@
                   if (_psv.logs?.length) console.error('[ZendIQ RDM PreSim] logs:', _psv.logs.slice(-10));
                   // Don't abort here â€” let the user decide via wallet popup; log is the key output.
                 }
-              } else if (!_psd?.error) {
               }
             } catch (_psE) { console.warn('[ZendIQ RDM PreSim] rpcCall failed:', _psE.message); }
 
@@ -2203,14 +2203,13 @@
             try {
               const _sd = await ns.rpcCall('simulateTransaction',
                 [_injB64, { encoding: 'base64', commitment: 'processed', sigVerify: true, replaceRecentBlockhash: false }]);
-              const _sv = _sd?.result?.value;
-              if (_sd?.error) {
-                console.error('[ZendIQ RDM BundleSim] RPC error:', JSON.stringify(_sd.error));
-              } else if (_sv?.err) {
+              const _sv = _sd?.value;
+              // A JSON-RPC error arrives as a rejection, not a resolved envelope — see the catch.
+              if (_sv?.err) {
                 console.error('[ZendIQ RDM BundleSim] SIM FAILED (sigVerify=T):', JSON.stringify(_sv.err));
                 const _sd2 = await ns.rpcCall('simulateTransaction',
                   [_injB64, { encoding: 'base64', commitment: 'processed', sigVerify: false, replaceRecentBlockhash: true }]);
-                const _sv2    = _sd2?.result?.value;
+                const _sv2    = _sd2?.value;
                 const _simStr = JSON.stringify(_sv2?.err ?? _sv?.err ?? '');
                 if (_sv2?.err) {
                   if (!/AccountNotFound|BlockhashNotFound|NodeBehindLastValid/i.test(_simStr)) {

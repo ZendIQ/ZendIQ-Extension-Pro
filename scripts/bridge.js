@@ -361,6 +361,8 @@ window.addEventListener('message', (e) => {
         createdAt: Number(raw.createdAt) || Date.now(),
         host: typeof raw.host === 'string' && /^api\d*\.axiom\.trade$/.test(raw.host) ? raw.host : null,
         presetKey: raw.presetKey,
+        // Absent on obligations written before sells were covered; those were all buys.
+        side: raw.side === 'sell' ? 'sell' : 'buy',
         fields,
         serverFields,
         localRestored:  !!raw.localRestored,

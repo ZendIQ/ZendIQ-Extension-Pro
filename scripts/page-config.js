@@ -146,6 +146,7 @@
     axiomConfirmPending: false,    // true while buy-button intercept awaits user decision
     axiomAutoAccepting:  false,    // true while auto-accept optimizes without waiting for a click
     axiomPendingBtnRef:  null,     // DOM reference to the intercepted Buy button
+    axiomPendingSide:    null,     // 'buy' | 'sell' — which preset the intercept applies to
     axiomRiskAcknowledged: false,  // true after user clicks "Got it"; cleared on token change or new buy
     axiomListGapAck:     false,    // true after the user dismisses the list-page coverage notice
     // ── Axiom preset-optimization (snapshot + restore) ───────────────────

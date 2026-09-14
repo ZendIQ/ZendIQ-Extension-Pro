@@ -484,7 +484,7 @@
       await new Promise(r => setTimeout(r, 2500));
       try {
         const res = await ns.rpcCall('getSignatureStatuses', [[sig], { searchTransactionHistory: true }]);
-        const status = res?.result?.value?.[0];
+        const status = res?.value?.[0];
         if (!status) continue;
         if (status.err) return { ok: false, err: status.err };
         const cs = status.confirmationStatus;
@@ -540,7 +540,7 @@
     p += nAccts * 32;
     const bhOffset = p; // blockhash starts here
     const bhRes = await ns.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-    const blockhash = bhRes?.result?.value?.blockhash;
+    const blockhash = bhRes?.value?.blockhash;
     if (!blockhash) throw new Error('Could not fetch recent blockhash');
     const copy = new Uint8Array(txBytes);
     const bhBytes = ns.b58Decode(blockhash);
@@ -783,7 +783,7 @@
       const _toB64 = (b) => { let s = ''; for (let i = 0; i < b.length; i += 8192) s += String.fromCharCode(...b.subarray(i, i + 8192)); return btoa(s); };
       try {
         const _simRes = await ns.rpcCall('simulateTransaction', [_toB64(signedBuyBytes), { encoding: 'base64', commitment: 'confirmed', sigVerify: true }]);
-        const _simVal = _simRes?.result?.value;
+        const _simVal = _simRes?.value;
         if (_simVal?.err) {
           console.warn('[ZendIQ PUMP] tx simulation FAILED:', JSON.stringify(_simVal.err), '| logs:', (_simVal.logs ?? []).slice(-5).join(' | '));
         }
@@ -1881,7 +1881,7 @@
                 const txRes = await ns.rpcCall('getTransaction', [
                   _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
                 ]);
-                if (txRes?.result?.meta?.err) {
+                if (txRes?.meta?.err) {
                   window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE',
                     payload: { signature: _sig, txFailed: true, optimized: false },
                   }}, '*');
@@ -1905,7 +1905,7 @@
               const txRes = await ns.rpcCall('getTransaction', [
                 _sig, { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
               ]);
-              if (txRes?.result?.meta?.err) {
+              if (txRes?.meta?.err) {
                 // Update Activity entry to mark failure
                 window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE',
                   payload: { signature: _sig, txFailed: true, optimized: _patchApplied },

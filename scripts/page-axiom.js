@@ -32,8 +32,30 @@
 
   // ── Local intercept state (IIFE scope) ───────────────────────────────────
   let _axiomBypassNext   = false;  // set true before re-click to bypass our own capture
+  let _approvedAddr      = null;   // /meme/ address the held click belongs to; the page can move under it
   let _axiomBuyAmountSol = null;   // last SOL amount the user entered in the amount field
-  const _AXIOM_SOL_FALLBACK = 150; // USD per SOL when no live price is available
+
+  // ── Live SOL price (OPS-244) ─────────────────────────────────────────────
+  // ns.solPriceUsd is fed by the background alarm (Binance SOLUSDT, every 5 min)
+  // and seeded from storage on load. Null until it lands — callers emit no USD
+  // figure rather than one derived from a constant.
+  function _solUsd() {
+    const p = ns?.solPriceUsd;
+    return (typeof p === 'number' && p > 0 && p < 100000) ? p : null;
+  }
+  // page-interceptor.js carries this wiring on the other DEXes but is not loaded here.
+  window.addEventListener('message', function (e) {
+    if (e.source !== window || !e.data) return;
+    if (e.data.type === 'ZENDIQ_SOL_PRICE_RESPONSE' || e.data.type === 'ZENDIQ_SOL_PRICE_UPDATE') {
+      if (typeof e.data.price === 'number' && e.data.price > 0) ns.solPriceUsd = e.data.price;
+    }
+  });
+  try { window.postMessage({ type: 'ZENDIQ_GET_SOL_PRICE' }, '*'); } catch (_) {}
+  // bridge.js and this file both run at document_start, so the first ask can beat
+  // the listener that answers it.
+  setTimeout(function () {
+    if (_solUsd() == null) { try { window.postMessage({ type: 'ZENDIQ_GET_SOL_PRICE' }, '*'); } catch (_) {} }
+  }, 1500);
 
   // ── Chain detection (OPS-243) ────────────────────────────────────────────
   // Axiom added a chain selector on 25 Aug 2026. Everything this file reads or
@@ -79,6 +101,10 @@
   }
 
   let _chainLogged = null;
+
+  // OPS-250 proposed that a router transition briefly reports `unknown` on a token page.
+  // Every observed `unknown` was the multi-chain Discover feed, correctly identified, so
+  // the hold that used to sit here never once fired and was removed.
   function _chain() {
     const c = _chainFromUrl() ?? _chainFromQuery() ?? _CHAIN_UNKNOWN;
     if (ns) ns.axiomChain = c;
@@ -118,6 +144,12 @@
     return txt.startsWith('buy ') && !/^buy\s+[\d.]+\s+\w+$/.test(txt);
   }
 
+  // Bare "Sell" is the Buy/Sell tab, not a trade. Both "Sell <symbol> <amount>" and
+  // the "Sell Init." quick exit are real sells and both read the sell preset.
+  function _isTokenSellText(txt) {
+    return txt.startsWith('sell ');
+  }
+
   // ── Analytics session state ──────────────────────────────────────────────
   // Axiom never loads page-wallet.js, so the session lifecycle that file owns on
   // the other DEXes has to be driven from here instead.
@@ -140,10 +172,12 @@
     if (!ns.resolveWalletPubkey) {
       ns.resolveWalletPubkey = () => ns.axiomSessionPubkey ?? null;
     }
-    // Called by page-widget.js Proceed button — re-clicks the Buy button with
+    // Called by page-widget.js Proceed button — re-clicks the trade button with
     // our capture listener bypassed so React's handlers fire normally.
     ns.axiomProceedTrade = function () {
       const _approvedBtn = ns.axiomPendingBtnRef;
+      const _side    = ns.axiomPendingSide === 'sell' ? 'sell' : 'buy';
+      const _matches = _side === 'sell' ? _isTokenSellText : _isTokenBuyText;
       ns.axiomConfirmPending = false;
       ns.axiomPendingBtnRef  = null;
       _axEngage();
@@ -152,13 +186,18 @@
       try { ns.renderWidgetPanel?.(); } catch (_) {}
       // Prefer the button the user actually approved. The scan is a fallback for
       // a React re-render and is document-order, so it could otherwise fire a
-      // different token's quick-buy than the one that was scored.
+      // different token's quick-buy than the one that was scored. Only scan while
+      // the page still shows the token that was approved. Compared as the raw route
+      // address, since /meme/ carries a pool address for some tokens and a mint for others.
+      const _sameToken = _isSolana() && _approvedAddr != null && _readMintFromUrl() === _approvedAddr;
       const btn = (_approvedBtn?.isConnected ? _approvedBtn : null)
-        ?? Array.from(document.querySelectorAll('button')).find(function (b) {
-          return _isTokenBuyText((b.textContent ?? '').trim().toLowerCase());
-        });
+        ?? (_sameToken
+          ? Array.from(document.querySelectorAll('button')).find(function (b) {
+              return _matches((b.textContent ?? '').trim().toLowerCase());
+            })
+          : null);
       if (!btn) {
-        console.warn('[ZQ:AXIOM] approved buy did not fire \u2014 button no longer on the page');
+        console.warn('[ZQ:AXIOM] approved ' + _side + ' did not fire \u2014 button no longer on the page');
         return;
       }
       // Fire the full pointer → mouse → click chain so Axiom's handler fires
@@ -479,20 +518,24 @@
       // the same two places every other DEX does.
       _axTradeCount++;
       const _axSlipBps = ev.slippage != null ? Math.min(10000, Math.round(ev.slippage * 100)) : null;
-      const _axUsd     = _axiomBuyAmountSol != null ? _axiomBuyAmountSol * _AXIOM_SOL_FALLBACK : null;
+      // Fee fields are named …Sol but are native-denominated, so off Solana they are
+      // not SOL and must not be priced as if they were.
+      const _axIsSol   = _isSolana();
+      const _axSolUsd  = _axIsSol ? _solUsd() : null;
+      const _axUsd     = (_axiomBuyAmountSol != null && _axSolUsd != null) ? _axiomBuyAmountSol * _axSolUsd : null;
       const _axFeesSol = (ev.priorityFeeSol ?? 0) + (ev.bribeFeeSol ?? 0);
       try { ns.logTrade?.({
         user_action:       _wasOptimized ? 'optimised' : 'proceeded',
         dex:               _AX_SITE,
         exec_path:         (ev.enhancedMev || ev.mevProtection) ? 'axiom_mev' : 'axiom_direct',
         tx_sig:            ev.signature,
-        input_mint:        _SOL,
+        input_mint:        _axIsSol ? _SOL : null,
         output_mint:       _token,
         success:           ev.success == null ? null : (ev.success ? 1 : 0),
         trade_usd:         _axUsd != null ? Math.min(_axUsd, 500000) : null,
-        trade_sol:         _axiomBuyAmountSol ?? null,
+        trade_sol:         _axIsSol ? (_axiomBuyAmountSol ?? null) : null,
         quoted_slippage:   ev.slippage ?? null,
-        fees_usd:          _axFeesSol > 0 ? Math.min(_axFeesSol * _AXIOM_SOL_FALLBACK, 5000) : null,
+        fees_usd:          (_axFeesSol > 0 && _axSolUsd != null) ? Math.min(_axFeesSol * _axSolUsd, 5000) : null,
         slot_latency_ms:   ev.timeTakenMs != null ? Math.min(300000, Math.round(ev.timeTakenMs)) : null,
         bot_risk_score:    ns.axiomMevRisk?.riskScore ?? null,
         token_risk_score:  _risk?.score ?? null,
@@ -545,11 +588,10 @@
           for (let attempt = 0; attempt < 8; attempt++) {
             await new Promise(function (r) { setTimeout(r, attempt === 0 ? 4000 : 3000); });
             try {
-              const res = await ns.rpcCall('getTransaction', [
+              const tx = await ns.rpcCall('getTransaction', [
                 _sig,
                 { encoding: 'jsonParsed', commitment: 'confirmed', maxSupportedTransactionVersion: ns.MAX_TX_VERSION },
               ]);
-              const tx = res?.result;
               if (!tx?.meta) continue;
               const meta = tx.meta;
               if (meta.err != null) return; // failed tx — amountIn/Out irrelevant
@@ -640,7 +682,15 @@
   // by Axiom's React app). Falls back to last known value from log-tx-v3 signals,
   // then to the observed default of 20% (confirmed across multiple live trades).
   const _SLIP_KEY_RE = /slippage|slip|setting/i;
-  function _readAxiomSlippage() {
+  function _readAxiomSlippage(side) {
+    // The active preset is authoritative and side-specific; the scan below cannot
+    // reach into solPresets and so cannot tell a 40% sell from a 20% buy.
+    try {
+      const s = _readSettings();
+      const p = _preset(s, s?.currentSolPresetKey, side);
+      const n = parseFloat(p?.slippage);
+      if (!isNaN(n) && n > 0 && n <= 100) return n > 1 ? n / 100 : n;
+    } catch (_) {}
     try {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
@@ -661,7 +711,8 @@
 
   // ── Preset optimization (snapshot → safe write → restore) ────────────────
   // Axiom signs server-side (Turnkey) so ZendIQ cannot rebuild the tx. The only
-  // lever is to temporarily tighten the user's active buy preset (lower slippage,
+  // lever is to temporarily tighten the active preset on the trade's own side
+  // (lower slippage,
   // force MEV Secure) before the trade, then restore the original afterwards so
   // the change is completely seamless. Endpoint + recipe verified live:
   //   POST {apiHost}/update-settings  body {settings:<full object>}  → requires an
@@ -723,15 +774,16 @@
     return worst;
   }
 
-  // Compute the proposed safe changes for the active buy preset.
+  // Compute the proposed safe changes for the active preset on the given side.
   // Returns null when settings are unreadable or there is nothing worth changing.
-  function _computeOptimization() {
+  function _computeOptimization(side) {
     if (!ns?.axiomOptimizeEnabled) return null;
     if (!_isSolana()) return null;
     const settings = _readSettings();
     if (!settings) return null;
+    const _side = side === 'sell' ? 'sell' : 'buy';
     const key = settings.currentSolPresetKey;
-    const preset = settings?.solPresets?.[key]?.buy;
+    const preset = _preset(settings, key, _side);
     if (!preset) return null;
 
     const slipFrom = parseFloat(preset.slippage);
@@ -752,15 +804,22 @@
     if (!changes.length) return null; // already safe — nothing to optimize
 
     // Honest, conservative savings estimate (potential exposure removed).
-    const buyAmt = _readBuyAmountFromButton() ?? _axiomBuyAmountSol ?? 0;
-    const usd = buyAmt * _AXIOM_SOL_FALLBACK;
-    const slipSav = usd > 0 ? usd * ((slipFrom - slipTo) / 100) * 0.15 : 0; // 0.15 fill-rate, matches jup.ag math
-    const mevSav  = (mevFrom !== 'Secure' && ns.axiomMevRisk?.estimatedLossUSD > 0)
-      ? ns.axiomMevRisk.estimatedLossUSD * 0.95
-      : 0;
-    const estSavingsUsd = slipSav + mevSav;
+    // A sell's size is a token quantity, not SOL, so there is no sound USD figure —
+    // null omits the row rather than sizing the exit off a stale buy amount.
+    // No live SOL price means the same: omit, rather than quote a constant.
+    let estSavingsUsd = null;
+    const _optSolUsd = _solUsd();
+    if (_side === 'buy' && _optSolUsd != null) {
+      const buyAmt = _readBuyAmountFromButton() ?? _axiomBuyAmountSol ?? 0;
+      const usd = buyAmt * _optSolUsd;
+      const slipSav = usd > 0 ? usd * ((slipFrom - slipTo) / 100) * 0.15 : 0; // 0.15 fill-rate, matches jup.ag math
+      const mevSav  = (mevFrom !== 'Secure' && ns.axiomMevRisk?.estimatedLossUSD > 0)
+        ? ns.axiomMevRisk.estimatedLossUSD * 0.95
+        : 0;
+      estSavingsUsd = slipSav + mevSav;
+    }
 
-    return { settings, key, preset, slipFrom, slipTo, mevFrom, mevTo: 'Secure', changes, estSavingsUsd };
+    return { settings, key, side: _side, preset, slipFrom, slipTo, mevFrom, mevTo: 'Secure', changes, estSavingsUsd };
   }
 
   // POST a settings object to Axiom. Returns true on HTTP 2xx.
@@ -787,7 +846,11 @@
   // the obligation to restore is recorded before the mutation and cleared only by
   // observation. `update-settings` cannot confirm state (H.10); `get-settings` can.
 
-  function _presetBuy(settings, key) { return settings?.solPresets?.[key]?.buy ?? null; }
+  function _preset(settings, key, side) {
+    return settings?.solPresets?.[key]?.[side === 'sell' ? 'sell' : 'buy'] ?? null;
+  }
+  // Obligations written before sells were covered carry no side; all were buys.
+  function _obPreset(settings, ob) { return _preset(settings, ob.presetKey, ob.side ?? 'buy'); }
 
   // A permanently-failing obligation would otherwise retry on every load forever,
   // each retry a POST to a third party from the user's authenticated session.
@@ -976,14 +1039,14 @@
   // Read-modify-write on the local mirror, touching only the named fields.
   // `dir` is 'to' or 'from'. The read happens here, at write time, so anything
   // Axiom's own UI changed meanwhile survives — a whole-snapshot write would not.
-  function _writeLocalFields(presetKey, fields, dir) {
+  function _writeLocalFields(presetKey, fields, dir, side) {
     try {
       const keys = Object.keys(fields);
       if (!keys.length) return true;
       const s = _readSettings();
-      const buy = _presetBuy(s, presetKey);
-      if (!buy) return false;
-      for (const k of keys) buy[k] = fields[k][dir];
+      const p = _preset(s, presetKey, side);
+      if (!p) return false;
+      for (const k of keys) p[k] = fields[k][dir];
       localStorage.setItem('settings', JSON.stringify(s));
       return true;
     } catch (_) { return false; }
@@ -1002,7 +1065,7 @@
       if (state === 'absent')     { ob.localOutcome = 'absent';     return !!serverSettled; }
       if (state === 'unreadable') { ob.localOutcome = 'unreadable'; return false; }
 
-      const v = _verdict(_presetBuy(_readSettings(), ob.presetKey), ob.fields);
+      const v = _verdict(_obPreset(_readSettings(), ob), ob.fields);
       if (v == null)     { ob.localOutcome = 'preset-absent'; return !!serverSettled; }
       if (v === 'from')  { ob.localOutcome = 'restored';   return true; }
       if (v === 'other') { ob.localOutcome = 'superseded'; return true; }
@@ -1010,8 +1073,8 @@
       // above settle for free; this is the one branch that needs the user.
       if (readOnly)      { ob.localOutcome = 'needs-decision'; return false; }
 
-      if (!_writeLocalFields(ob.presetKey, ob.fields, 'from')) { ob.localOutcome = 'write-failed'; return false; }
-      const after = _verdict(_presetBuy(_readSettings(), ob.presetKey), ob.fields);
+      if (!_writeLocalFields(ob.presetKey, ob.fields, 'from', ob.side)) { ob.localOutcome = 'write-failed'; return false; }
+      const after = _verdict(_obPreset(_readSettings(), ob), ob.fields);
       ob.localOutcome = after === 'from' ? 'restored' : 'write-unconfirmed';
       return after === 'from';
     } catch (_) { ob.localOutcome = 'unreadable'; return false; }
@@ -1024,7 +1087,7 @@
     const f = ob.serverFields ?? ob.fields; // the server's own before-values, not the mirror's
     const server = await _fetchServerSettings();
     if (!server) { ob.serverOutcome = 'unreachable'; return false; }
-    const v = _verdict(_presetBuy(server, ob.presetKey), f);
+    const v = _verdict(_obPreset(server, ob), f);
     // A response we cannot find the preset in is not proof the preset is clean —
     // it is a response we do not understand. Stays owed and surfaces to the user.
     if (v == null)     { ob.serverOutcome = 'preset-absent'; return false; }
@@ -1032,12 +1095,12 @@
     if (v === 'other') { ob.serverOutcome = 'superseded'; return true; }
     if (readOnly)      { ob.serverOutcome = 'needs-decision'; return false; }
 
-    const buy = _presetBuy(server, ob.presetKey);
-    for (const k of Object.keys(f)) buy[k] = f[k].from;
+    const p = _obPreset(server, ob);
+    for (const k of Object.keys(f)) p[k] = f[k].from;
     server.lastUpdatedAt = Date.now(); // force a real diff so the write is accepted
     const ok = await _postSettings(server);
     const after = await _fetchServerSettings();
-    const done = _verdict(_presetBuy(after, ob.presetKey), f) === 'from';
+    const done = _verdict(_obPreset(after, ob), f) === 'from';
     if (ok && !done) console.warn('[ZQ:AXIOM] restore POST accepted but server still reads the mutated preset');
     ob.serverOutcome = done ? 'restored' : (after ? 'write-unconfirmed' : 'unreachable');
     return done;
@@ -1101,11 +1164,27 @@
     if (!_isSolana()) {
       console.log('[ZQ:AXIOM] optimization refused \u2014 chain=' + (ns?.axiomChain ?? _CHAIN_UNKNOWN));
       if (ns) ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'chain-not-supported' };
-      if (ns?.axiomConfirmPending) ns.axiomProceedTrade?.();
+      // We only intercept on Solana, so a pending confirm here means the page moved
+      // under the panel. Re-firing would hunt for a trade button on whatever is on
+      // screen now — a different token's. Drop the approval rather than guess.
+      if (ns?.axiomConfirmPending) {
+        ns.axiomConfirmPending = false;
+        ns.axiomPendingBtnRef  = null;
+        try { ns.renderWidgetPanel?.(); } catch (_) {}
+      }
       return false;
     }
-    const opt = _computeOptimization();
+    const opt = _computeOptimization(ns?.axiomPendingSide);
     if (!opt || !ns) { ns?.axiomProceedTrade?.(); return; }
+
+    // The user asked to optimize. Re-firing their unprotected preset for them substitutes a
+    // different trade for the one they chose, so the fallback is theirs to confirm. Only a
+    // held click can be held — with nothing pending there is no decision to put to them.
+    const _holdForUser = function () {
+      if (ns.axiomConfirmPending) { try { ns.renderWidgetPanel?.(); } catch (_) {} return false; }
+      ns.axiomProceedTrade?.();
+      return false;
+    };
 
     const _abandon = function (why) {
       console.warn('[ZQ:AXIOM] optimization abandoned (' + why + ') — Axiom settings untouched');
@@ -1113,8 +1192,7 @@
       ns.axiomLastOptimization = null;
       ns.axiomOptimizeAbandoned = { at: Date.now(), why: why };
       _releaseLock();
-      ns.axiomProceedTrade?.();
-      return false;
+      return _holdForUser();
     };
 
     // A second mutation while one is still owed would overwrite the only record of
@@ -1131,8 +1209,7 @@
       } else {
         _releaseLock();
       }
-      ns.axiomProceedTrade?.();
-      return false;
+      return _holdForUser();
     };
 
     ns.axiomOptimizeAbandoned = null;
@@ -1164,9 +1241,9 @@
     // Each surface is diffed against its own fresh read. The mirror and the server
     // can legitimately hold different values, so a single shared before-value would
     // put the wrong one back on one of them.
-    const localBuy  = _presetBuy(_readSettings(), opt.key);
+    const localBuy  = _preset(_readSettings(), opt.key, opt.side);
     const server    = await _fetchServerSettings();
-    const serverBuy = _presetBuy(server, opt.key);
+    const serverBuy = _preset(server, opt.key, opt.side);
     if (!localBuy || !serverBuy) return _abandon('settings-unreadable');
 
     // A field with no readable before-value cannot be put back faithfully, and
@@ -1187,6 +1264,7 @@
       createdAt: Date.now(),
       host: _apiHost,
       presetKey: opt.key,
+      side: opt.side,
       fields,
       serverFields,
       localRestored: false,
@@ -1208,22 +1286,20 @@
       // clears the obligation; an unreadable server leaves it outstanding.
       ns.axiomOptimizing = false;
       ns.axiomLastOptimization = null;
-      const v = _verdict(_presetBuy(await _fetchServerSettings(), opt.key), serverFields);
+      const v = _verdict(_preset(await _fetchServerSettings(), opt.key, opt.side), serverFields);
       if (v === 'from') { _persistObligation(null); _releaseLock(); }
       else              await _restoreSettings('write-failed');
       ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'settings-write-failed' };
-      ns.axiomProceedTrade?.();
-      return false;
+      return _holdForUser();
     }
 
-    if (!_writeLocalFields(opt.key, fields, 'to')) {
+    if (!_writeLocalFields(opt.key, fields, 'to', opt.side)) {
       // The mirror is what Axiom actually reads (H.11), so a server-only write
       // protects nothing. Put the server back rather than claim a protected trade.
       ns.axiomLastOptimization = null;
       ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'mirror-unwritable' };
       await _restoreSettings('mirror-write-failed');
-      ns.axiomProceedTrade?.();
-      return false;
+      return _holdForUser();
     }
 
     // Settings are safe on both surfaces. Fire the original Buy click.
@@ -1257,15 +1333,15 @@
     if (!ob || (ob.localRestored && ob.serverRestored)) return;
     if ((ob.attempts ?? 0) >= _RESTORE_ATTEMPT_CEILING) return;
     try {
-      _writeLocalFields(ob.presetKey, ob.fields, 'from');
+      _writeLocalFields(ob.presetKey, ob.fields, 'from', ob.side);
       // No GET is possible at unload, so patch the last object the server itself
       // gave us. Falling back to the mirror here would post its values to the
       // server and overwrite anything that only ever existed there.
       const f = ob.serverFields ?? ob.fields;
       const s = _serverCache;
-      const buy = _presetBuy(s, ob.presetKey);
-      if (!buy || _verdict(buy, f) !== 'to') return;
-      for (const k of Object.keys(f)) buy[k] = f[k].from;
+      const p = _obPreset(s, ob);
+      if (!p || _verdict(p, f) !== 'to') return;
+      for (const k of Object.keys(f)) p[k] = f[k].from;
       s.lastUpdatedAt = Date.now();
       const blob = new Blob([JSON.stringify({ settings: s })], { type: 'application/json' });
       navigator.sendBeacon(_updateSettingsUrl(), blob);
@@ -1383,7 +1459,7 @@
     if (!ns) return;
 
     // Slippage: localStorage → last log-tx-v3 signal → observed default (20%).
-    const _slipDecimal = _readAxiomSlippage() ?? ns.axiomLastSlippage ?? 0.20;
+    const _slipDecimal = _readAxiomSlippage(ns?.axiomPendingSide) ?? ns.axiomLastSlippage ?? 0.20;
 
     // ── Bot Attack Risk via calculateMEVRisk ─────────────────────────────
     // Axiom is primarily used for memecoin buys: single-hop AMM, high slippage,
@@ -1534,29 +1610,82 @@
     return m ? m[1] : null;
   }
 
+  // An approval belongs to the token that was on screen when it was given, so the
+  // route moving is the approval expiring.
+  function _dropApproval(why) {
+    _approvedAddr = null;
+    if (!ns?.axiomConfirmPending) return;
+    ns.axiomConfirmPending = false;
+    ns.axiomPendingBtnRef  = null;
+    ns.axiomOptimizeAbandoned = { at: Date.now(), why: why };
+    try { ns.renderWidgetPanel?.(); } catch (_) {}
+  }
+
   // Axiom's /meme/ route carries the pool address for some tokens and the mint for
   // others. A new token returns no DexScreener pair simply because it is not indexed
   // yet, so "no pair" cannot be read as "this is the mint" — the account type has to
   // be confirmed on-chain. Unresolved stays null and blocks scoring: a partial
   // verdict computed against a pool address reads to the user as an all-clear.
   const _mintCache = new Map();
+
+  // An indexer can name the wrong side of a pair, a quote asset, or a stale token.
+  // Confirming the account is an SPL mint is what separates a resolved token from
+  // a plausible-looking string that would be scored with full confidence.
+  const _TOKEN_PROGRAMS = new Set([
+    'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',   // SPL Token
+    'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',   // Token-2022
+  ]);
+  async function _isMintAccount(addr) {
+    try {
+      const info = await ns.rpcCall('getAccountInfo', [addr, { encoding: 'jsonParsed' }]);
+      const val  = info?.value;
+      return val?.data?.parsed?.type === 'mint' && _TOKEN_PROGRAMS.has(val?.owner);
+    } catch (_) { return false; }
+  }
+
+  async function _dexScreenerBase(addr) {
+    if (!ns?.pageJsonFetch) return null;
+    const d    = await ns.pageJsonFetch('https://api.dexscreener.com/latest/dex/pairs/solana/' + addr);
+    const pair = Array.isArray(d?.pairs) ? d.pairs[0] : (d?.pair ?? null);
+    return pair?.baseToken?.address ?? null;
+  }
+
+  // GeckoTerminal indexes a new pool sooner than DexScreener, which is the case that
+  // actually fails here — a token listed nowhere at all is the rarer miss.
+  async function _geckoBase(addr) {
+    if (!ns?.pageJsonFetch) return null;
+    const g = await ns.pageJsonFetch(
+      'https://api.geckoterminal.com/api/v2/networks/solana/pools/' + addr,
+      { Accept: 'application/json;version=20230302' });
+    const id = g?.data?.relationships?.base_token?.data?.id ?? '';
+    return String(id).replace(/^solana_/, '') || null;
+  }
+
   async function _resolveMint(addr) {
     if (!addr) return null;
     if (_mintCache.has(addr)) return _mintCache.get(addr);
 
-    let mint = null;
-    try {
-      const info = await ns.rpcCall('getAccountInfo', [addr, { encoding: 'jsonParsed' }]);
-      if (info?.value?.data?.parsed?.type === 'mint') mint = addr;
-    } catch (_) {}
+    let mint = (await _isMintAccount(addr)) ? addr : null;
 
-    if (!mint && ns?.pageJsonFetch) {
-      try {
-        const d    = await ns.pageJsonFetch('https://api.dexscreener.com/latest/dex/pairs/solana/' + addr);
-        const pair = Array.isArray(d?.pairs) ? d.pairs[0] : (d?.pair ?? null);
-        const base = pair?.baseToken?.address ?? null;
-        if (base && _B58_ADDR_RE.test(base)) mint = base;
-      } catch (_) {}
+    // Pool address — ask the indexers which token it trades, then verify the answer.
+    // Tried in order so the second call only fires when the first yields nothing usable.
+    if (!mint) {
+      const _sources = [['dexscreener', _dexScreenerBase], ['geckoterminal', _geckoBase]];
+      for (let i = 0; i < _sources.length && !mint; i++) {
+        const _name = _sources[i][0];
+        let c = null, err = null;
+        try { c = await _sources[i][1](addr); } catch (e) { err = e; }
+        // Which step failed is the whole diagnosis: an indexer that returned nothing
+        // and a mint that would not verify need opposite fixes.
+        if (err)            { console.log('[ZQ:AXIOM] ' + _name + ' errored: ' + (err?.message ?? err)); continue; }
+        if (!c)             { console.log('[ZQ:AXIOM] ' + _name + ' returned no base token'); continue; }
+        if (!_B58_ADDR_RE.test(c) || c === _SOL_MINT) {
+          console.log('[ZQ:AXIOM] ' + _name + ' returned unusable base token: ' + c);
+          continue;
+        }
+        if (await _isMintAccount(c)) mint = c;
+        else console.log('[ZQ:AXIOM] ' + _name + ' base ' + c.slice(0, 8) + '\u2026 did not verify as a mint');
+      }
     }
 
     if (!mint) {
@@ -1659,6 +1788,13 @@
       // Also run a lightweight MEV risk estimate immediately (slippage known, token known).
       // Gives the widget something to show before token score finishes loading.
       _computeAxiomRisk(mint).catch(function () {});
+    }).catch(function (e) {
+      // Without this the panel never renders and nothing says why: a rejection here
+      // skips the flag, the score fetch and the render in one silent step.
+      if (_currentAxiomMint !== routeAddr) return;
+      console.warn('[ZQ:AXIOM] mint resolution threw for ' + String(routeAddr).slice(0, 8) + '\u2026', e);
+      _flagNotCovered('axiomMintUnresolved');
+      _computeAxiomRisk(null).catch(function () {});
     });
   }
 
@@ -1701,19 +1837,19 @@
       try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {}
     }
     let _lastHref = window.location.href;
-    setInterval(function () {
-      if (window.location.href !== _lastHref) {
-        _lastHref = window.location.href;
-        _syncChain();
-        _syncPill();
-        _onMintChange(_readMintFromUrl());
-      }
-    }, 250);
-    window.addEventListener('popstate', function () {
+    function _onRouteChange() {
+      if (_approvedAddr != null && _readMintFromUrl() !== _approvedAddr) _dropApproval('navigated-away');
       _syncChain();
       _syncPill();
       _onMintChange(_readMintFromUrl());
-    });
+    }
+    setInterval(function () {
+      if (window.location.href !== _lastHref) {
+        _lastHref = window.location.href;
+        _onRouteChange();
+      }
+    }, 250);
+    window.addEventListener('popstate', _onRouteChange);
 
     // Buy button intercept and amount watcher use event delegation — no DOM ready needed.
     _interceptBuyButton();
@@ -1729,15 +1865,17 @@
   // btn.click() (programmatic — used by axiomProceedTrade) does NOT fire
   // pointerdown, so the proceed path is unaffected.
   function _interceptBuyButton() {
-    // Helper — returns the Buy button from an event, or null.
-    function _buyBtn(e) {
+    // → { btn, side } or null. Deliberately loose on buys: a missed match there
+    // means the trade runs unchecked.
+    function _tradeBtn(e) {
       const path = e.composedPath ? e.composedPath() : [];
       const btn  = path.find(function (el) { return el && el.tagName === 'BUTTON'; })
                 ?? e.target?.closest?.('button');
       if (!btn) return null;
       const txt = (btn.textContent ?? '').trim().toLowerCase();
-      // Deliberately loose: a missed match here means the buy runs unchecked.
-      return txt.startsWith('buy ') ? btn : null;
+      if (txt.startsWith('buy ')) return { btn: btn, side: 'buy' };
+      if (_isTokenSellText(txt))  return { btn: btn, side: 'sell' };
+      return null;
     }
 
     // Discover/Pulse quick-buy buttons also read "Buy <amount>", and off a token
@@ -1748,22 +1886,29 @@
       return !!addr && !ns?.axiomMintUnresolved && !!ns?._tokenScoreMint;
     }
 
-    function _showPanel(btn) {
+    function _showPanel(btn, side) {
+      const _side = side === 'sell' ? 'sell' : 'buy';
       if (ns) {
         ns.axiomConfirmPending = true;
         ns.axiomPendingBtnRef  = btn;
-        ns.axiomRiskAcknowledged = false; // new buy intercept — reset acknowledgement
+        ns.axiomPendingSide    = _side;
+        _approvedAddr          = _readMintFromUrl();
+        ns.axiomRiskAcknowledged = false; // new intercept — reset acknowledgement
         ns.axiomOptimizeAbandoned = null; // last trade's notice no longer applies
         _axEngaged = false;
-        const _iUsd = _axiomBuyAmountSol != null ? _axiomBuyAmountSol * _AXIOM_SOL_FALLBACK : null;
+        // _axiomBuyAmountSol is read off the buy button, so it describes no sell.
+        const _amtSol = _side === 'sell' ? null : (_axiomBuyAmountSol ?? null);
+        const _spI = _solUsd();
+        const _iUsd = (_amtSol != null && _spI != null) ? _amtSol * _spI : null;
         try { ns.logProEvent?.('swap_intercepted', {
           site:         _AX_SITE,
+          side:         _side,
           token_level:  ns.tokenScoreResult?.level ?? null,
           mev_level:    ns.axiomMevRisk?.riskLevel ?? null,
           trade_usd:    _iUsd != null ? Math.min(_iUsd, 50000) : null,
-          trade_sol:    _axiomBuyAmountSol ?? null,
+          trade_sol:    _amtSol,
           output_mint:  ns._tokenScoreMint ?? null,
-          amount_in:    _axiomBuyAmountSol ?? null,
+          amount_in:    _amtSol,
         }); } catch (_) {}
         try { ns.logFunnel?.('widget_shown', { dex: _AX_SITE }); } catch (_) {}
       }
@@ -1787,6 +1932,9 @@
       if (!_isSolana()) return false;
       if (!ns.axiomOptimizeEnabled || ns.axiomOptimizeConsent !== 'on') return false;
       if (ns.axiomObligation) return false;      // a restore is still owed
+      // pauseOnHighRisk is a reason not to buy. On an exit the same verdict argues
+      // for leaving sooner, so gating the sell behind a panel inverts its intent.
+      if (ns.axiomPendingSide === 'sell') return true;
       if (ns.pauseOnHighRisk === false) return true;
       const r = ns.tokenScoreResult;
       if (!r?.loaded) return false;
@@ -1794,8 +1942,8 @@
       return r.level !== 'HIGH' && r.level !== 'CRITICAL';
     }
 
-    function _showPanelOrAutoAccept(btn) {
-      _showPanel(btn);
+    function _showPanelOrAutoAccept(btn, side) {
+      _showPanel(btn, side);
       if (!_shouldAutoAccept()) return;
       if (ns) ns.axiomAutoAccepting = true;
       try { ns?.renderWidgetPanel?.(); } catch (_) {}
@@ -1818,11 +1966,11 @@
       if (_axiomBypassNext) return; // proceed-path: flag cleared by click handler; all events pass through
       if (!_isSolana()) return;     // never block a buy we cannot assess
       if (!_onScoredTokenPage()) return;
-      const btn = _buyBtn(e);
-      if (!btn) return;
+      const hit = _tradeBtn(e);
+      if (!hit) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      _showPanelOrAutoAccept(btn);
+      _showPanelOrAutoAccept(hit.btn, hit.side);
     }, true);
 
     // Layer 2: click — handles keyboard Enter / programmatic clicks that skip
@@ -1831,12 +1979,12 @@
       if (_axiomBypassNext) { _axiomBypassNext = false; return; }
       if (!_isSolana()) return;     // never block a buy we cannot assess
       if (!_onScoredTokenPage()) return;
-      const btn = _buyBtn(e);
-      if (!btn) return;
+      const hit = _tradeBtn(e);
+      if (!hit) return;
       e.preventDefault();
       e.stopImmediatePropagation();
       // avoid double-showing, and never re-enter an auto-accept already in flight
-      if (!ns?.axiomConfirmPending && !ns?.axiomAutoAccepting) _showPanelOrAutoAccept(btn);
+      if (!ns?.axiomConfirmPending && !ns?.axiomAutoAccepting) _showPanelOrAutoAccept(hit.btn, hit.side);
     }, true);
   }
 
@@ -1898,7 +2046,9 @@
       _axiomBuyAmountSol = amt;
       const mint = ns?._tokenScoreMint;
       if (!mint) return;
-      const usd = amt * _AXIOM_SOL_FALLBACK;
+      // null trade size is supported downstream — it skips the size floor rather than faking one.
+      const _spW = _solUsd();
+      const usd  = _spW != null ? amt * _spW : null;
       _computeAxiomRisk(mint, usd).catch(function () {});
     }
     // Typed input events.
@@ -1965,6 +2115,16 @@
         ? _esc(tokenScore.symbol || (_token ? _token.slice(0,8) + '\u2026' : '?'))
         : (_token ? _token.slice(0,8) + '\u2026' : '?');
 
+      // Both of the early returns below own the whole tab, so the abandon banner at
+      // the foot of this function cannot reach the two states you land in by moving.
+      const _dropWhy = ns.axiomOptimizeAbandoned?.why;
+      const _dropHtml = (_dropWhy === 'navigated-away' || _dropWhy === 'chain-not-supported')
+          ? `<div style="color:#FFB547;font-size:12px;line-height:1.6;margin-top:9px;padding-top:9px;border-top:1px solid rgba(255,181,71,0.25)">
+              The trade you were approving was dropped when the page moved — <b style="color:#E8E8F0">nothing was sent</b>.
+              Go back to that token and click Buy again if you still want it.
+            </div>`
+        : '';
+
       // ── Not a Solana pair (OPS-243) ─────────────────────────────────────
       // An idle Monitor panel reads as an all-clear. Say the check did not run.
       if (_chain() === _CHAIN_OTHER) {
@@ -1972,14 +2132,15 @@
           <div style="background:rgba(255,181,71,0.07);border:1px solid rgba(255,181,71,0.35);border-radius:10px;padding:12px 13px">
             <div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:7px">ZendIQ does not cover this chain</div>
             <div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:7px">
-              This pair is not on Solana. ZendIQ&rsquo;s risk scoring, bot-attack detection and buy-setting
+              This pair is not on Solana. ZendIQ&rsquo;s risk scoring, bot-attack detection and trade-setting
               optimisation are Solana-only, so <b style="color:#E8E8F0">no check runs here</b> — nothing is
               scored, nothing is intercepted, and no Axiom setting is changed.
             </div>
             <div style="color:#C2C2D4;font-size:12px;line-height:1.6">
-              Your buy goes through Axiom exactly as it would without ZendIQ. Switch to a Solana pair to get
+              Your trade goes through Axiom exactly as it would without ZendIQ. Switch to a Solana pair to get
               ZendIQ&rsquo;s checks back.
             </div>
+            ${_dropHtml}
           </div>
         </div>`;
       }
@@ -1989,10 +2150,10 @@
       const _consentHtml = (ns.settingsLoaded && ns.axiomOptimizeConsent == null) ? (function () {
         try { ns.axiomConsentShown?.(); } catch (_) {}
         return '<div style="background:rgba(153,69,255,0.07);border:1px solid rgba(153,69,255,0.35);border-radius:10px;padding:12px 13px;margin-bottom:12px">'
-          + '<div style="color:#E8E8F0;font-size:13px;font-weight:700;margin-bottom:7px">Optimize &amp; Buy on Axiom</div>'
+          + '<div style="color:#E8E8F0;font-size:13px;font-weight:700;margin-bottom:7px">Optimize your Axiom trades</div>'
           + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6;margin-bottom:7px">'
-          +   'When enabled, ZendIQ scores each buy before it executes. If your Axiom preset is looser than '
-          +   'the measured risk warrants, it <b style="color:#E8E8F0">offers</b> a tighter buy slippage and a '
+          +   'When enabled, ZendIQ scores each trade before it executes. If your Axiom preset is looser than '
+          +   'the measured risk warrants, it <b style="color:#E8E8F0">offers</b> a tighter trade slippage and a '
           +   'stronger MEV protection mode, sized to that specific trade \u2014 then puts your original settings '
           +   'back when the trade settles. You approve each trade.'
           + '</div>'
@@ -2031,6 +2192,7 @@
             <div style="color:#C2C2D4;font-size:12px;line-height:1.6">
               Open the token first if you want it scored before you commit.
             </div>
+            ${_dropHtml}
           </div>
           <button id="sr-ax-listgap-ok" style="width:100%;margin-top:10px;padding:10px;border:1px solid rgba(255,255,255,0.1);border-radius:8px;background:rgba(255,255,255,0.04);color:#C2C2D4;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif">\u2713 Got it \u2014 close</button>
         </div>`;
@@ -2053,8 +2215,8 @@
           + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6">'
           +   '<b style="color:#E8E8F0">Treat this buy as unprotected on token risk.</b> '
           +   (_isSimple
-                ? 'Your buy settings are still checked below.'
-                : 'Your buy settings are still checked below. Reload to retry, or check the token yourself before buying.')
+                ? 'Your trade settings are still checked below.'
+                : 'Your trade settings are still checked below. Reload to retry, or check the token yourself before trading.')
           + '</div></div>'
         : '';
 
@@ -2195,7 +2357,7 @@
                 + 'without identifying the token first. No route, trade-size or pair check has run.'
                 + '</div>')
             + '<div style="color:#C2C2D4;font-size:12px;line-height:1.6">'
-            +   '<b style="color:#E8E8F0">Assume this buy is exposed.</b> '
+            +   '<b style="color:#E8E8F0">Assume this trade is exposed.</b> '
             +   'Axiom broadcasts direct to RPC with no Jito, and your slippage setting is checked below.'
             + '</div></div>'
           : '<div style="background:linear-gradient(135deg,rgba(20,241,149,0.05),rgba(153,69,255,0.05));border:1px solid rgba(20,241,149,0.18);border-radius:10px;padding:10px 12px;margin-bottom:10px">'
@@ -2271,11 +2433,92 @@
         ? (ns._buildExecutionRiskCard(execRisk ?? null, _isSimple) || '<div style="background:rgba(255,181,71,0.06);border:1px solid rgba(255,181,71,0.2);border-radius:10px;padding:10px 12px;margin-bottom:10px"><div style="color:#FFB547;font-size:12px">Execution Risk — scanning\u2026</div></div>')
         : '';
 
-      // ── Optimization abandoned — settings were left untouched ─────────────
+      // ── Trade fees — what the active preset will pay, shown before the trade ─
+      // Axiom's bribe is a flat SOL amount, so on a small trade it can exceed the
+      // trade itself. Shown rather than changed: the bribe buys block inclusion,
+      // and lowering it trades money for the risk of a trade that never lands.
+      const _feeCard = (function () {
+        // solPresets is Solana-denominated, so labelling it SOL is only correct here.
+        if (!_isSolana()) return '';
+        const _fs = _readSettings();
+        if (!_fs) return '';
+        const _fSide = ns.axiomPendingSide === 'sell' ? 'sell' : 'buy';
+        const _fp = _preset(_fs, _fs.currentSolPresetKey, _fSide);
+        if (!_fp) return '';
+        // With autoFee on, Axiom sizes the fee itself and the preset numbers are not what gets paid.
+        if (_fp.autoFee) return '';
+
+        const _prio  = parseFloat(_fp.priorityFeeSol);
+        const _bribe = parseFloat(_fp.bribeFeeSol);
+        const _hasP  = !isNaN(_prio)  && _prio  > 0;
+        const _hasB  = !isNaN(_bribe) && _bribe > 0;
+        if (!_hasP && !_hasB) return '';
+        const _tot = (_hasP ? _prio : 0) + (_hasB ? _bribe : 0);
+
+        // Only a buy's SOL leg is known up front; a sell's proceeds are not, so the
+        // ratio is omitted there rather than invented from an unrelated buy amount.
+        const _legSol = _fSide === 'buy' ? (_readBuyAmountFromButton() ?? _axiomBuyAmountSol) : null;
+        const _pct    = _legSol > 0 ? (_tot / _legSol * 100) : null;
+        const _fc = _pct == null ? '#C2C2D4'
+          : _pct >= 50 ? '#FF4444'
+          : _pct >= 20 ? '#FF6B00'
+          : _pct >= 10 ? '#FFB547'
+          : '#14F195';
+
+        const _sol = function (n) {
+          return n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') + ' SOL';
+        };
+        const _badge = _pct != null
+          ? _pct.toFixed(_pct < 10 ? 1 : 0) + '% of trade'
+          : _sol(_tot);
+        const _feeTip = 'Fees configured in your active ' + _fSide + ' preset (' + _esc(String(_fs.currentSolPresetKey ?? '')) + ').'
+          + '&#10;The bribe is a flat SOL amount and does not scale with trade size.'
+          + '&#10;Axiom has been observed settling slightly above these figures.'
+          + '&#10;ZendIQ shows these fees but never changes them \u2014 the bribe buys block inclusion.';
+
+        const _row = function (label, val, colour) {
+          return '<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:12px">'
+            + '<span style="color:#C2C2D4">' + label + '</span>'
+            + '<span style="font-family:Space Mono,monospace;font-weight:700;color:' + (colour ?? '#E8E8F0') + '">' + _esc(val) + '</span>'
+            + '</div>';
+        };
+
+        // A flat fee is only worth calling out when it is large next to the trade.
+        const _warn = (_pct != null && _pct >= 20)
+          ? '<div style="font-size:11px;color:' + _fc + ';line-height:1.5;margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.08)">'
+            + 'This is a flat fee, so it costs the same on any trade size. Lower the bribe in your Axiom '
+            + _fSide + ' preset to keep it proportionate.</div>'
+          : (_fSide === 'sell'
+            ? '<div style="font-size:11px;color:#6B6B8A;line-height:1.5;margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.08)">'
+              + 'Sell proceeds are not known until the trade settles \u2014 ZendIQ shows what this cost as a share of '
+              + 'your proceeds in Activity afterwards.</div>'
+            : '');
+
+        const _detail = _isSimple ? '' :
+            (_hasP ? _row('Priority fee', _sol(_prio)) : '')
+          + (_hasB ? _row('Bribe', _sol(_bribe)) : '')
+          + ((_hasP && _hasB)
+              ? '<div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:4px;padding-top:4px">'
+                + _row('Total', _sol(_tot), _fc) + '</div>'
+              : '');
+
+        return '<div title="' + _feeTip + '" style="background:' + _fc + '0E;border:1px solid ' + _fc + '3A;border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help">'
+          + '<div style="display:flex;justify-content:space-between;align-items:center;font-size:13px' + (_detail ? ';margin-bottom:5px;padding-bottom:5px;border-bottom:1px solid rgba(255,255,255,0.06)' : '') + '">'
+          +   '<span style="color:' + _fc + ';font-weight:600">' + (_fSide === 'sell' ? 'Sell' : 'Buy') + ' Fees</span>'
+          +   '<span style="font-weight:700;font-size:12px;font-family:Space Mono,monospace;color:' + _fc + '">' + _esc(_badge) + '</span>'
+          + '</div>'
+          + _detail
+          + _warn
+          + '</div>';
+      })();
+
+      // ── Optimization abandoned — settings untouched, trade still held ─────
       // Deliberately has no dismiss timer and survives re-render: the user asked
-      // for protection and did not get it, and a notice that expires is one the
-      // settlement re-render would erase before it was read.
+      // for protection and did not get it, so the fallback is theirs to choose
+      // rather than ours to assume.
       const _abWhy = {
+        'navigated-away':       'You moved to another page, so the approval for the previous token was dropped.',
+        'chain-not-supported':  'The page moved to a chain ZendIQ does not cover, so the approval was dropped.',
         'no-undo-record':       'ZendIQ could not save the record it needs to undo the change.',
         'settings-unreadable':  'ZendIQ could not read your Axiom settings safely.',
         'settings-write-failed':'Axiom rejected the settings change.',
@@ -2295,15 +2538,15 @@
       const _abReason = ns.axiomOptimizeAbandoned?.why ?? null;
       const _abandonHtml = (_abReason && !_skipWhy[_abReason])
         ? '<div style="background:rgba(255,181,71,0.10);border:1px solid rgba(255,181,71,0.45);border-radius:8px;padding:9px 12px;margin-bottom:10px">'
-          + '<div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:3px">\u26a0 Traded without optimizing</div>'
+          + '<div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:3px">\u26a0 Could not optimize this trade</div>'
           + '<div style="color:#C2C2D4;font-size:12px;line-height:1.5">'
           +   _esc(_abWhy[_abReason] ?? 'ZendIQ could not apply the safer preset.')
-          +   ' Your Axiom settings were left exactly as they were.</div>'
+          +   ' Your Axiom settings were left exactly as they were, and nothing has been sent yet.</div>'
           + '</div>'
         : '';
       const _skipHtml = (_abReason && _skipWhy[_abReason])
         ? '<div style="color:#6B6B8A;font-size:11.5px;line-height:1.5;margin-bottom:10px;padding:0 2px">'
-          + 'Traded without optimizing \u2014 ' + _esc(_skipWhy[_abReason]) + '</div>'
+          + 'Not optimized \u2014 ' + _esc(_skipWhy[_abReason]) + ' Nothing has been sent yet.</div>'
         : '';
 
       // ── Outstanding restore — split by surface ───────────────────────────
@@ -2323,12 +2566,12 @@
                      : 'this browser';
         const _body = _ask
           ? (_f
-              ? 'ZendIQ changed your buy slippage to ' + _esc(String(_mine)) + '% for a trade and has not been able to '
+              ? 'ZendIQ changed your ' + (_ob.side === 'sell' ? 'sell' : 'buy') + ' slippage to ' + _esc(String(_mine)) + '% for a trade and has not been able to '
                 + 'confirm it was put back on ' + _where + '. It has been long enough that this may now be your own setting, '
                 + 'so ZendIQ will not change it without you.'
               : 'ZendIQ has not been able to confirm a settings change was put back on ' + _where + '. '
                 + 'It has been long enough that ZendIQ will not change anything without you.')
-          : 'ZendIQ is still restoring your original buy settings on ' + _where + '. '
+          : 'ZendIQ is still restoring your original trade settings on ' + _where + '. '
             + (_serverOwed ? 'Your Axiom account is reachable from any device, so this follows you. ' : '')
             + 'It will retry automatically.';
         const _actions = _ask && _f
@@ -2353,21 +2596,23 @@
         ? '<div style="background:' + _c(_warnLvl) + '11;border:1px solid ' + _c(_warnLvl) + '33;border-radius:8px;padding:9px 12px;margin-bottom:10px">'
           + '<div style="color:' + _c(_warnLvl) + ';font-size:13px;font-weight:700;margin-bottom:3px">\u26a0 '
           + (_warnLvl === 'CRITICAL' ? 'Critical' : 'High') + ' sandwich risk on '
-          + (ns.axiomMintUnresolved ? 'these buy settings' : 'this token') + '</div>'
-          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.5">Axiom broadcasts direct to RPC (no Jito by default). ZendIQ will show this panel before each buy \u2014 use Cancel if concerned.</div>'
+          + (ns.axiomMintUnresolved ? 'these trade settings' : 'this token') + '</div>'
+          + '<div style="color:#C2C2D4;font-size:12px;line-height:1.5">Axiom broadcasts direct to RPC (no Jito by default). ZendIQ will show this panel before each trade \u2014 use Cancel if concerned.</div>'
           + '</div>'
         : '';
 
       // ── Footer: Proceed/Cancel (intercept) or Got-it (browse) ─────────────
-      const _slipPct   = ((_readAxiomSlippage() ?? ns.axiomLastSlippage ?? 0.20) * 100).toFixed(1);
-      const _buyAmt    = _readBuyAmountFromButton() ?? _axiomBuyAmountSol;
+      const _isSellSide = ns.axiomPendingSide === 'sell';
+      const _slipPct   = ((_readAxiomSlippage(ns.axiomPendingSide) ?? ns.axiomLastSlippage ?? 0.20) * 100).toFixed(1);
+      // The amount reader parses the Buy button, so it describes no sell.
+      const _buyAmt    = _isSellSide ? null : (_readBuyAmountFromButton() ?? _axiomBuyAmountSol);
       const _amtLabel  = _buyAmt
         ? 'Trading <b>' + _buyAmt + ' SOL</b> at <b>' + _slipPct + '% slippage</b>'
         : 'Slippage tolerance: <b>' + _slipPct + '%</b>';
 
       // Optimization breakdown — only while a buy is intercepted and there is
       // something worth changing (lower slippage and/or MEV Secure).
-      const _opt = ns.axiomConfirmPending ? _computeOptimization() : null;
+      const _opt = ns.axiomConfirmPending ? _computeOptimization(ns.axiomPendingSide) : null;
       const _optCard = _opt ? (function () {
         const _rows = _opt.changes.map(function (c) {
           return '<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:12px">'
@@ -2387,7 +2632,7 @@
           +   '<span title="Estimated exposure removed by tighter slippage + MEV Secure. Not a guaranteed gain." style="color:#14F195;font-weight:700;font-size:12px;font-family:Space Mono,monospace;cursor:help">' + _sav + '</span>'
           + '</div>'
           + _rows
-          + '<div style="font-size:10.5px;color:#6B8B7A;line-height:1.5;margin-top:7px">Applied to your active buy preset for this trade only, then restored automatically.</div>'
+          + '<div style="font-size:10.5px;color:#6B8B7A;line-height:1.5;margin-top:7px">Applied to your active ' + (_opt.side === 'sell' ? 'sell' : 'buy') + ' preset for this trade only, then restored automatically.</div>'
           + '</div>';
       })() : '';
 
@@ -2396,10 +2641,10 @@
         ? '<div style="font-size:12px;color:#C2C2D4;margin-bottom:8px;text-align:center">' + _amtLabel + '</div>' + _optCard
         : '';
       const _footerBtns = ns.axiomAutoAccepting
-        ? '<div style="width:100%;padding:11px;border:1px solid rgba(20,241,149,0.35);border-radius:8px;background:rgba(20,241,149,0.06);color:#14F195;font-size:13px;font-weight:700;text-align:center;font-family:\'DM Sans\',sans-serif">\u23f3 Optimizing your buy\u2026</div>'
+        ? '<div style="width:100%;padding:11px;border:1px solid rgba(20,241,149,0.35);border-radius:8px;background:rgba(20,241,149,0.06);color:#14F195;font-size:13px;font-weight:700;text-align:center;font-family:\'DM Sans\',sans-serif">\u23f3 Optimizing your ' + (_isSellSide ? 'sell' : 'buy') + '\u2026</div>'
         : ns.axiomConfirmPending
         ? (_opt
-              ? '<button id="sr-ax-optimize" style="width:100%;padding:11px;border:none;border-radius:8px;background:linear-gradient(135deg,#14F195,#0cc97a);color:#061a10;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;margin-bottom:7px">Optimize &amp; Buy</button>'
+              ? '<button id="sr-ax-optimize" style="width:100%;padding:11px;border:none;border-radius:8px;background:linear-gradient(135deg,#14F195,#0cc97a);color:#061a10;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;margin-bottom:7px">Optimize &amp; ' + (_isSellSide ? 'Sell' : 'Buy') + '</button>'
                 + '<button id="sr-ax-proceed" style="width:100%;padding:9px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:none;color:#C2C2D4;font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;margin-bottom:7px">Proceed without optimizing</button>'
               : '<button id="sr-ax-proceed" style="width:100%;padding:10px;border:none;border-radius:8px;background:linear-gradient(135deg,#14F195,#0cc97a);color:#061a10;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;margin-bottom:7px">\u2713 Proceed with trade</button>')
           + '<button id="sr-ax-cancel" style="width:100%;padding:10px;border:1px solid rgba(255,255,255,0.12);border-radius:8px;background:none;color:#C2C2D4;font-size:12px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif">\u2715 Cancel trade</button>'
@@ -2407,7 +2652,7 @@
           ? ''
           : '<button id="sr-ax-close" style="width:100%;padding:10px;border:1px solid rgba(255,255,255,0.1);border-radius:8px;background:rgba(255,255,255,0.04);color:#C2C2D4;font-size:13px;font-weight:600;cursor:pointer;font-family:\'DM Sans\',sans-serif;transition:background 0.15s">\u2713 Got it \u2014 close</button>';
       const _disclaimer = ns.axiomAutoAccepting
-        ? '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">Auto-accept is on — ZendIQ is applying the optimization and placing your buy. Turn it off in Settings to review each trade.</div>'
+        ? '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">Auto-accept is on — ZendIQ is applying the optimization and placing your ' + (_isSellSide ? 'sell' : 'buy') + '. Turn it off in Settings to review each trade.</div>'
         : ns.axiomConfirmPending
         ? (_opt
             ? '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 10px;padding:0 2px">ZendIQ tightens your preset for this trade only and restores your original settings the moment it settles.</div>'
@@ -2415,10 +2660,10 @@
         : ns.axiomRiskAcknowledged
           ? ''
           : ns.axiomMintUnresolved
-            ? '<div style="font-size:11px;color:#FFB547;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ cannot identify this token, so it will not step in front of your buy \u2014 clicking Buy goes straight to Axiom, unchecked.</div>'
+            ? '<div style="font-size:11px;color:#FFB547;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ cannot identify this token, so it will not step in front of your trade \u2014 clicking Buy or Sell goes straight to Axiom, unchecked.</div>'
             : _tokenUnchecked
-              ? '<div style="font-size:11px;color:#FFB547;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ intercepts each buy, but the token risk check did not run on this one.</div>'
-              : '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ intercepts each buy to show this risk check.</div>';
+              ? '<div style="font-size:11px;color:#FFB547;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ intercepts each trade, but the token risk check did not run on this one.</div>'
+              : '<div style="font-size:11px;color:#4A4A6A;line-height:1.55;margin:0 0 12px;padding:0 2px">ZendIQ intercepts each trade to show this risk check.</div>';
 
       return '<div style="padding:14px 16px 0">'
         + (_token ? '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.7px;color:#6B6B8A;margin-bottom:10px">TOKEN RISK \u00b7 ' + _sym + '</div>' : '')
@@ -2430,6 +2675,7 @@
         + _tokenRiskCard
         + _botCard
         + _execCard
+        + _feeCard
         + _impactHtml
         + _footerInfo
         + _disclaimer

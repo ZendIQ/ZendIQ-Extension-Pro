@@ -881,10 +881,12 @@
                 const _axMsNum  = _axPres.timeTakenMs != null ? `${_axPres.timeTakenMs}ms` : '';
                 const _axOutFmt = h.amountOut != null ? '+ ' + _fmtW(h.amountOut, h.tokenOut || (h.outputMint ? h.outputMint.slice(0, 8) + '\u2026' : '?')) : null;
                 const _axInFmt  = h.amountIn  != null ? '\u2212 ' + _fmtW(h.amountIn, h.tokenIn || 'SOL') : null;
-                // The bribe is paid in SOL. On a sell the input is tokens, so the ratio
-                // would be comparing two different units.
-                const _axBribePct = (!_axIsSell && _axPres.bribeFeeSol != null && h.amountIn > 0)
-                  ? Math.round(_axPres.bribeFeeSol / h.amountIn * 100) : null;
+                // The bribe is SOL, so the denominator is the trade's SOL leg: spent on a
+                // buy, received on a sell. A flat ~0.01 SOL fee is unbounded as a ratio.
+                const _axSolLeg = _axIsSell ? h.amountOut : h.amountIn;
+                const _axPctLbl = _axIsSell ? 'of proceeds' : 'of trade';
+                const _axBribePct = (_axPres.bribeFeeSol != null && _axSolLeg > 0)
+                  ? Math.round(_axPres.bribeFeeSol / _axSolLeg * 100) : null;
                 const _axRfTip = h.riskFactors?.length
                   ? '\n\nToken Risk Signals:\n' + h.riskFactors.map(f => `\u2022 ${f.name}: ${f.severity}${f.detail ? ' \u2014 ' + f.detail : ''}`).join('\n')
                   : '';
@@ -892,7 +894,7 @@
                 const _axIsDefault  = _axPres.mevProtection === false && !_axPres.enhancedMevProtection
                   && _axPres.slippage != null && _axPres.slippage >= 18 && _axPres.slippage <= 22;
                 const _axBribe  = (_axPres.bribeFeeSol != null && _axPres.bribeFeeSol > 0)
-                  ? `<div style="display:flex;justify-content:space-between;align-items:center;font-size:${_FS_BASE};margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Axiom bribe fee paid to the block producer. Observed to be ~0.010\u20130.011 SOL regardless of trade size.">Bribe fee</span><span style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribePctClr};font-weight:700">${_axPres.bribeFeeSol} SOL${_axBribePct != null ? ` <span style="color:${_axBribePctClr};font-size:${_FS_XS}">(${_axBribePct}% of trade)</span>` : ''}</span>${_axIsDefault ? `<span style="font-size:${_FS_XS};color:#6B6B8A;margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>` : ''}</span></div>` : '';
+                  ? `<div style="display:flex;justify-content:space-between;align-items:center;font-size:${_FS_BASE};margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Axiom bribe fee paid to the block producer. Observed to be ~0.010\u20130.011 SOL regardless of trade size.">Bribe fee</span><span style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribePctClr};font-weight:700">${_axPres.bribeFeeSol} SOL${_axBribePct != null ? ` <span style="color:${_axBribePctClr};font-size:${_FS_XS}">(${_axBribePct}% ${_axPctLbl})</span>` : ''}</span>${_axIsDefault ? `<span style="font-size:${_FS_XS};color:#6B6B8A;margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>` : ''}</span></div>` : '';
                 const _axRisk   = h.riskLevel
                   ? `<div style="display:flex;justify-content:space-between;font-size:${_FS_BASE};margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="${escapeHtml('ZendIQ token risk score \u2014 pre-fetched when you navigated to this token.' + _axRfTip)}">Token Risk</span><span style="color:${_axRlClr};font-weight:700">${escapeHtml(h.riskLevel)}${h.riskScore != null ? ' \u00b7 ' + h.riskScore + '/100' : ''}</span></div>` : '';
                 return `
@@ -3316,8 +3318,10 @@ ${!ns.axiomVerifyOnly ? '' : `
           if (h.source === 'axiom') {
             // ── Axiom footer: Trade Costs from preset ──────────────────────
             const _axP = h.axiomPreset ?? {};
-            const _axBribePct = (_axP.bribeFeeSol != null && h.amountIn > 0)
-              ? Math.round(_axP.bribeFeeSol / h.amountIn * 100) : null;
+            const _axTipLeg = h.side === 'sell' ? h.amountOut : h.amountIn;
+            const _axTipLbl = h.side === 'sell' ? 'of proceeds' : 'of trade';
+            const _axBribePct = (_axP.bribeFeeSol != null && _axTipLeg > 0)
+              ? Math.round(_axP.bribeFeeSol / _axTipLeg * 100) : null;
             const _axBribeClr = _axBribePct != null ? (_axBribePct > 50 ? '#FF4D4D' : _axBribePct > 25 ? '#FFB547' : '#E8E8F0') : '#E8E8F0';
             const _axIsDef = _axP.mevProtection === false && !_axP.enhancedMevProtection
               && _axP.slippage != null && _axP.slippage >= 18 && _axP.slippage <= 22;
@@ -3325,7 +3329,7 @@ ${!ns.axiomVerifyOnly ? '' : `
             t += `<div style="font-size:12px;font-weight:700;color:#E8E8F0;margin-bottom:8px">Axiom Trade Costs</div>`;
             if (_axP.priorityFeeSol != null) t += row('Priority fee', `${_axP.priorityFeeSol} SOL`, '#FFB547');
             if (_axP.bribeFeeSol != null) {
-              const _bPctStr = _axBribePct != null ? ` <span style="color:${_axBribeClr};font-size:10px">(${_axBribePct}% of trade)</span>` : '';
+              const _bPctStr = _axBribePct != null ? ` <span style="color:${_axBribeClr};font-size:10px">(${_axBribePct}% ${_axTipLbl})</span>` : '';
               t += `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:3px"><span style="color:#C2C2D4;cursor:help" title="Axiom bribe fee paid to the block producer. ~0.010\u20130.011 SOL regardless of trade size.">Bribe fee</span><span style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribeClr};font-weight:600">${_axP.bribeFeeSol} SOL${_bPctStr}</span>${_axIsDef ? `<span style="font-size:10px;color:#9B9BAD;margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>` : ''}</span></div>`;
             }
             t += row('MEV protection', _axP.enhancedMevProtection ? '\u2713 Secure' : (_axP.mevProtection ? '\u2713 On' : '\u2717 Off'), (_axP.enhancedMevProtection || _axP.mevProtection) ? '#14F195' : '#FFB547');

@@ -287,13 +287,15 @@ function _buildTooltipHtml(h) {
     html += divider;
     html += `<div style="font-size:var(--fs-base);font-weight:700;color:#E8E8F0;margin-bottom:8px">Axiom Trade Costs</div>`;
     if (p.priorityFeeSol != null) html += row('Priority fee', `${p.priorityFeeSol} SOL`, '#FFB547');
-    const _axBribePct = (p.bribeFeeSol != null && h.amountIn > 0)
-      ? Math.round(p.bribeFeeSol / h.amountIn * 100) : null;
+    const _axTipLeg = h.side === 'sell' ? h.amountOut : h.amountIn;
+    const _axTipLbl = h.side === 'sell' ? 'of proceeds' : 'of trade';
+    const _axBribePct = (p.bribeFeeSol != null && _axTipLeg > 0)
+      ? Math.round(p.bribeFeeSol / _axTipLeg * 100) : null;
     const _axBribePctClr = _axBribePct != null ? (_axBribePct > 50 ? '#FF4D4D' : _axBribePct > 25 ? '#FFB547' : '#E8E8F0') : '#E8E8F0';
     const _axIsDefault   = p.mevProtection === false && !p.enhancedMevProtection
       && p.slippage != null && p.slippage >= 18 && p.slippage <= 22;
     if (p.bribeFeeSol != null) {
-      const _bribePctStr = _axBribePct != null ? ` <span style="color:${_axBribePctClr};font-size:var(--fs-xs)">(${_axBribePct}% of trade)</span>` : '';
+      const _bribePctStr = _axBribePct != null ? ` <span style="color:${_axBribePctClr};font-size:var(--fs-xs)">(${_axBribePct}% ${_axTipLbl})</span>` : '';
       html += `<div class="analysis-row" style="align-items:center"><span class="lbl" title="Axiom bribe fee paid to the block producer. Observed to be ~0.010\u20130.011 SOL regardless of trade size." style="cursor:help">Bribe fee</span><span class="val" style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribePctClr};font-weight:700">${escapeHtml(String(p.bribeFeeSol))} SOL${_bribePctStr}</span>${_axIsDefault ? '<span style="font-size:var(--fs-xs);color:var(--muted);margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>' : ''}</span></div>`;
     }
     if (p.enhancedMevProtection) {
@@ -596,17 +598,19 @@ function _renderHistoryEntry(h, idx) {
     const _mevCol  = (_mevSecure || _preset.mevProtection) ? '#14F195' : '#FFB547';
     const _optBadge = _optBadgeHtml(h.optimized);
     const _msStr   = _preset.timeTakenMs != null ? `${_preset.timeTakenMs}ms` : '';
-    // The bribe is paid in SOL. On a sell the input is tokens, so the ratio
-    // would be comparing two different units.
-    const _axBribePct2 = (!_axSell && _preset.bribeFeeSol != null && h.amountIn > 0)
-      ? Math.round(_preset.bribeFeeSol / h.amountIn * 100) : null;
+    // The bribe is SOL, so the denominator is the trade's SOL leg: spent on a buy,
+    // received on a sell. A flat ~0.01 SOL fee is unbounded as a ratio.
+    const _axSolLeg2 = _axSell ? h.amountOut : h.amountIn;
+    const _axPctLbl2 = _axSell ? 'of proceeds' : 'of trade';
+    const _axBribePct2 = (_preset.bribeFeeSol != null && _axSolLeg2 > 0)
+      ? Math.round(_preset.bribeFeeSol / _axSolLeg2 * 100) : null;
     const _axBribePctClr2 = _axBribePct2 != null ? (_axBribePct2 > 50 ? '#FF4D4D' : _axBribePct2 > 25 ? '#FFB547' : '#E8E8F0') : '#E8E8F0';
     const _rfTip = h.riskFactors?.length
       ? '\n\nToken Risk Signals:\n' + h.riskFactors.map(f => `\u2022 ${f.name}: ${f.severity}${f.detail ? ' \u2014 ' + f.detail : ''}`).join('\n')
       : '';
     const _axIsDefault2   = _preset.mevProtection === false && !_preset.enhancedMevProtection
       && _preset.slippage != null && _preset.slippage >= 18 && _preset.slippage <= 22;
-    const _bribePctStr2 = _axBribePct2 != null ? ` <span style="color:${_axBribePctClr2};font-size:var(--fs-xs)">(${_axBribePct2}% of trade)</span>` : '';
+    const _bribePctStr2 = _axBribePct2 != null ? ` <span style="color:${_axBribePctClr2};font-size:var(--fs-xs)">(${_axBribePct2}% ${_axPctLbl2})</span>` : '';
     return `<div class="analysis-card" id="${id}" style="margin-bottom:8px;padding:8px;cursor:default;background:rgba(153,69,255,0.04);border-color:rgba(153,69,255,0.2)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
         <span>${_optBadge}${_failBadge}</span>

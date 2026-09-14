@@ -11,11 +11,12 @@
 const UNLIMITED_THRESHOLD = 1_000_000_000_000_000; // effective unlimited
 
 // ── Helper: background RPC (popup has direct chrome.runtime access) ─────────
+// Resolves the JSON-RPC `result` payload, matching ns.rpcCall in the page scripts.
 function popupRpcCall(method, params) {
   return new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ type: 'RPC_CALL', method, params }, (res) => {
       if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-      if (res?.ok) resolve(res.data);
+      if (res?.ok) resolve(res.data?.result);
       else reject(new Error(res?.error ?? 'RPC failed'));
     });
   });
@@ -341,7 +342,7 @@ async function runCheck() {
     let programsOk  = 0;
     for (const r of results) {
       if (r.status !== 'fulfilled') continue;
-      const value = r.value?.result?.value;
+      const value = r.value?.value;
       if (!Array.isArray(value)) continue;
       allAccounts = allAccounts.concat(value);
       programsOk++;

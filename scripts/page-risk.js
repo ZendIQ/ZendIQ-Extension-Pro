@@ -12,12 +12,12 @@
       const supply          = await ns.rpcCall('getTokenSupply', [mint]);
       const largestAccounts = await ns.rpcCall('getTokenLargestAccounts', [mint]);
 
-      if (!supply?.result) return null;
+      if (!supply?.value) return null;
 
-      const totalSupply     = parseInt(supply.result.value.amount);
-      const holders         = largestAccounts?.result?.value?.length ?? 0;
-      const topHolderShare  = largestAccounts?.result?.value?.[0]?.uiAmount ?? 0;
-      const supplyDecimals  = supply.result.value.decimals;
+      const totalSupply     = parseInt(supply.value.amount);
+      const holders         = largestAccounts?.value?.length ?? 0;
+      const topHolderShare  = largestAccounts?.value?.[0]?.uiAmount ?? 0;
+      const supplyDecimals  = supply.value.decimals;
 
       const isMemecoin = (holders < 100 && topHolderShare > 0.3) || (holders < 50);
 

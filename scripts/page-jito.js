@@ -47,7 +47,7 @@
     if (_atlCache.has(atlB58)) return _atlCache.get(atlB58);
     try {
       const info = await ns.rpcCall('getAccountInfo', [atlB58, { encoding: 'base64' }]);
-      const raw  = info?.result?.value?.data?.[0];
+      const raw  = info?.value?.data?.[0];
       if (!raw) return null;
       const data  = Uint8Array.from(atob(raw), c => c.charCodeAt(0));
       const addrs = data.slice(56); // 32 bytes × n pubkeys after 56-byte header
@@ -333,12 +333,12 @@
             body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses', params: [[sig]] }),
             signal: AbortSignal.timeout(4000),
           });
-          d = await r.json();
+          d = (await r.json())?.result;
         } else {
           d = await ns.rpcCall('getSignatureStatuses', [[sig]]);
         }
         answered = true;
-        const sv = d?.result?.value?.[0];
+        const sv = d?.value?.[0];
         if (sv?.err)       throw new Error('Jito tx failed on-chain: ' + JSON.stringify(sv.err));
         if (sv && !sv.err) return { ok: true, slot: sv.slot };
       } catch (e) {

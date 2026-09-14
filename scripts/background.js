@@ -145,6 +145,7 @@ async function _fetchAndCacheSolPrice() {
     const _DEX_URLS = [
       '*://*.jup.ag/*', '*://*.raydium.io/*', '*://raydium.io/*',
       '*://pump.fun/*', '*://*.pump.fun/*',
+      '*://axiom.trade/*', '*://*.axiom.trade/*',
     ];
     _DEX_URLS.forEach(pattern => {
       chrome.tabs.query({ url: pattern }, (tabs) => {
