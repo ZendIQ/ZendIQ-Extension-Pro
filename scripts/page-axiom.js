@@ -96,7 +96,27 @@
 
   // The pill is all a collapsed widget says. "Active" on a chain we never check
   // is a coverage claim, and the explanatory card only appears once expanded.
-  function _pillActiveLabel() { return _chain() === _CHAIN_OTHER ? 'Solana only' : 'Active'; }
+  // Off a token page nothing is intercepted either, so the same applies there.
+  // Token pages are identified by the address in the path, not by a route prefix:
+  // the BNB and Base routes are undocumented and do not all live under /meme/.
+  // ?chain= is the last resort — it is absent on Discover, so it cannot be mistaken
+  // for one, and its plural ?chains= sibling is a filter list we deliberately ignore.
+  function _pillActiveLabel() {
+    const p = window.location.pathname;
+    if (_EVM_IN_PATH.test(p)) return 'Solana only';
+    if (_B58_IN_PATH.test(p)) return _chain() === _CHAIN_SOL ? 'Active' : 'Solana only';
+    if (_chainFromQuery() === _CHAIN_OTHER) return 'Solana only';
+    return 'Not checking';
+  }
+
+  // Quick-buy buttons read "Buy <amount> <ticker>" from the Quick Buy setting;
+  // the token page's own button reads "Buy <symbol>". Matched on the whole shape
+  // so a numeric symbol like "Buy 777" is not mistaken for an amount. Used only
+  // where picking the wrong button fires an unapproved trade; the intercept stays
+  // loose, because failing to match there means no check ran.
+  function _isTokenBuyText(txt) {
+    return txt.startsWith('buy ') && !/^buy\s+[\d.]+\s+\w+$/.test(txt);
+  }
 
   // ── Analytics session state ──────────────────────────────────────────────
   // Axiom never loads page-wallet.js, so the session lifecycle that file owns on
@@ -123,18 +143,24 @@
     // Called by page-widget.js Proceed button — re-clicks the Buy button with
     // our capture listener bypassed so React's handlers fire normally.
     ns.axiomProceedTrade = function () {
+      const _approvedBtn = ns.axiomPendingBtnRef;
       ns.axiomConfirmPending = false;
       ns.axiomPendingBtnRef  = null;
       _axEngage();
       // Immediately re-render Monitor so confirm panel disappears before the
       // trade fires — prevents the panel staying up through settlement.
       try { ns.renderWidgetPanel?.(); } catch (_) {}
-      // Re-find the buy button fresh — the cached ref may be stale if React
-      // re-rendered after the widget opened.
-      const btn = Array.from(document.querySelectorAll('button')).find(function (b) {
-        return (b.textContent ?? '').trim().toLowerCase().startsWith('buy ');
-      });
-      if (!btn) return;
+      // Prefer the button the user actually approved. The scan is a fallback for
+      // a React re-render and is document-order, so it could otherwise fire a
+      // different token's quick-buy than the one that was scored.
+      const btn = (_approvedBtn?.isConnected ? _approvedBtn : null)
+        ?? Array.from(document.querySelectorAll('button')).find(function (b) {
+          return _isTokenBuyText((b.textContent ?? '').trim().toLowerCase());
+        });
+      if (!btn) {
+        console.warn('[ZQ:AXIOM] approved buy did not fire \u2014 button no longer on the page');
+        return;
+      }
       // Fire the full pointer → mouse → click chain so Axiom's handler fires
       // regardless of whether they use onPointerDown, onMouseDown, or onClick.
       // _axiomBypassNext lets all three events pass through our capture listeners.
@@ -376,10 +402,11 @@
         ns.axiomLastOpIsClose = false;
         return;
       }
-      // Skip sell trades — log-tx-v3 fires for both buys and sells. When a
-      // handle-position-close-v2 signal precedes it, it's a sell; we don't intercept
-      // or add value to those, so skip recording to Activity.
-      if (ns.axiomLastOpIsClose) { ns.axiomLastOpIsClose = false; return; }
+      // log-tx-v3 fires for both buys and sells; a preceding handle-position-close-v2
+      // marks a sell. Only a hint — the signal can be missed, and the on-chain
+      // enrichment below overrides it either way.
+      const _sellHint = ns.axiomLastOpIsClose === true;
+      ns.axiomLastOpIsClose = false;
       // Cache slippage (decimal) and MEV mode for use in pre-trade risk computations.
       if (ev.slippage != null) ns.axiomLastSlippage = ev.slippage / 100;
       if (ev.mevProtection != null) ns.axiomLastMevMode = ev.mevProtection;
@@ -397,17 +424,19 @@
         success:     ev.success,
         timestamp:   Date.now(),
         walletPubkey: ns.axiomSessionPubkey ?? null,
-        // Token — outputMint is the meme token; input is always SOL on Axiom.
-        tokenOut:    _risk?.symbol ?? null,
-        outputMint:  _token,
-        tokenIn:     'SOL',
-        inputMint:   _SOL,
-        amountIn:    _axiomBuyAmountSol ?? null,  // pre-trade SOL amount; enriched by RPC fetch below
+        // One side is always SOL on Axiom; the sell hint decides which.
+        side:        _sellHint ? 'sell' : 'buy',
+        tokenOut:    _sellHint ? 'SOL' : (_risk?.symbol ?? null),
+        outputMint:  _sellHint ? _SOL : _token,
+        tokenIn:     _sellHint ? (_risk?.symbol ?? null) : 'SOL',
+        inputMint:   _sellHint ? _token : _SOL,
+        // Pre-trade SOL amount read from the buy box — meaningless on a sell.
+        amountIn:    _sellHint ? null : (_axiomBuyAmountSol ?? null),
         amountOut:   null,   // filled async below via getTransaction
-        // Risk (token risk score — no swap MEV risk data on Axiom).
-        riskScore:   _risk?.score   ?? null,
-        riskLevel:   _risk?.level   ?? null,
-        riskFactors: _risk?.factors ?? null,
+        // Token risk describes the meme token. On a sell it is not what was received.
+        riskScore:   _sellHint ? null : (_risk?.score   ?? null),
+        riskLevel:   _sellHint ? null : (_risk?.level   ?? null),
+        riskFactors: _sellHint ? null : (_risk?.factors ?? null),
         // Exchange hint.
         routeSource: 'axiom',
         // Axiom preset breakdown extracted from the log-tx-v3 body.
@@ -513,59 +542,70 @@
               const _rwp = _wp ?? (keys.length > 0
                 ? (typeof keys[0] === 'string' ? keys[0] : (keys[0]?.pubkey ?? null)) : null);
 
-              // amountOut: meme token balance increase for the wallet.
-              // Tier 1: mint + owner exact match.
-              // Tier 2: mint-only match (owner field absent on some token layouts).
-              // Tier 3: scan all postTokenBalances for biggest positive increase (catch-all).
-              let amountOut = null;
+              // Direction is decided here, from the wallet's own balance deltas.
+              // The close signal that set _sellHint can be missed, and a missed sell
+              // was filed as a buy carrying the buy box's stale SOL amount.
               const post = meta.postTokenBalances ?? [];
               const pre  = meta.preTokenBalances  ?? [];
+              const _uiAmt = function (e) {
+                if (!e) return 0;
+                return e.uiTokenAmount?.uiAmount
+                  ?? (parseFloat(e.uiTokenAmount?.amount ?? '0') / Math.pow(10, e.uiTokenAmount?.decimals ?? 0));
+              };
+
+              // Owner-matched throughout. An unowned match on the traded mint is the
+              // pool's account, and on a sell the pool gains exactly what the user
+              // sold — which is how the sold amount was being shown as received.
+              let tokenDelta = null;
               if (_token) {
-                let pe = post.find(function (e) { return e.mint === _token && e.owner === _rwp; });
-                let pr = pre.find(function  (e) { return e.mint === _token && e.owner === _rwp; });
-                if (!pe) {
-                  pe = post.find(function (e) { return e.mint === _token; });
-                  pr = pre.find(function  (e) { return e.mint === _token; });
-                }
-                if (pe) {
-                  const rawPe = pe.uiTokenAmount?.uiAmount ?? (parseFloat(pe.uiTokenAmount?.amount ?? '0') / Math.pow(10, pe.uiTokenAmount?.decimals ?? 0));
-                  const rawPr = pr ? (pr.uiTokenAmount?.uiAmount ?? (parseFloat(pr.uiTokenAmount?.amount ?? '0') / Math.pow(10, pr.uiTokenAmount?.decimals ?? 0))) : 0;
-                  const diff = rawPe - rawPr;
-                  if (diff > 0) amountOut = diff;
-                }
+                const pe = post.find(function (e) { return e.mint === _token && e.owner === _rwp; });
+                const pr = pre.find(function  (e) { return e.mint === _token && e.owner === _rwp; });
+                if (pe || pr) tokenDelta = _uiAmt(pe) - _uiAmt(pr);
               }
-              if (amountOut == null) {
-                // Tier 3: pick the token account with the biggest positive balance increase.
+              if (tokenDelta == null) {
+                // Largest absolute move among this wallet's own token accounts.
                 let best = 0;
                 for (const pe of post) {
+                  if (pe.owner !== _rwp) continue;
                   const pr = pre.find(function (e) { return e.mint === pe.mint && e.accountIndex === pe.accountIndex; });
-                  const rawPe = pe.uiTokenAmount?.uiAmount ?? (parseFloat(pe.uiTokenAmount?.amount ?? '0') / Math.pow(10, pe.uiTokenAmount?.decimals ?? 0));
-                  const rawPr = pr ? (pr.uiTokenAmount?.uiAmount ?? (parseFloat(pr.uiTokenAmount?.amount ?? '0') / Math.pow(10, pr.uiTokenAmount?.decimals ?? 0))) : 0;
-                  const diff = rawPe - rawPr;
-                  if (diff > best) { best = diff; amountOut = diff; }
+                  const d  = _uiAmt(pe) - _uiAmt(pr);
+                  if (Math.abs(d) > Math.abs(best)) best = d;
                 }
+                if (best !== 0) tokenDelta = best;
               }
 
-              // amountIn: SOL decrease minus tx fee = actual swap cost in SOL
-              let amountIn = null;
+              // Signed, with the network fee added back so it reflects the swap alone.
+              let solDelta = null;
               if (_rwp) {
                 const idx = keys.findIndex(function (k) {
                   return (typeof k === 'string' ? k : k?.pubkey) === _rwp;
                 });
                 if (idx >= 0) {
-                  const lamports = (meta.preBalances[idx] ?? 0) - (meta.postBalances[idx] ?? 0) - (meta.fee ?? 0);
-                  if (lamports > 0) amountIn = lamports / 1e9;
+                  solDelta = ((meta.postBalances[idx] ?? 0) - (meta.preBalances[idx] ?? 0) + (meta.fee ?? 0)) / 1e9;
                 }
               }
 
-              if (amountOut != null || amountIn != null) {
-                try {
-                  window.postMessage({
-                    sr_bridge_to_ext: true,
-                    msg: { type: 'HISTORY_UPDATE', payload: { signature: _sig, amountIn: amountIn ?? null, amountOut: amountOut ?? null } },
-                  }, '*');
-                } catch (_) {}
+              const _sell = (tokenDelta != null)
+                ? tokenDelta < 0
+                : (solDelta != null ? solDelta > 0 : _sellHint);
+
+              const _payload = { signature: _sig, side: _sell ? 'sell' : 'buy' };
+              if (_sell) {
+                _payload.tokenIn    = _risk?.symbol ?? null;
+                _payload.inputMint  = _token;
+                _payload.tokenOut   = 'SOL';
+                _payload.outputMint = _SOL;
+                if (tokenDelta != null) _payload.amountIn  = Math.abs(tokenDelta);
+                if (solDelta   != null) _payload.amountOut = Math.abs(solDelta);
+                // Cleared, not left stale: the meme token's risk does not describe SOL.
+                _payload.riskScore = null; _payload.riskLevel = null; _payload.riskFactors = null;
+              } else {
+                if (solDelta   != null && solDelta   < 0) _payload.amountIn  = Math.abs(solDelta);
+                if (tokenDelta != null && tokenDelta > 0) _payload.amountOut = tokenDelta;
               }
+              try {
+                window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: _payload } }, '*');
+              } catch (_) {}
               return;
             } catch (_) { /* retry */ }
           }
@@ -1471,8 +1511,10 @@
   // URL pattern: axiom.trade/meme/{addr}, where addr is the pool address for some
   // tokens and the mint for others — the two are indistinguishable by shape.
   const _MINT_PATH_RE = /\/meme\/([1-9A-HJ-NP-Za-km-z]{32,44})(?:[/?#]|$)/;
+  // Matched against pathname alone, same input as _chainFromUrl. That keeps the two
+  // in step: an address here always implies chain=solana, never a silent unknown.
   function _readMintFromUrl() {
-    const m = _MINT_PATH_RE.exec(window.location.pathname + window.location.search);
+    const m = _MINT_PATH_RE.exec(window.location.pathname);
     return m ? m[1] : null;
   }
 
@@ -1557,7 +1599,7 @@
     if (!routeAddr) {
       // Left the token page for a list. ns._tokenScoreMint is deliberately left
       // set: the trade logger reads it to attribute a buy that is still settling.
-      if (ns.axiomSessionPubkey) { try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {} }
+      try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {}
       try { ns.renderWidgetPanel?.(); } catch (_) {}
       _maybeShowListGap();
       return;
@@ -1575,7 +1617,7 @@
         return;
       }
       ns._tokenScoreMint = mint;
-      if (ns.axiomSessionPubkey) { try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {} }
+      try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {}
       try { ns.renderWidgetPanel?.(); } catch (_) {}
       // Pre-fetch before the user buys — score is ready by the time the trade fires.
       if (ns.fetchTokenScore) {
@@ -1635,16 +1677,25 @@
       _lastChain = c;
       try { ns.renderWidgetPanel?.(); } catch (_) {}
     }
+    // The pill states coverage, which tracks the route, not the chain or the mint.
+    // Two addressless routes (Discover, a BNB token page) share a mint of null and
+    // a Solana token page shares a chain with Solana Discover, so neither
+    // _onMintChange nor _syncChain fires on those transitions.
+    function _syncPill() {
+      try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {}
+    }
     let _lastHref = window.location.href;
     setInterval(function () {
       if (window.location.href !== _lastHref) {
         _lastHref = window.location.href;
         _syncChain();
+        _syncPill();
         _onMintChange(_readMintFromUrl());
       }
     }, 250);
     window.addEventListener('popstate', function () {
       _syncChain();
+      _syncPill();
       _onMintChange(_readMintFromUrl());
     });
 
@@ -1669,6 +1720,7 @@
                 ?? e.target?.closest?.('button');
       if (!btn) return null;
       const txt = (btn.textContent ?? '').trim().toLowerCase();
+      // Deliberately loose: a missed match here means the buy runs unchecked.
       return txt.startsWith('buy ') ? btn : null;
     }
 
@@ -1947,8 +1999,9 @@
       // ── Off a token page — state the coverage gap, don't imply protection ──
       // Keyed on the URL, not _tokenScoreMint: that is left pointing at the last
       // token viewed, so trusting it would show a stale verdict next to a list of
-      // other tokens' Buy buttons. The intercept only matches the token page's
-      // "Buy SYM" button, so a list quick-buy genuinely is not covered.
+      // other tokens' Buy buttons. List quick-buys read "Buy <amount>" and do match
+      // the intercept's selector — they are uncovered because _onScoredTokenPage
+      // refuses to intercept off a token page, not because they cannot match.
       if (!_readMintFromUrl()) {
         return `<div style="padding:14px 16px;">
           ${_consentHtml}
@@ -2026,12 +2079,15 @@
       // An unloaded dimension contributes 0 to the weighted sum, so a partial score
       // is not comparable to a full one. Name the basis rather than let the badge imply three.
       const _dims    = [
-        { key: 'Execution',  loaded: !!execRisk },
-        { key: 'Bot Attack', loaded: !!mevRisk  },
-        { key: 'Token Risk', loaded: !!hasScore },
+        { key: 'Execution',  loaded: !!execRisk, level: _exLvl  },
+        { key: 'Bot Attack', loaded: !!mevRisk,  level: _botLvl },
+        { key: 'Token Risk', loaded: !!hasScore, level: _tkLvl  },
       ];
       const _onNames = _dims.filter(d => d.loaded).map(d => d.key);
       const _offName = _dims.filter(d => !d.loaded).map(d => d.key);
+      // What the weights alone would give, so the printed basis reconciles with the badge.
+      const _rawW    = Math.round(_exSc * 0.40 + _botSc * 0.35 + _tkSc * 0.25);
+      const _driver  = _dims.find(d => d.loaded && d.level === _compLvl)?.key;
       const _compBadge = _hasAnyRisk
         ? (_isSimple ? _rl(_compLvl) : (_compLvl + ' \u00b7 ' + _comp + '/100'))
         : '<span style="font-size:12px;color:#FFB547">scanning\u2026</span>';
@@ -2039,7 +2095,15 @@
         ? '<div style="color:#FFB547;font-size:11px;line-height:1.5;margin-top:4px">Scored on '
           + _onNames.join(' + ') + ' only \u2014 ' + _offName.join(' and ')
           + (_offName.length > 1 ? ' are' : ' is') + ' not included</div>'
-        : '<div style="color:#8A8AA3;font-size:11px;line-height:1.5;margin-top:4px">Execution 40% \u00b7 Bot Attack 35% \u00b7 Token Risk 25%</div>');
+        : _cmp.floored
+          ? '<div style="color:#8A8AA3;font-size:11px;line-height:1.5;margin-top:4px">'
+            + (_isSimple
+                ? 'Set by the worst risk: ' + (_driver ?? 'one dimension') + '.'
+                : 'Raised to ' + _compLvl + ' by ' + (_driver ?? 'the worst dimension')
+                  + ' \u2014 the weights alone give ' + _rawW + '.')
+            + '</div>'
+          : _isSimple ? ''
+            : '<div style="color:#8A8AA3;font-size:11px;line-height:1.5;margin-top:4px">Execution 40% \u00b7 Bot Attack 35% \u00b7 Token Risk 25%</div>');
       const _compTip = 'Overall Risk Score \u2014 '
         + (_offName.length
             ? 'only ' + _onNames.length + ' of 3 dimensions could be scored.'

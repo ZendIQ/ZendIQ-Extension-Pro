@@ -507,6 +507,15 @@ function _quoteAccuracy(h) {
   return null;
 }
 
+// Every venue's Activity card leads with this badge. Mirrors _optBadgeHtml in
+// page-widget.js — the widget runs in the page's MAIN world with no shared imports,
+// so the markup exists twice on purpose; change both together.
+function _optBadgeHtml(optimized, label) {
+  return optimized
+    ? `<span style="font-size:var(--fs-base);font-weight:700;color:#E8E8F0">Swapped <span style="font-size:var(--fs-xs);font-weight:700;background:linear-gradient(135deg,rgba(153,69,255,0.15),rgba(20,241,149,0.06));border:1px solid rgba(153,69,255,0.3);color:#9945FF;border-radius:10px;padding:1px 6px;vertical-align:middle">${label ?? 'ZendIQ Optimized'}</span></span>`
+    : `<span style="font-size:var(--fs-base);font-weight:700;color:#FFB547">\u26a0 Not optimized</span>`;
+}
+
 function _renderHistoryEntry(h, idx) {
   if (!h || typeof h !== 'object') return '';
   const id = 'zq-card-' + idx;
@@ -571,7 +580,12 @@ function _renderHistoryEntry(h, idx) {
   if (h.source === 'axiom') {
     const _rlColors = { CRITICAL: '#FF4D4D', HIGH: '#FFB547', MEDIUM: '#9945FF', LOW: '#14F195' };
     const _rlColor  = _rlColors[h.riskLevel] ?? 'var(--muted)';
-    const _tokenLbl = escapeHtml(h.tokenOut || (h.outputMint ? h.outputMint.slice(0, 8) + '\u2026' : '?'));
+    const _axSell   = h.side === 'sell';
+    // The meme token is whichever side is not SOL.
+    const _tokenLbl = escapeHtml(_axSell
+      ? (h.tokenIn  || (h.inputMint  ? h.inputMint.slice(0, 8)  + '\u2026' : '?'))
+      : (h.tokenOut || (h.outputMint ? h.outputMint.slice(0, 8) + '\u2026' : '?')));
+    const _axPairLbl = _axSell ? `${_tokenLbl} \u2192 SOL` : `SOL \u2192 ${_tokenLbl}`;
     const _failBadge = (h.success === false)
       ? ` <span style="color:#FF4D4D;font-weight:700">\u26a0 Failed</span>` : '';
     const _rlBadge = h.riskLevel
@@ -580,11 +594,11 @@ function _renderHistoryEntry(h, idx) {
     const _mevSecure = !!_preset.enhancedMevProtection;
     const _mevStr  = _mevSecure ? 'MEV Secure' : _preset.mevProtection ? 'MEV On' : 'MEV Off';
     const _mevCol  = (_mevSecure || _preset.mevProtection) ? '#14F195' : '#FFB547';
-    const _optBadge = h.optimized
-      ? ` <span style="font-size:var(--fs-xs);font-weight:700;background:linear-gradient(135deg,rgba(20,241,149,0.15),rgba(20,241,149,0.05));border:1px solid rgba(20,241,149,0.35);color:#14F195;border-radius:10px;padding:1px 6px;vertical-align:middle">ZendIQ Optimized</span>`
-      : '';
+    const _optBadge = _optBadgeHtml(h.optimized);
     const _msStr   = _preset.timeTakenMs != null ? `${_preset.timeTakenMs}ms` : '';
-    const _axBribePct2 = (_preset.bribeFeeSol != null && h.amountIn > 0)
+    // The bribe is paid in SOL. On a sell the input is tokens, so the ratio
+    // would be comparing two different units.
+    const _axBribePct2 = (!_axSell && _preset.bribeFeeSol != null && h.amountIn > 0)
       ? Math.round(_preset.bribeFeeSol / h.amountIn * 100) : null;
     const _axBribePctClr2 = _axBribePct2 != null ? (_axBribePct2 > 50 ? '#FF4D4D' : _axBribePct2 > 25 ? '#FFB547' : '#E8E8F0') : '#E8E8F0';
     const _rfTip = h.riskFactors?.length
@@ -595,12 +609,16 @@ function _renderHistoryEntry(h, idx) {
     const _bribePctStr2 = _axBribePct2 != null ? ` <span style="color:${_axBribePctClr2};font-size:var(--fs-xs)">(${_axBribePct2}% of trade)</span>` : '';
     return `<div class="analysis-card" id="${id}" style="margin-bottom:8px;padding:8px;cursor:default;background:rgba(153,69,255,0.04);border-color:rgba(153,69,255,0.2)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
-        <span style="font-size:var(--fs-base);font-weight:700;color:#E8E8F0">Axiom \u00b7 SOL \u2192 ${_tokenLbl}${_optBadge}${_failBadge}</span>
+        <span>${_optBadge}${_failBadge}</span>
         ${h.amountOut != null ? `<span style="font-size:var(--fs-sm);font-weight:700;color:#14F195;font-family:'Space Mono',monospace">+ ${outVal}</span>` : ''}
       </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+        <span style="font-size:var(--fs-base);color:var(--muted)">Axiom \u00b7 ${_axPairLbl}</span>
+        ${h.amountIn != null ? `<span style="font-size:var(--fs-sm);font-weight:700;color:#E8E8F0;font-family:'Space Mono',monospace">- ${inVal}</span>` : ''}
+      </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-size:var(--fs-base);color:${_mevCol}">${_rlBadge}${_rlBadge ? ' ' : ''}${_mevStr}${_msStr && h.amountIn == null ? ' \u00b7 ' + _msStr : ''}</span>
-        ${h.amountIn != null ? `<span style="font-size:var(--fs-sm);font-weight:700;color:var(--muted);font-family:'Space Mono',monospace">- ${inVal}</span>` : (_msStr ? `<span style="font-size:var(--fs-base);color:var(--muted)">${_msStr}</span>` : '')}
+        <span style="font-size:var(--fs-base);color:${_mevCol}">${_rlBadge}${_rlBadge ? ' ' : ''}${_mevStr}</span>
+        ${_msStr ? `<span style="font-size:var(--fs-base);color:var(--muted)">${_msStr}</span>` : ''}
       </div>
       ${_preset.bribeFeeSol != null ? `<div class="analysis-row" style="align-items:center"><span class="lbl" title="Axiom bribe fee paid to the block producer. Observed to be ~0.010\u20130.011 SOL regardless of trade size." style="cursor:help">Bribe fee</span><span class="val" style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribePctClr2};font-weight:700">${_preset.bribeFeeSol} SOL${_bribePctStr2}</span>${_axIsDefault2 ? '<span style="font-size:var(--fs-xs);color:var(--muted);margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>' : ''}</span></div>` : ''}
       ${h.riskLevel ? `<div class="analysis-row"><span class="lbl" title="${escapeHtml('ZendIQ token risk score \u2014 pre-fetched when you navigated to this token.' + _rfTip)}" style="cursor:help">Token Risk</span><span class="val" style="color:${_rlColor};font-weight:700">${escapeHtml(h.riskLevel)}${h.riskScore != null ? ' \u00b7 ' + h.riskScore + '/100' : ''}</span></div>` : ''}
@@ -659,7 +677,7 @@ function _renderHistoryEntry(h, idx) {
     }
     return `<div class="analysis-card" id="${id}" style="margin-bottom:8px;padding:8px;cursor:default;background:rgba(255,181,71,0.04);border-color:rgba(255,181,71,0.2)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
-        <span style="font-size:var(--fs-base);font-weight:700;color:#FFB547">⚠ Not optimized</span>
+        ${_optBadgeHtml(false)}
         <span style="font-size:12px;font-weight:700;color:#E8E8F0;font-family:'Space Mono',monospace">+ ${outVal}</span>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -701,7 +719,7 @@ function _renderHistoryEntry(h, idx) {
   const _badgeText = sv?.negative ? escapeHtml(sv.label) : 'ZendIQ Optimized';
   return `<div class="analysis-card" id="${id}" style="margin-bottom:8px;padding:8px;cursor:default">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
-      <span style="font-size:var(--fs-base);font-weight:700;color:#E8E8F0">Swapped <span style="font-size:var(--fs-xs);font-weight:700;background:linear-gradient(135deg,rgba(153,69,255,0.15),rgba(20,241,149,0.06));border:1px solid rgba(153,69,255,0.3);color:#9945FF;border-radius:10px;padding:1px 6px;vertical-align:middle">${_badgeText}</span></span>
+      ${_optBadgeHtml(true, _badgeText)}
       <span style="font-size:12px;font-weight:700;color:#14F195;font-family:'Space Mono',monospace">+ ${outVal}</span>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">

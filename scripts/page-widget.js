@@ -15,6 +15,15 @@
   const _FS_MD   = '14px';   // primary UI text, setting rows
   const _FS_LG   = '15px';   // brand name, prominent headings
 
+  // Every venue's Activity card leads with this badge. Kept in one place because
+  // each venue branch builds its own markup, and hand-copying it let Axiom drift.
+  // Mirrored in popup-activity.js — the popup is a separate context with no imports.
+  function _optBadgeHtml(optimized) {
+    return optimized
+      ? `<span style="font-size:${_FS_BASE};font-weight:700;color:#E8E8F0">Swapped <span style="font-size:9px;font-weight:700;background:linear-gradient(135deg,rgba(153,69,255,0.15),rgba(20,241,149,0.06));border:1px solid rgba(153,69,255,0.3);color:#9945FF;border-radius:10px;padding:1px 6px;vertical-align:middle">ZendIQ Optimized</span></span>`
+      : `<span style="font-size:${_FS_BASE};font-weight:700;color:#FFB547">\u26a0 Not optimized</span>`;
+  }
+
   // HTML-escape helper for safe innerHTML rendering of storage-derived values
   function escapeHtml(s) {
     return String(s == null ? '' : s)
@@ -33,11 +42,19 @@
     return (provenOnChain && n >= 100) ? 100 : Math.min(99.99, n);
   }
 
+  // Green is a coverage claim as much as the word is. Named explicitly rather than
+  // inferred, so a new status from another adapter keeps the default instead of
+  // silently inheriting a verdict either way.
+  const _PILL_UNCOVERED = new Set(['Solana only', 'Not checking', 'Not covered']);
+
   // ── Update status text safely ────────────────────────────────────────────
   function updateWidgetStatus(newStatus) {
     const status = document.getElementById('sr-pill-status');
     if (status) {
       status.textContent = newStatus;
+      try {
+        document.getElementById('sr-widget')?.classList.toggle('uncovered', _PILL_UNCOVERED.has(newStatus));
+      } catch (_) {}
       // Re-render the expanded panel so wallet-connected state is reflected immediately
       // (detectAndHookWallet resolves asynchronously — panel may have rendered before it)
       try { ns.renderWidgetPanel?.(); } catch (_) {}
@@ -846,7 +863,12 @@
               if (h.source === 'axiom') {
                 const _axRlClrs = { CRITICAL: '#FF4D4D', HIGH: '#FFB547', MEDIUM: '#9945FF', LOW: '#14F195' };
                 const _axRlClr  = _axRlClrs[h.riskLevel] ?? '#6B6B8A';
-                const _axToken  = escapeHtml(h.tokenOut || (h.outputMint ? h.outputMint.slice(0, 8) + '\u2026' : '?'));
+                const _axIsSell = h.side === 'sell';
+                // The meme token is whichever side is not SOL.
+                const _axToken  = escapeHtml(_axIsSell
+                  ? (h.tokenIn  || (h.inputMint  ? h.inputMint.slice(0, 8)  + '\u2026' : '?'))
+                  : (h.tokenOut || (h.outputMint ? h.outputMint.slice(0, 8) + '\u2026' : '?')));
+                const _axPair   = _axIsSell ? `${_axToken} \u2192 SOL` : `SOL \u2192 ${_axToken}`;
                 const _axFail   = (h.success === false) ? ` <span style="color:#FF4D4D;font-weight:700;font-size:12px">\u26a0 Failed</span>` : '';
                 const _axRlBadge = h.riskLevel
                   ? `<span style="font-size:${_FS_XS};font-weight:700;background:${_axRlClr}22;border:1px solid ${_axRlClr}55;color:${_axRlClr};border-radius:10px;padding:1px 6px;vertical-align:middle">${escapeHtml(h.riskLevel)}</span>` : '';
@@ -855,13 +877,13 @@
                 const _axMevOn  = _axPres.mevProtection === true;
                 const _axMevStr = _axMevSecure ? 'MEV Secure' : _axMevOn ? 'MEV On' : 'MEV Off';
                 const _axMevClr = (_axMevSecure || _axMevOn) ? '#14F195' : '#FFB547';
-                const _axOptBadge = h.optimized
-                  ? ` <span style="font-size:${_FS_XS};font-weight:700;background:linear-gradient(135deg,rgba(20,241,149,0.15),rgba(20,241,149,0.05));border:1px solid rgba(20,241,149,0.35);color:#14F195;border-radius:10px;padding:1px 6px;vertical-align:middle">ZendIQ Optimized</span>`
-                  : '';
+                const _axOptBadge = _optBadgeHtml(h.optimized);
                 const _axMsNum  = _axPres.timeTakenMs != null ? `${_axPres.timeTakenMs}ms` : '';
                 const _axOutFmt = h.amountOut != null ? '+ ' + _fmtW(h.amountOut, h.tokenOut || (h.outputMint ? h.outputMint.slice(0, 8) + '\u2026' : '?')) : null;
-                const _axInFmt  = h.amountIn  != null ? '\u2212 ' + _fmtW(h.amountIn, 'SOL') : null;
-                const _axBribePct = (_axPres.bribeFeeSol != null && h.amountIn > 0)
+                const _axInFmt  = h.amountIn  != null ? '\u2212 ' + _fmtW(h.amountIn, h.tokenIn || 'SOL') : null;
+                // The bribe is paid in SOL. On a sell the input is tokens, so the ratio
+                // would be comparing two different units.
+                const _axBribePct = (!_axIsSell && _axPres.bribeFeeSol != null && h.amountIn > 0)
                   ? Math.round(_axPres.bribeFeeSol / h.amountIn * 100) : null;
                 const _axRfTip = h.riskFactors?.length
                   ? '\n\nToken Risk Signals:\n' + h.riskFactors.map(f => `\u2022 ${f.name}: ${f.severity}${f.detail ? ' \u2014 ' + f.detail : ''}`).join('\n')
@@ -876,12 +898,16 @@
                 return `
                   <div id="sr-wc-${i}" style="background:rgba(153,69,255,0.04);border:1px solid rgba(153,69,255,0.2);border-radius:8px;padding:10px;margin-bottom:6px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                      <span style="font-size:${_FS_BASE};font-weight:700;color:#E8E8F0">Axiom \u00b7 SOL \u2192 ${_axToken}${_axOptBadge}${_axFail}</span>
+                      <span>${_axOptBadge}${_axFail}</span>
                       ${_axOutFmt ? `<span style="font-size:${_FS_SM};font-weight:700;color:#14F195;font-family:'Space Mono',monospace;white-space:nowrap">${_axOutFmt}</span>` : ''}
                     </div>
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-                      <span style="font-size:${_FS_BASE};color:${_axMevClr}">${_axRlBadge}${_axRlBadge ? ' ' : ''}${_axMevStr}${_axMsNum && !_axInFmt ? ' \u00b7 ' + _axMsNum : ''}</span>
-                      ${_axInFmt ? `<span style="font-size:${_FS_SM};font-weight:700;color:#9B9BAD;font-family:'Space Mono',monospace;white-space:nowrap">${_axInFmt}</span>` : (_axMsNum ? `<span style="font-size:${_FS_BASE};color:#9B9BAD">${_axMsNum}</span>` : '')}
+                      <span style="font-size:${_FS_BASE};color:#C2C2D4">Axiom \u00b7 ${_axPair}</span>
+                      ${_axInFmt ? `<span style="font-size:${_FS_SM};font-weight:700;color:#E8E8F0;font-family:'Space Mono',monospace;white-space:nowrap">${_axInFmt}</span>` : ''}
+                    </div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                      <span style="font-size:${_FS_BASE};color:${_axMevClr}">${_axRlBadge}${_axRlBadge ? ' ' : ''}${_axMevStr}</span>
+                      ${_axMsNum ? `<span style="font-size:${_FS_BASE};color:#9B9BAD">${_axMsNum}</span>` : ''}
                     </div>
                     ${_axBribe}
                     ${_axRisk}
@@ -936,7 +962,7 @@
                 return `
                   <div id="sr-wc-${i}" style="background:rgba(255,181,71,0.04);border:1px solid rgba(255,181,71,0.2);border-radius:8px;padding:10px;margin-bottom:6px;">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                      <span style="font-size:13px;font-weight:700;color:#FFB547">⚠ Not optimized</span>
+                      ${_optBadgeHtml(false)}
                       <span style="font-size:12px;font-weight:700;color:#E8E8F0;font-family:'Space Mono',monospace">+ ${outVal}</span>
                     </div>
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -955,7 +981,7 @@
               return `
                 <div id="sr-wc-${i}" style="background:#1A1A2E;border:1px solid rgba(153,69,255,0.06);border-radius:8px;padding:10px;margin-bottom:6px;">
                   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-                    <span style="font-size:13px;font-weight:700;color:#E8E8F0">Swapped <span style="font-size:9px;font-weight:700;background:linear-gradient(135deg,rgba(153,69,255,0.15),rgba(20,241,149,0.06));border:1px solid rgba(153,69,255,0.3);color:#9945FF;border-radius:10px;padding:1px 6px;vertical-align:middle">ZendIQ Optimized</span></span>
+                    ${_optBadgeHtml(true)}
                     <span style="font-size:12px;font-weight:700;color:#14F195;font-family:'Space Mono',monospace">+ ${outVal}</span>
                   </div>
                   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
@@ -3772,6 +3798,9 @@ ${!ns.axiomVerifyOnly ? '' : `
       }
       #sr-pill-label span { color:#14F195; transition:color 0.2s; }
       #sr-widget.alert #sr-pill-label span { color:#FFB547; }
+      /* Listed after .alert so a chain we do not cover outranks any other state. */
+      #sr-widget.uncovered #sr-pill-dot { background:#FFB547; box-shadow:0 0 8px #FFB547; }
+      #sr-widget.uncovered #sr-pill-label span { color:#FFB547; }
       #sr-pill-collapse {
         flex-shrink:0; background:none; border:none;
         color:#C2C2D4; font-size:13px; cursor:pointer; padding:0 0 0 2px;

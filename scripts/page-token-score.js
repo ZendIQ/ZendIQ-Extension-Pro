@@ -433,8 +433,11 @@
       const url  = `https://api.dexscreener.com/latest/dex/tokens/${mint}`;
       const data = await ns.pageJsonFetch(url);
       if (!data?.pairs?.length) return null;
-      // Pick the Solana pair with the highest liquidity
-      const solPairs = data.pairs.filter(p => p.chainId === 'solana');
+      // /dex/tokens returns pairs where the mint is on either side, but every
+      // token-level field below describes baseToken. A quote-side pair would report
+      // another token's market cap and symbol under this mint's name.
+      const solPairs = data.pairs.filter(p =>
+        p.chainId === 'solana' && (p.baseToken?.address ?? '') === mint);
       if (!solPairs.length) return null;
       solPairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
       const p = solPairs[0];
