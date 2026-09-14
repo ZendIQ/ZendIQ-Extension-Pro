@@ -2636,7 +2636,8 @@
           + '</div>';
       })() : '';
 
-      // Trade summary and optimization breakdown scroll; the buttons do not.
+      // Pinned with the buttons below: what the trade changes has to be on screen
+      // next to the button that agrees to it, not somewhere up the card stack.
       const _footerInfo = (ns.axiomAutoAccepting || ns.axiomConfirmPending)
         ? '<div style="font-size:12px;color:#C2C2D4;margin-bottom:8px;text-align:center">' + _amtLabel + '</div>' + _optCard
         : '';
@@ -2677,11 +2678,9 @@
         + _execCard
         + _feeCard
         + _impactHtml
-        + _footerInfo
-        + _disclaimer
         + (_footerBtns
-            ? '<div style="position:sticky;bottom:0;z-index:10;margin:0 -16px;padding:9px 16px 12px;background:#12121E;border-top:1px solid rgba(255,255,255,0.06)">' + _footerBtns + '</div>'
-            : '<div style="height:14px"></div>')
+            ? '<div style="position:sticky;bottom:0;z-index:10;margin:0 -16px;padding:9px 16px 12px;background:#12121E;border-top:1px solid rgba(255,255,255,0.06)">' + _footerInfo + _disclaimer + _footerBtns + '</div>'
+            : _footerInfo + _disclaimer + '<div style="height:14px"></div>')
         + '</div>';
     },
   });
