@@ -61,6 +61,17 @@
               [15, 12, 'MEDIUM', 'Elevated'], [0, 5, 'LOW', 'Normal']],
   };
 
+  // Venue fee as a share of the trade. Banded harder than slippage because it is a
+  // certainty, not a tolerance — the whole amount is paid on every fill, so there is
+  // no equivalent of SLIPPAGE_FILL_RATE to discount it by.
+  const VENUE_FEE_BANDS = [
+    [50, 45, 'CRITICAL', 'Venue fee exceeds half the trade'],
+    [20, 28, 'HIGH',     'High venue fee'],
+    [10, 14, 'MEDIUM',   'Elevated venue fee'],
+    [0,   4, 'LOW',      'Venue fee'],
+  ];
+
+  const DEMOTE_ONE_BAND = { CRITICAL: 'HIGH', HIGH: 'MEDIUM', MEDIUM: 'LOW', LOW: 'LOW' };
   async function calculateRisk(txInfo, context) {
     let score = 0;
     const factors = [];
@@ -119,6 +130,48 @@
       });
     } else {
       factors.push({ name: 'Slippage: none / auto', severity: 'LOW', lossContrib: 0 });
+    }
+
+    // Venue fee — only when the venue charges one it sets itself and the trade's own
+    // leg is known. Omitted rather than guessed: a share of an unknown amount is not
+    // a smaller number, it is a different claim.
+    const venueFeePct = swapInfo?.venueFeePct;
+    const venueFeeUsd = swapInfo?.venueFeeUsd;
+    if (venueFeePct != null && !isNaN(venueFeePct)) {
+      const [, vAdd, vSev, vLabel] = VENUE_FEE_BANDS.find(b => venueFeePct >= b[0]) ?? VENUE_FEE_BANDS[VENUE_FEE_BANDS.length - 1];
+      score += vAdd;
+      factors.push({
+        name: `${vLabel} (${venueFeePct.toFixed(venueFeePct < 10 ? 1 : 0)}% of trade)`,
+        severity: vSev,
+        lossContrib: swapInfo?.venueFeeUsd ?? 0,
+      });
+    } else if (venueFeeUsd != null) {
+      // The fee is known, its share of the trade is not — so it earns no band, but it
+      // is still a certain cost and is listed and counted rather than left out.
+      factors.push({
+        name: `Venue fee ($${venueFeeUsd.toFixed(2)}, share of trade unknown)`,
+        severity: 'LOW',
+        lossContrib: venueFeeUsd,
+      });
+    } else if (swapInfo?.venueFeeCapPct != null) {
+      // Only a ceiling is knowable. Scored at half weight for the same reason slippage
+      // is discounted: a bound the venue may not reach is weaker evidence than a cost.
+      const _cp = swapInfo.venueFeeCapPct;
+      const [, cAdd, cSev] = VENUE_FEE_BANDS.find(b => _cp >= b[0]) ?? VENUE_FEE_BANDS[VENUE_FEE_BANDS.length - 1];
+      score += Math.round(cAdd / 2);
+      factors.push({
+        name: `Auto Fee ceiling (up to ${_cp.toFixed(_cp < 10 ? 1 : 0)}% of trade)`,
+        severity: DEMOTE_ONE_BAND[cSev] ?? cSev,   // the pill must match the halved weight
+        lossContrib: 0,
+      });
+    } else if (swapInfo?.venueFeeAuto) {
+      // Nothing to score, which is not the same as nothing to pay — an omitted row
+      // would read as a free trade.
+      factors.push({
+        name: 'Venue fee set at submission — amount not known yet',
+        severity: 'MEDIUM',
+        lossContrib: 0,
+      });
     }
 
     // Price impact — always shown when Jupiter provides the value

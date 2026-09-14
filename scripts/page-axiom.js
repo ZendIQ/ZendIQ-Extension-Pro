@@ -302,14 +302,10 @@
   // Regex for Solana pubkeys: 32–44 base58 chars (no 0, O, I, l).
   const _PUBKEY_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
-  // Centralised pubkey setter — update-if-changed, logs every transition.
-  // Replaces the old first-write-wins guard so multi-wallet switches are tracked.
+  // Update-if-changed rather than first-write-wins, so multi-wallet switches are tracked.
   function _setPubkey(pubkey, source) {
     if (!pubkey || !ns) return;
     if (pubkey === ns.axiomSessionPubkey) return;
-    if (ns.axiomSessionPubkey) {
-      console.log('[ZQ:AXIOM] wallet switch (' + source + '):', ns.axiomSessionPubkey.slice(0, 8) + '…', '→', pubkey.slice(0, 8) + '…');
-    }
     ns.axiomSessionPubkey = pubkey;    // Update the pill status — same 'Active' label as Jupiter once wallet is known.
     try { ns.setWalletForSession?.(pubkey, 'axiom'); } catch (_) {}
     try { ns.updateWidgetStatus?.(_pillActiveLabel()); } catch (_) {}  }
@@ -450,9 +446,6 @@
         // Prefer map-resolved token; close signal body may omit tokenAddress.
         if (!ev.tokenAddress) ev = Object.assign({}, ev, { tokenAddress: open.token });
         ns.axiomPositions.delete(open.wallet);
-        console.log('[ZQ:AXIOM] position close resolved: wallet=' + open.wallet.slice(0, 8) + '… token=' + open.token.slice(0, 8) + '…');
-      } else if (!ev.tokenAddress) {
-        console.log('[ZQ:AXIOM] position close: no open position in map (opened before ZendIQ loaded) wallet=' + ev.walletAddress.slice(0, 8) + '…');
       }
     }
 
@@ -478,7 +471,6 @@
       // is deliberately never cleared, so an unguarded BNB trade would be filed as
       // "SOL → <last Solana token viewed>" with that token's risk score attached.
       if (!_SOL_SIG_RE.test(ev.signature)) {
-        console.log('[ZQ:AXIOM] non-Solana trade — not recorded: ' + String(ev.signature).slice(0, 12) + '\u2026');
         ns.axiomLastOpIsClose = false;
         return;
       }
@@ -534,14 +526,19 @@
         // Pre-trade SOL amount read from the buy box — meaningless on a sell.
         amountIn:    _sellHint ? null : (_axiomBuyAmountSol ?? null),
         amountOut:   null,   // filled async below via getTransaction
-        // Token risk describes the meme token. On a sell it is not what was received.
-        riskScore:   _sellHint ? null : (_risk?.score   ?? null),
-        riskLevel:   _sellHint ? null : (_risk?.level   ?? null),
-        riskFactors: _sellHint ? null : (_risk?.factors ?? null),
+        // Scores the meme token either way — on a sell that is the asset being exited,
+        // which is the leg the verdict was about. Renderers label it "Token Risk".
+        riskScore:   _risk?.score   ?? null,
+        riskLevel:   _risk?.level   ?? null,
+        riskFactors: _risk?.factors ?? null,
         // Exchange hint.
         routeSource: 'axiom',
         // Axiom preset breakdown extracted from the log-tx-v3 body.
         axiomPreset: {
+          // The fee fields are named …Sol but hold whatever the chain's native asset
+          // is. Off Solana we do not know what that is, so the unit is recorded as
+          // unknown and renderers say so rather than printing "SOL" over a BNB amount.
+          feeCurrency:           _chain() === 'solana' ? 'SOL' : null,
           priorityFeeSol:        ev.priorityFeeSol        ?? null,
           bribeFeeSol:           ev.bribeFeeSol           ?? null,
           mevProtection:         ev.mevProtection         ?? null,
@@ -594,9 +591,11 @@
         provider:          ev.provider ?? null,
         region:            ev.region   ?? null,
         // Sent separately because fees_usd sums them: H.4's floor-vs-scaling question
-        // can only be answered by comparing bribe_fee_sol against trade_sol.
-        priority_fee_sol:  ev.priorityFeeSol ?? null,
-        bribe_fee_sol:     ev.bribeFeeSol    ?? null,
+        // can only be answered by comparing bribe_fee_sol against trade_sol. Columns
+        // are SOL-named, so off Solana they stay null and fee_currency says why.
+        fee_currency:      _axIsSol ? 'SOL' : null,
+        priority_fee_sol:  _axIsSol ? (ev.priorityFeeSol ?? null) : null,
+        bribe_fee_sol:     _axIsSol ? (ev.bribeFeeSol    ?? null) : null,
         // Separates "we did not try" from "we tried and Axiom traded on the old values",
         // which is the only way to measure how often the apply fails to reach the trade.
         optimize_applied:  _optApplied,
@@ -725,8 +724,6 @@
       // settlement. axiomConfirmPending is already false (cleared by axiomProceedTrade).
       try { ns.renderWidgetPanel?.(); } catch (_) {}
     }
-
-    console.log('[ZQ:AXIOM]', ev.type);
   }
 
   // ── Pre-trade risk computation ───────────────────────────────────────────
@@ -831,7 +828,7 @@
     const botLvl = ns.axiomMevRisk?.riskLevel ?? null;
     const tkLvl  = (ns.tokenScoreResult?.loaded) ? (ns.tokenScoreResult.level ?? null) : null;
     const worst  = _worstLevel(botLvl, tkLvl);
-    return worst === 'CRITICAL' ? 10 : worst === 'HIGH' ? 15 : 20;
+    return worst === 'CRITICAL' ? 10 : worst === 'LOW' ? 20 : 15;
   }
 
   // Whether the active preset already sits at or below that target with MEV Secure.
@@ -844,6 +841,116 @@
     const s = p ? parseFloat(p.slippage) : NaN;
     if (isNaN(s)) return null;
     return s <= _slipTargetNow() && _mevModeLabel(p) === 'Secure';
+  }
+
+  // The active preset's fee load for a side. Read by both the fee card and the risk
+  // factor, which must not be able to disagree about what the trade costs.
+  // `pct` is null whenever the trade's own SOL leg is unknown \u2014 every sell, and any
+  // buy before an amount is entered.
+  // Auto Fee's real figures exist only in Axiom's own inputs \u2014 it never writes them
+  // back to the preset. Matched by the label beside each field rather than by
+  // position, so a layout change yields nothing and we fall back to the ceiling.
+  const _FEE_LABELS = ['SLIPPAGE', 'PRIORITY', 'BRIBE', 'MAX FEE', 'AMOUNT'];
+
+  function _inputLabel(el) {
+    let node = el;
+    for (let d = 0; d < 4; d++) {
+      node = node.parentElement;
+      if (!node) return null;
+      const t = (node.textContent || '').toUpperCase();
+      const hits = _FEE_LABELS.filter(function (w) { return t.indexOf(w) !== -1; });
+      if (hits.length === 1) return hits[0];
+      if (hits.length > 1) return null;   // container covers several fields \u2014 never guess
+    }
+    return null;
+  }
+
+  // Our own widget renders inputs into this same page, including a slippage field.
+  function _isOwnNode(el) {
+    return !!el.closest('#sr-widget');
+  }
+
+  // The fields on screen belong to the open settings tab, not to the trade. Reading a
+  // bribe off the Sell tab and pricing a buy with it would be worse than not reading.
+  function _visibleSettingsSide() {
+    let found = null;
+    const els = document.querySelectorAll('span, div');
+    for (let i = 0; i < els.length; i++) {
+      const t = (els[i].textContent || '').trim();
+      if (t !== 'Buy settings' && t !== 'Sell settings') continue;
+      if (_isOwnNode(els[i])) continue;
+      const cls = String(els[i].className || '');
+      if (cls.indexOf('text-[12px]') === -1) continue;
+      if (cls.indexOf('textSecondary') !== -1) continue;   // the dimmed, inactive tab
+      const side = t === 'Sell settings' ? 'sell' : 'buy';
+      if (found && found !== side) return null;
+      found = side;
+    }
+    return found;
+  }
+
+  function _autoFeeFromDom(side) {
+    if (_visibleSettingsSide() !== side) return null;
+    let prio = null, bribe = null;
+    const els = document.querySelectorAll('input');
+    for (let i = 0; i < els.length; i++) {
+      if (_isOwnNode(els[i])) continue;
+      const v = parseFloat(els[i].value);
+      if (isNaN(v) || v < 0) continue;
+      const lbl = _inputLabel(els[i]);
+      if      (lbl === 'PRIORITY') prio  = v;
+      else if (lbl === 'BRIBE')    bribe = v;
+    }
+    if (prio == null && bribe == null) return null;
+    const tot = (prio ?? 0) + (bribe ?? 0);
+    if (!(tot > 0) || tot > 1) return null;   // above 1 SOL we did not read a fee
+    return { prio: prio, bribe: bribe, tot: tot };
+  }
+
+  function _venueFeeTotals(side) {
+    if (!_isSolana()) return null;
+    const s = _readSettings();
+    if (!s) return null;
+    const _side = side === 'sell' ? 'sell' : 'buy';
+    const p = _preset(s, s.currentSolPresetKey, _side);
+    if (!p) return null;
+    const _auto = p.autoFee === true;
+    const leg = _side === 'buy' ? (_readBuyAmountFromButton() ?? _axiomBuyAmountSol) : null;
+    const sp  = _solUsd();
+    const _cap   = parseFloat(p.maxFeeSol);
+    const hasCap = !isNaN(_cap) && _cap > 0;
+    const base = {
+      autoFee: _auto, side: _side, presetKey: s.currentSolPresetKey ?? null,
+      cap:    hasCap ? _cap : null,
+      capPct: (hasCap && leg > 0) ? (_cap / leg * 100) : null,
+      capUsd: (hasCap && sp != null) ? _cap * sp : null,
+    };
+    // Under Auto Fee the stored figures are the manual fallback, not what gets paid:
+    // Axiom sizes the real fee live in its own UI and never writes it back here. Those
+    // inputs only exist while the settings panel is open, so the ceiling is the floor
+    // of what we can say.
+    if (_auto) {
+      const dom = _autoFeeFromDom(_side);
+      if (dom) {
+        return Object.assign(base, {
+          prio: dom.prio, bribe: dom.bribe, tot: dom.tot, live: true,
+          pct: leg > 0 ? (dom.tot / leg * 100) : null,
+          usd: sp != null ? dom.tot * sp : null,
+        });
+      }
+      return Object.assign(base, { tot: null, pct: null, usd: null });
+    }
+    const _prio  = parseFloat(p.priorityFeeSol);
+    const _bribe = parseFloat(p.bribeFeeSol);
+    const hasP = !isNaN(_prio)  && _prio  > 0;
+    const hasB = !isNaN(_bribe) && _bribe > 0;
+    if (!hasP && !hasB) return null;
+    const tot = (hasP ? _prio : 0) + (hasB ? _bribe : 0);
+    return Object.assign(base, {
+      prio: hasP ? _prio : null, bribe: hasB ? _bribe : null, tot,
+      pct: leg > 0 ? (tot / leg * 100) : null,
+      usd: sp != null ? tot * sp : null,
+    });
   }
 
   // Compute the proposed safe changes for the active preset on the given side.
@@ -1196,7 +1303,6 @@
     if (!(await _acquireLock())) {
       // Another tab is mid-cycle. Not our failure, so it must not spend an attempt:
       // the ceiling exists to bound real failures, not contention.
-      console.log('[ZQ:AXIOM] restore deferred (' + reason + ') — settings lock held elsewhere');
       return;
     }
 
@@ -1213,8 +1319,6 @@
     // capturing our unrestored value as its original. Released once we have stopped
     // acting, so a tab waiting on the user does not block every other tab's restore.
     if (done || readOnly) _releaseLock();
-    console.log('[ZQ:AXIOM] restore (' + reason + ') local=' + ob.localRestored + '/' + (ob.localOutcome ?? '-') +
-                ' server=' + ob.serverRestored + '/' + (ob.serverOutcome ?? '-') + (readOnly ? ' [read-only]' : ''));
   }
 
   // Optimize & Buy: patch safe values → re-fire Buy → schedule restore.
@@ -1229,7 +1333,6 @@
     // only preset store this file knows how to read or put back. Off Solana there is
     // also no held click to release, so proceeding is only right if we did intercept.
     if (!_isSolana()) {
-      console.log('[ZQ:AXIOM] optimization refused \u2014 chain=' + (ns?.axiomChain ?? _CHAIN_UNKNOWN));
       if (ns) ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'chain-not-supported' };
       // We only intercept on Solana, so a pending confirm here means the page moved
       // under the panel. Re-firing would hunt for a trade button on whatever is on
@@ -1544,6 +1647,15 @@
   async function _computeAxiomRisk(mint, amountUSD) {
     if (!ns) return;
 
+    // The amount watcher is skipped while the confirm panel is open, so callers from
+    // there have no figure. The buy button still carries it — same source as the fee card.
+    let _tradeUsd = amountUSD ?? null;
+    if (_tradeUsd == null && ns?.axiomPendingSide !== 'sell') {
+      const _leg = _readBuyAmountFromButton() ?? _axiomBuyAmountSol;
+      const _sp  = _solUsd();
+      if (_leg > 0 && _sp != null) _tradeUsd = _leg * _sp;
+    }
+
     // Slippage: localStorage → last log-tx-v3 signal → observed default (20%).
     const _slipDecimal = _readAxiomSlippage(ns?.axiomPendingSide) ?? ns.axiomLastSlippage ?? 0.20;
 
@@ -1558,7 +1670,7 @@
       ns.axiomMevRisk = ns.calculateMEVRisk({
         inputMint:  _SOL_MINT,
         outputMint: mint,
-        amountUSD:  (amountUSD ?? null), // null = unknown (skips size floor cap); real value re-scores
+        amountUSD:  (_tradeUsd ?? null), // null = unknown (skips size floor); real value re-scores
         routePlan:  null,                // single hop
         slippage:   _slipDecimal,
         routeType:  mint.endsWith('pump') ? 'bonding_curve' : 'unknown',
@@ -1567,14 +1679,22 @@
 
     // ── Execution Risk via calculateRisk ────────────────────────────────
     if (ns.calculateRisk && ns.fetchDevnetContext) {
+      const _vf = _venueFeeTotals(ns?.axiomPendingSide);
       const txInfo = {
         accountCount: 6,  // typical for a meme buy
         swapInfo: {
           slippagePercent: _slipDecimal * 100, // calculateRisk expects percentage
           inAmount:        null,
-          inAmountUsd:     null,
+          inAmountUsd:     _tradeUsd ?? null,
           outputMint:      mint,
           source:          'axiom',
+          // Axiom's fee is set in the user's preset, so it is knowable before the
+          // trade and certain rather than probabilistic. Under Auto Fee only the
+          // user's own ceiling is knowable, and it is scored as a bound not a cost.
+          venueFeePct:     _vf?.pct ?? null,
+          venueFeeUsd:     _vf?.usd ?? null,
+          venueFeeCapPct:  (_vf?.pct == null ? (_vf?.capPct ?? null) : null),
+          venueFeeAuto:    _vf?.autoFee === true,
         },
       };
       try {
@@ -1685,7 +1805,6 @@
   // Axiom submits orders over the socket and builds them from in-memory state, which
   // moves only when the server pushes a settings change back. Watching that push is
   // the only way to know our write is live before the order goes out.
-  let _missLogged    = 0;
   let _echoWait      = null;
   // The push carries the whole settings object; the envelope around it is unknown.
   function _findPresets(v, d) {
@@ -1709,16 +1828,6 @@
     if (!sp) return;
     const _got = sp[_echoWait.key]?.[_echoWait.side];
     if (_presetMatches(_got, _echoWait.want)) return _echoWait.hit();
-    if (_missLogged >= 6) return;
-    _missLogged++;
-    // A near-miss means the echo arrived but a field we demand does not match, which
-    // is indistinguishable from silence unless the difference is shown.
-    try {
-      console.log('[ZQ:AXIOM] echo near-miss ' + _echoWait.key + '.' + _echoWait.side + ' \u2192 '
-        + Object.keys(_echoWait.want).map(function (k) {
-            return k + '=' + String(_got?.[k]) + (String(_got?.[k]) === String(_echoWait.want[k]) ? '' : ' (want ' + String(_echoWait.want[k]) + ')');
-          }).join(' '));
-    } catch (_) {}
   }
 
   // Axiom builds the order from in-memory state, which moves only when the server
@@ -1738,8 +1847,6 @@
           if (done) return;
           done = true;
           if (_echoWait === w) _echoWait = null;
-          console.log('[ZQ:AXIOM] preset echo ' + (ok ? 'confirmed in ' + (w.seenAt - t0) + 'ms'
-                                                     : 'timed out after ' + _ECHO_TIMEOUT_MS + 'ms'));
           resolve(ok);
         };
         if (w.seenAt) return finish(true);
@@ -1838,33 +1945,18 @@
     // Pool address — ask the indexers which token it trades, then verify the answer.
     // Tried in order so the second call only fires when the first yields nothing usable.
     if (!mint) {
-      const _sources = [['dexscreener', _dexScreenerBase], ['geckoterminal', _geckoBase]];
+      const _sources = [_dexScreenerBase, _geckoBase];
       for (let i = 0; i < _sources.length && !mint; i++) {
-        const _name = _sources[i][0];
-        let c = null, err = null;
-        try { c = await _sources[i][1](addr); } catch (e) { err = e; }
-        // Which step failed is the whole diagnosis: an indexer that returned nothing
-        // and a mint that would not verify need opposite fixes.
-        if (err)            { console.log('[ZQ:AXIOM] ' + _name + ' errored: ' + (err?.message ?? err)); continue; }
-        if (!c)             { console.log('[ZQ:AXIOM] ' + _name + ' returned no base token'); continue; }
-        if (!_B58_ADDR_RE.test(c) || c === _SOL_MINT) {
-          console.log('[ZQ:AXIOM] ' + _name + ' returned unusable base token: ' + c);
-          continue;
-        }
+        let c = null;
+        try { c = await _sources[i](addr); } catch (_) { continue; }
+        if (!c || !_B58_ADDR_RE.test(c) || c === _SOL_MINT) continue;
         if (await _isMintAccount(c)) mint = c;
-        else console.log('[ZQ:AXIOM] ' + _name + ' base ' + c.slice(0, 8) + '\u2026 did not verify as a mint');
       }
     }
 
-    if (!mint) {
-      // Not cached — a later visit may resolve once the token is indexed.
-      // Logged, not warned: this is an expected state for a new token and the widget
-      // reports it. console.warn would file it in the browser's extension error list.
-      console.log('[ZQ:AXIOM] could not identify token for ' + addr.slice(0, 8) + '\u2026 \u2014 not scoring');
-      return null;
-    }
+    // Not cached — a later visit may resolve once the token is indexed.
+    if (!mint) return null;
     _mintCache.set(addr, mint);
-    if (mint !== addr) console.log('[ZQ:AXIOM] pool ' + addr.slice(0, 8) + '\u2026 \u2192 mint ' + mint.slice(0, 8) + '\u2026');
     return mint;
   }
 
@@ -2080,6 +2172,9 @@
           amount_in:    _amtSol,
         }); } catch (_) {}
         try { ns.logFunnel?.('widget_shown', { dex: _AX_SITE }); } catch (_) {}
+        // Every earlier scoring pass ran off the buy amount, so its slippage and fees
+        // describe the buy preset. The side is only known here.
+        _computeAxiomRisk(ns._tokenScoreMint ?? null, _iUsd).catch(function () {});
       }
       const _w = document.getElementById('sr-widget');
       if (_w) {
@@ -2197,6 +2292,7 @@
   function _readBuyAmountFromButton() {
     const btns = document.querySelectorAll('button');
     for (let i = 0; i < btns.length; i++) {
+      if (_isOwnNode(btns[i])) continue;
       const v = _amountFromButtonText(btns[i].textContent ?? '');
       if (v != null) return v;
     }
@@ -2224,6 +2320,7 @@
     document.addEventListener('input', function (e) {
       const el = e.target;
       if (!el || el.tagName !== 'INPUT') return;
+      if (_isOwnNode(el)) return;   // our own threshold fields are not a trade size
       const v = parseFloat(el.value);
       if (!isNaN(v) && v > 0 && v < 100000) {
         clearTimeout(_debounce);
@@ -2606,28 +2703,47 @@
       // Axiom's bribe is a flat SOL amount, so on a small trade it can exceed the
       // trade itself. Shown rather than changed: the bribe buys block inclusion,
       // and lowering it trades money for the risk of a trade that never lands.
+      // Set by the fee card below and read by the optimization card further down,
+      // which is pinned to the buttons. Our own savings estimate must not sit next to
+      // the approve button with the larger venue fee left further up the stack.
+      let _axFeeTotSol = null, _axFeeTotUsd = null;
+
       const _feeCard = (function () {
-        // solPresets is Solana-denominated, so labelling it SOL is only correct here.
-        if (!_isSolana()) return '';
-        const _fs = _readSettings();
-        if (!_fs) return '';
         const _fSide = ns.axiomPendingSide === 'sell' ? 'sell' : 'buy';
-        const _fp = _preset(_fs, _fs.currentSolPresetKey, _fSide);
-        if (!_fp) return '';
-        // With autoFee on, Axiom sizes the fee itself and the preset numbers are not what gets paid.
-        if (_fp.autoFee) return '';
+        const _vf = _venueFeeTotals(_fSide);
+        if (!_vf) return '';
+        // Only when the preset carries no usable figures. Saying so beats rendering
+        // nothing: the fee is the dominant cost on a small trade, and a blank space
+        // reads as "no fee" rather than "not knowable yet".
+        if (_vf.tot == null) {
+          const _capSol = _vf.cap != null
+            ? _vf.cap.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') + ' SOL' : null;
+          const _capBadge = _capSol ? 'Auto Fee \u00b7 up to ' + _capSol : 'Auto Fee \u00b7 not known yet';
+          const _capLine = _capSol
+            ? 'Your MAX FEE caps it at ' + _esc(_capSol)
+              + (_vf.capUsd != null ? ' (\u2248$' + _vf.capUsd.toFixed(2) + ')' : '')
+              + (_vf.capPct != null
+                  ? ', which is ' + _vf.capPct.toFixed(_vf.capPct < 10 ? 1 : 0) + '% of this trade.'
+                  : '.')
+            : '';
+          return '<div title="Axiom&#39;s Auto Fee sizes the priority fee and bribe live and does not write them '
+            + 'back to your preset, so ZendIQ cannot read the exact figure before the trade. The MAX FEE you set '
+            + 'is the ceiling. Settled amounts appear in Activity afterwards." style="background:rgba(255,181,71,0.06);border:1px solid rgba(255,181,71,0.2);border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help">'
+            + '<div style="display:flex;justify-content:space-between;align-items:center;font-size:13px">'
+            +   '<span style="color:#FFB547;font-weight:600">' + (_fSide === 'sell' ? 'Sell' : 'Buy') + ' Fees</span>'
+            +   '<span style="font-weight:700;font-size:12px;font-family:Space Mono,monospace;color:#FFB547">' + _esc(_capBadge) + '</span>'
+            + '</div>'
+            + '<div style="font-size:11px;color:#9B9BAD;line-height:1.5;margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.08)">'
+            + 'Axiom sizes this fee at submission and never writes it back, so your preset\u2019s figures are not what gets paid. '
+            + _capLine
+            + ' ZendIQ shows the settled amount in Activity.</div>'
+            + '</div>';
+        }
 
-        const _prio  = parseFloat(_fp.priorityFeeSol);
-        const _bribe = parseFloat(_fp.bribeFeeSol);
-        const _hasP  = !isNaN(_prio)  && _prio  > 0;
-        const _hasB  = !isNaN(_bribe) && _bribe > 0;
-        if (!_hasP && !_hasB) return '';
-        const _tot = (_hasP ? _prio : 0) + (_hasB ? _bribe : 0);
-
-        // Only a buy's SOL leg is known up front; a sell's proceeds are not, so the
-        // ratio is omitted there rather than invented from an unrelated buy amount.
-        const _legSol = _fSide === 'buy' ? (_readBuyAmountFromButton() ?? _axiomBuyAmountSol) : null;
-        const _pct    = _legSol > 0 ? (_tot / _legSol * 100) : null;
+        const _prio = _vf.prio, _bribe = _vf.bribe;
+        const _hasP = _prio != null, _hasB = _bribe != null;
+        const _tot  = _vf.tot;
+        const _pct  = _vf.pct;
         const _fc = _pct == null ? '#C2C2D4'
           : _pct >= 50 ? '#FF4444'
           : _pct >= 20 ? '#FF6B00'
@@ -2637,10 +2753,17 @@
         const _sol = function (n) {
           return n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') + ' SOL';
         };
+        const _spU = _solUsd();
+        const _usd = function (n) { return _spU != null ? '\u2248$' + (n * _spU).toFixed(2) : null; };
+        const _totUsd = _usd(_tot);
+        _axFeeTotSol = _tot;
+        _axFeeTotUsd = _spU != null ? _tot * _spU : null;
         const _badge = _pct != null
           ? _pct.toFixed(_pct < 10 ? 1 : 0) + '% of trade'
           : _sol(_tot);
-        const _feeTip = 'Fees configured in your active ' + _fSide + ' preset (' + _esc(String(_fs.currentSolPresetKey ?? '')) + ').'
+        const _feeTip = (_vf.live
+            ? 'Auto Fee figures read live from Axiom\u2019s open ' + _fSide + ' settings panel.'
+            : 'Fees configured in your active ' + _fSide + ' preset (' + _esc(String(_vf.presetKey ?? '')) + ').')
           + '&#10;The bribe is a flat SOL amount and does not scale with trade size.'
           + '&#10;Axiom has been observed settling slightly above these figures.'
           + '&#10;ZendIQ shows these fees but never changes them \u2014 the bribe buys block inclusion.';
@@ -2653,14 +2776,28 @@
         };
 
         // A flat fee is only worth calling out when it is large next to the trade.
+        // Where the SOL leg is unknown the ratio cannot be given, but the fee is still
+        // fully known — so the break-even size is stated instead of saying nothing.
+        // That is the same fact the ratio carries, in the only form available up front.
+        const _note = function (body) {
+          return '<div style="font-size:11px;color:' + (_pct != null ? _fc : '#9B9BAD')
+            + ';line-height:1.5;margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.08)">'
+            + body + '</div>';
+        };
         const _warn = (_pct != null && _pct >= 20)
-          ? '<div style="font-size:11px;color:' + _fc + ';line-height:1.5;margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.08)">'
-            + 'This is a flat fee, so it costs the same on any trade size. Lower the bribe in your Axiom '
-            + _fSide + ' preset to keep it proportionate.</div>'
-          : (_fSide === 'sell'
-            ? '<div style="font-size:11px;color:#6B6B8A;line-height:1.5;margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.08)">'
-              + 'Sell proceeds are not known until the trade settles \u2014 ZendIQ shows what this cost as a share of '
-              + 'your proceeds in Activity afterwards.</div>'
+          ? _note(_vf.live
+              ? 'Auto Fee sizes this from network conditions rather than your trade size, so a small '
+                + 'trade pays a large share of its value in fees.'
+              : 'This is a flat fee, so it costs the same on any trade size. Lower the bribe in your Axiom '
+                + _fSide + ' preset to keep it proportionate.')
+          : (_pct == null
+            ? _note('Flat fee \u2014 it costs the same at any size. '
+                + (_fSide === 'sell'
+                    ? 'Exiting a position worth less than ' + _esc(_sol(_tot))
+                      + (_totUsd ? ' (' + _esc(_totUsd) + ')' : '') + ' returns less than it costs to submit. '
+                      + 'ZendIQ shows the share of your actual proceeds in Activity afterwards.'
+                    : 'Any trade smaller than ' + _esc(_sol(_tot))
+                      + (_totUsd ? ' (' + _esc(_totUsd) + ')' : '') + ' pays more in fees than it is worth.'))
             : '');
 
         const _detail = _isSimple ? '' :
@@ -2668,7 +2805,7 @@
           + (_hasB ? _row('Bribe', _sol(_bribe)) : '')
           + ((_hasP && _hasB)
               ? '<div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:4px;padding-top:4px">'
-                + _row('Total', _sol(_tot), _fc) + '</div>'
+                + _row('Total', _sol(_tot) + (_totUsd ? ' (' + _totUsd + ')' : ''), _fc) + '</div>'
               : '');
 
         return '<div title="' + _feeTip + '" style="background:' + _fc + '0E;border:1px solid ' + _fc + '3A;border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help">'
@@ -2841,12 +2978,26 @@
         const _sav = _opt.estSavingsUsd > 0.0001
           ? '~$' + _opt.estSavingsUsd.toFixed(_opt.estSavingsUsd < 1 ? 4 : 2)
           : 'Lower exposure';
+        // Axiom's own fee, restated here beside our estimate. It is usually the larger
+        // of the two by orders of magnitude, and ZendIQ does not change it — showing
+        // only the figure that flatters us would misrepresent the trade's economics.
+        const _feeRow = _axFeeTotSol != null ? (function () {
+          const _fSol = _axFeeTotSol.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') + ' SOL';
+          const _fUsd = _axFeeTotUsd != null ? ' (\u2248$' + _axFeeTotUsd.toFixed(2) + ')' : '';
+          const _dwarfs = _axFeeTotUsd != null && _opt.estSavingsUsd != null
+            && _axFeeTotUsd > _opt.estSavingsUsd;
+          return '<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:12px;margin-top:4px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.08)">'
+            + '<span style="color:#C2C2D4;cursor:help" title="Axiom&#39;s own priority fee and bribe for this trade. ZendIQ never changes these \u2014 they are shown so the saving above is read against the trade&#39;s full cost.">Axiom fees on this trade</span>'
+            + '<span style="font-family:Space Mono,monospace;font-weight:700;color:' + (_dwarfs ? '#FF6B6B' : '#FFB547') + '">' + _esc(_fSol + _fUsd) + '</span>'
+            + '</div>';
+        })() : '';
         return '<div style="background:linear-gradient(135deg,rgba(20,241,149,0.08),rgba(20,241,149,0.03));border:1px solid rgba(20,241,149,0.35);border-radius:10px;padding:11px 13px;margin-bottom:10px">'
           + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;padding-bottom:7px;border-bottom:1px solid rgba(20,241,149,0.18)">'
           +   '<span style="color:#14F195;font-weight:700;font-size:13px">\ud83d\udee1 ZendIQ Optimization</span>'
           +   '<span title="Estimated exposure removed by tighter slippage + MEV Secure. Not a guaranteed gain." style="color:#14F195;font-weight:700;font-size:12px;font-family:Space Mono,monospace;cursor:help">' + _sav + '</span>'
           + '</div>'
           + _rows
+          + _feeRow
           + '<div style="font-size:10.5px;color:#6B8B7A;line-height:1.5;margin-top:7px">Applied to your active ' + (_opt.side === 'sell' ? 'sell' : 'buy') + ' preset for this trade only, then restored automatically.</div>'
           + '</div>';
       })() : '';

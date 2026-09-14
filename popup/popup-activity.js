@@ -284,19 +284,25 @@ function _buildTooltipHtml(h) {
   // Axiom-specific: trade costs from preset instead of ZendIQ routing costs.
   if (h.source === 'axiom') {
     const p = h.axiomPreset ?? {};
+    // Fee fields are native-denominated. Entries written before the currency was
+    // recorded are all Solana, so an absent chain reads as SOL; an unknown one does
+    // not get a unit invented for it, and its ratio is withheld rather than computed
+    // across two different assets.
+    const _axCcy  = p.feeCurrency ?? ((h.chain == null || h.chain === 'solana') ? 'SOL' : null);
+    const _axUnit = _axCcy ?? 'native units';
     html += divider;
     html += `<div style="font-size:var(--fs-base);font-weight:700;color:#E8E8F0;margin-bottom:8px">Axiom Trade Costs</div>`;
-    if (p.priorityFeeSol != null) html += row('Priority fee', `${p.priorityFeeSol} SOL`, '#FFB547');
+    if (p.priorityFeeSol != null) html += row('Priority fee', `${p.priorityFeeSol} ${_axUnit}`, '#FFB547');
     const _axTipLeg = h.side === 'sell' ? h.amountOut : h.amountIn;
     const _axTipLbl = h.side === 'sell' ? 'of proceeds' : 'of trade';
-    const _axBribePct = (p.bribeFeeSol != null && _axTipLeg > 0)
+    const _axBribePct = (p.bribeFeeSol != null && _axTipLeg > 0 && _axCcy === 'SOL')
       ? Math.round(p.bribeFeeSol / _axTipLeg * 100) : null;
     const _axBribePctClr = _axBribePct != null ? (_axBribePct > 50 ? '#FF4D4D' : _axBribePct > 25 ? '#FFB547' : '#E8E8F0') : '#E8E8F0';
     const _axIsDefault   = p.mevProtection === false && !p.enhancedMevProtection
       && p.slippage != null && p.slippage >= 18 && p.slippage <= 22;
     if (p.bribeFeeSol != null) {
       const _bribePctStr = _axBribePct != null ? ` <span style="color:${_axBribePctClr};font-size:var(--fs-xs)">(${_axBribePct}% ${_axTipLbl})</span>` : '';
-      html += `<div class="analysis-row" style="align-items:center"><span class="lbl" title="Axiom bribe fee paid to the block producer. Observed to be ~0.010\u20130.011 SOL regardless of trade size." style="cursor:help">Bribe fee</span><span class="val" style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribePctClr};font-weight:700">${escapeHtml(String(p.bribeFeeSol))} SOL${_bribePctStr}</span>${_axIsDefault ? '<span style="font-size:var(--fs-xs);color:var(--muted);margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>' : ''}</span></div>`;
+      html += `<div class="analysis-row" style="align-items:center"><span class="lbl" title="Axiom bribe fee paid to the block producer. Observed to be ~0.010\u20130.011 SOL regardless of trade size." style="cursor:help">Bribe fee</span><span class="val" style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribePctClr};font-weight:700">${escapeHtml(String(p.bribeFeeSol))} ${_axUnit}${_bribePctStr}</span>${_axIsDefault ? '<span style="font-size:var(--fs-xs);color:var(--muted);margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>' : ''}</span></div>`;
     }
     if (p.enhancedMevProtection) {
       html += row('MEV protection', '\u2713 Secure', '#14F195');

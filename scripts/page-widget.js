@@ -454,7 +454,7 @@
       if (!risk) return '';
       const rc      = _rClr(risk.level);
       const badge   = isSimple ? _riskLabel(risk.level) : `${risk.level} \u00b7 ${risk.score}/100`;
-      const rows    = isSimple ? '' : _factorRows(risk.factors, false, risk.swapAmountUsd ?? risk.swapAmount);
+      const rows    = isSimple ? '' : _factorRows(risk.factors, false, risk.swapAmountUsd);
       const divider = rows ? ';margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.06)' : '';
       return `<div style="background:${rc}11;border:1px solid ${rc}44;border-radius:10px;padding:10px 12px;margin-bottom:10px;cursor:help"
         title="Execution Risk \u2014 network congestion, trade size and token characteristics.&#10;Score 0\u2013100: LOW &lt;25 | MEDIUM 25\u201349 | HIGH 50\u201374 | CRITICAL 75+">
@@ -881,11 +881,15 @@
                 const _axMsNum  = _axPres.timeTakenMs != null ? `${_axPres.timeTakenMs}ms` : '';
                 const _axOutFmt = h.amountOut != null ? '+ ' + _fmtW(h.amountOut, h.tokenOut || (h.outputMint ? h.outputMint.slice(0, 8) + '\u2026' : '?')) : null;
                 const _axInFmt  = h.amountIn  != null ? '\u2212 ' + _fmtW(h.amountIn, h.tokenIn || 'SOL') : null;
-                // The bribe is SOL, so the denominator is the trade's SOL leg: spent on a
-                // buy, received on a sell. A flat ~0.01 SOL fee is unbounded as a ratio.
+                // The bribe is native-denominated, so the denominator is the trade's native
+                // leg: spent on a buy, received on a sell. A flat ~0.01 fee is unbounded as a
+                // ratio. Off a chain we cannot name, the two are not the same asset and the
+                // ratio is withheld rather than computed across units.
+                const _axCcy2   = _axPres.feeCurrency ?? ((h.chain == null || h.chain === 'solana') ? 'SOL' : null);
+                const _axUnit2  = _axCcy2 ?? 'native units';
                 const _axSolLeg = _axIsSell ? h.amountOut : h.amountIn;
                 const _axPctLbl = _axIsSell ? 'of proceeds' : 'of trade';
-                const _axBribePct = (_axPres.bribeFeeSol != null && _axSolLeg > 0)
+                const _axBribePct = (_axPres.bribeFeeSol != null && _axSolLeg > 0 && _axCcy2 === 'SOL')
                   ? Math.round(_axPres.bribeFeeSol / _axSolLeg * 100) : null;
                 const _axRfTip = h.riskFactors?.length
                   ? '\n\nToken Risk Signals:\n' + h.riskFactors.map(f => `\u2022 ${f.name}: ${f.severity}${f.detail ? ' \u2014 ' + f.detail : ''}`).join('\n')
@@ -894,7 +898,7 @@
                 const _axIsDefault  = _axPres.mevProtection === false && !_axPres.enhancedMevProtection
                   && _axPres.slippage != null && _axPres.slippage >= 18 && _axPres.slippage <= 22;
                 const _axBribe  = (_axPres.bribeFeeSol != null && _axPres.bribeFeeSol > 0)
-                  ? `<div style="display:flex;justify-content:space-between;align-items:center;font-size:${_FS_BASE};margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Axiom bribe fee paid to the block producer. Observed to be ~0.010\u20130.011 SOL regardless of trade size.">Bribe fee</span><span style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribePctClr};font-weight:700">${_axPres.bribeFeeSol} SOL${_axBribePct != null ? ` <span style="color:${_axBribePctClr};font-size:${_FS_XS}">(${_axBribePct}% ${_axPctLbl})</span>` : ''}</span>${_axIsDefault ? `<span style="font-size:${_FS_XS};color:#6B6B8A;margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>` : ''}</span></div>` : '';
+                  ? `<div style="display:flex;justify-content:space-between;align-items:center;font-size:${_FS_BASE};margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="Axiom bribe fee paid to the block producer. Observed to be ~0.010\u20130.011 SOL regardless of trade size.">Bribe fee</span><span style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribePctClr};font-weight:700">${_axPres.bribeFeeSol} ${_axUnit2}${_axBribePct != null ? ` <span style="color:${_axBribePctClr};font-size:${_FS_XS}">(${_axBribePct}% ${_axPctLbl})</span>` : ''}</span>${_axIsDefault ? `<span style="font-size:${_FS_XS};color:#6B6B8A;margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>` : ''}</span></div>` : '';
                 const _axRisk   = h.riskLevel
                   ? `<div style="display:flex;justify-content:space-between;font-size:${_FS_BASE};margin-bottom:4px"><span style="color:#C2C2D4;cursor:help" title="${escapeHtml('ZendIQ token risk score \u2014 pre-fetched when you navigated to this token.' + _axRfTip)}">Token Risk</span><span style="color:${_axRlClr};font-weight:700">${escapeHtml(h.riskLevel)}${h.riskScore != null ? ' \u00b7 ' + h.riskScore + '/100' : ''}</span></div>` : '';
                 return `
@@ -1058,8 +1062,8 @@
         const sym = risk.inputSymbol ?? 'SOL';
         const n = _estLossNative;
         const fmtN = n < 0.0001 ? n.toFixed(6) : n < 0.01 ? n.toFixed(4) : n.toFixed(2);
-        const pct = (risk.swapAmountUsd ?? risk.swapAmount ?? 0) > 0
-          ? ((risk.estimatedLoss / (risk.swapAmountUsd ?? risk.swapAmount)) * 100).toFixed(2)
+        const pct = (risk.swapAmountUsd ?? 0) > 0
+          ? ((risk.estimatedLoss / risk.swapAmountUsd) * 100).toFixed(2)
           : '0.00';
         return `&#10;&#10;\u26a0 This trade carries an estimated ${fmtN} ${sym} (${pct}%) execution loss from slippage and price impact.`;
       })() : '';
@@ -1148,7 +1152,7 @@
             // Sum of every calculateRisk lossContrib (slippage, price impact, trade size, congestion) — not MEV.
             const _eln   = risk.estimatedLossNative ?? null;
             const _elSym = risk.inputSymbol ?? 'SOL';
-            const _elUsd = risk.swapAmountUsd ?? risk.swapAmount ?? 0;
+            const _elUsd = risk.swapAmountUsd ?? 0;
             const _elPct = _elUsd > 0 ? ((risk.estimatedLoss / _elUsd) * 100).toFixed(2) : null;
             const _elTxt = _eln == null ? '\u2014'
               : _eln < 0.000001 ? 'none'
@@ -2142,7 +2146,7 @@
               // Sum of every calculateRisk lossContrib (slippage, price impact, trade size, congestion) — not MEV.
               const _eln   = _er.estimatedLossNative ?? null;
               const _elSym = _er.inputSymbol ?? ct.inputSymbol ?? 'SOL';
-              const _elUsd = _er.swapAmountUsd ?? _er.swapAmount ?? 0;
+              const _elUsd = _er.swapAmountUsd ?? 0;
               const _elPct = _elUsd > 0 ? ((_er.estimatedLoss / _elUsd) * 100).toFixed(2) : null;
               const _elTxt = _eln == null ? '\u2014'
                 : _eln < 0.000001 ? 'none'
@@ -3318,19 +3322,22 @@ ${!ns.axiomVerifyOnly ? '' : `
           if (h.source === 'axiom') {
             // ── Axiom footer: Trade Costs from preset ──────────────────────
             const _axP = h.axiomPreset ?? {};
+            // Native-denominated. Unknown chain means unknown unit, so no ratio across it.
+            const _axCcy3  = _axP.feeCurrency ?? ((h.chain == null || h.chain === 'solana') ? 'SOL' : null);
+            const _axUnit3 = _axCcy3 ?? 'native units';
             const _axTipLeg = h.side === 'sell' ? h.amountOut : h.amountIn;
             const _axTipLbl = h.side === 'sell' ? 'of proceeds' : 'of trade';
-            const _axBribePct = (_axP.bribeFeeSol != null && _axTipLeg > 0)
+            const _axBribePct = (_axP.bribeFeeSol != null && _axTipLeg > 0 && _axCcy3 === 'SOL')
               ? Math.round(_axP.bribeFeeSol / _axTipLeg * 100) : null;
             const _axBribeClr = _axBribePct != null ? (_axBribePct > 50 ? '#FF4D4D' : _axBribePct > 25 ? '#FFB547' : '#E8E8F0') : '#E8E8F0';
             const _axIsDef = _axP.mevProtection === false && !_axP.enhancedMevProtection
               && _axP.slippage != null && _axP.slippage >= 18 && _axP.slippage <= 22;
             t += divider;
             t += `<div style="font-size:12px;font-weight:700;color:#E8E8F0;margin-bottom:8px">Axiom Trade Costs</div>`;
-            if (_axP.priorityFeeSol != null) t += row('Priority fee', `${_axP.priorityFeeSol} SOL`, '#FFB547');
+            if (_axP.priorityFeeSol != null) t += row('Priority fee', `${_axP.priorityFeeSol} ${_axUnit3}`, '#FFB547');
             if (_axP.bribeFeeSol != null) {
               const _bPctStr = _axBribePct != null ? ` <span style="color:${_axBribeClr};font-size:10px">(${_axBribePct}% ${_axTipLbl})</span>` : '';
-              t += `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:3px"><span style="color:#C2C2D4;cursor:help" title="Axiom bribe fee paid to the block producer. ~0.010\u20130.011 SOL regardless of trade size.">Bribe fee</span><span style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribeClr};font-weight:600">${_axP.bribeFeeSol} SOL${_bPctStr}</span>${_axIsDef ? `<span style="font-size:10px;color:#9B9BAD;margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>` : ''}</span></div>`;
+              t += `<div style="display:flex;justify-content:space-between;gap:12px;margin-bottom:3px"><span style="color:#C2C2D4;cursor:help" title="Axiom bribe fee paid to the block producer. ~0.010\u20130.011 SOL regardless of trade size.">Bribe fee</span><span style="display:flex;flex-direction:column;align-items:flex-end"><span style="color:${_axBribeClr};font-weight:600">${_axP.bribeFeeSol} ${_axUnit3}${_bPctStr}</span>${_axIsDef ? `<span style="font-size:10px;color:#9B9BAD;margin-top:1px">Axiom default preset \u00b7 MEV Off, 20% slippage</span>` : ''}</span></div>`;
             }
             t += row('MEV protection', _axP.enhancedMevProtection ? '\u2713 Secure' : (_axP.mevProtection ? '\u2713 On' : '\u2717 Off'), (_axP.enhancedMevProtection || _axP.mevProtection) ? '#14F195' : '#FFB547');
             if (_axP.provider) t += row('Provider', escapeHtml(_axP.provider));
