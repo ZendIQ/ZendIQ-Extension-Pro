@@ -159,6 +159,7 @@
     axiomOptimizing:    false,     // true between applying safe settings and restoring the original
     axiomOptimizeAbandoned: null,  // { at, why } when an optimize was skipped and settings left untouched
     axiomLastOptimization: null,   // { slipFrom, slipTo, mevFrom, mevTo, estSavingsUsd, changes[] } — last applied breakdown
+    axiomTradeProtection: null,    // { state, slippage, mev, at, verdict, execSlip, execMev } — protected/unprotected state of the trade last sent
     _axiomRestoreTimer: null,      // fallback setTimeout id that restores settings if no settlement signal arrives
 
     // ── Site adapter registry ────────────────────────────────────────────

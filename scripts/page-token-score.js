@@ -35,32 +35,52 @@
   'use strict';
   const ns = window.__zq;
 
-  // ── Regulated stablecoins — always return LOW with explanation ───────────────────
-  // These tokens have active mint + freeze authorities by design (institutional compliance).
-  // GeckoTerminal price data for stablecoins reflects the paired token’s price, not their own.
-  // Running rug-pull heuristics on Circle/Tether-issued tokens produces meaningless noise.
-  const STABLECOIN_MINTS = new Set([
-    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC  (Circle)
-    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT  (Tether)
-    'EjmyN6qEC1Tf1JxiG1ae7UTJhUxSwk1TCWNWqxWV4J6o', // DAI   (MakerDAO bridged)
-    '9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E', // BTC   (Wormhole)
-    '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs', // ETH   (Wormhole)
-    'A9mUU4qviSctJVPJdBJWkb28deg915LYJKrzQ19ji3FM',  // USDCet (Portal USDC)
-  ]);
+  // ── Signals that do not apply to specific known assets ──────────────────────
+  // These two lists used to be early returns in fetchTokenScore, handing back a hardcoded
+  // { score: 0, level: 'LOW' } before a single fetch ran — a verdict nothing on chain could
+  // falsify, on a hand-maintained list that had already drifted. They now name only the
+  // signals that are inapplicable; the scan always runs and everything else still bites.
+  //
+  // The rule for adding a key here: the signal must be measuring something that is not true
+  // of this asset, not merely something inconvenient. "Established tokens decline sometimes"
+  // is not a reason to stop reading decline — that is precisely how a dead protocol keeps
+  // its clean score.
+  const CLASS_STABLECOIN = {
+    label: 'Regulated stablecoin',
+    detail: 'Issued by a regulated institution. Mint and freeze authorities are compliance features rather than rug risks, holders are exchange and treasury wallets, and pool price history tracks the paired asset rather than this token. Those signals are not scored. Liquidity, market cap, token age and RugCheck findings are still checked normally.',
+    na: new Set(['mintAuth', 'freezeAuth', 'concentration', 'speculative', 'lpLock', 'priceHistory', 'price24h', 'deployer', 'bundle']),
+  };
+  const CLASS_PROTOCOL = {
+    label: 'Established protocol token',
+    detail: 'Long-lived Solana protocol token. Launch-venue, LP-lock, deployer-history and creation-block signals describe new launches and say nothing here, so they are not scored. Authorities, holder concentration, price history, liquidity, market cap and RugCheck findings are all still checked.',
+    na: new Set(['speculative', 'lpLock', 'deployer', 'bundle']),
+  };
+  const CLASS_LST = {
+    label: 'Liquid staking token',
+    detail: 'Liquid staking token. An active mint authority is how new tokens are issued against deposits, so that one signal is not scored. Everything else is checked normally.',
+    na: new Set(['mintAuth', 'speculative', 'lpLock', 'deployer', 'bundle']),
+  };
 
-  // ── Blue-chip Solana DeFi protocol tokens — skip rug heuristics ──────────────
-  // These are audited, established protocol tokens with real utility and transparent teams.
-  // LP-unlock signals, 3-month price declines, and RugCheck warnings produce noise for them.
-  const KNOWN_BLUECHIP_MINTS = new Map([
-    ['4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R', 'RAY'],    // Raydium
-    ['JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',  'JUP'],    // Jupiter
-    ['So11111111111111111111111111111111111111112',    'SOL'],    // Wrapped SOL
-    ['orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1HMxT65J', 'ORCA'],   // Orca
-    ['mSoLzYCxHdYgdic8VteMv6jt3y1TnSCW2CgxdoQmxup', 'mSOL'],   // Marinade staked SOL
-    ['7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj', 'stSOL'],  // Lido staked SOL
-    ['HZ1JovNiVvGrqs182GCycjVJtzbZjJQX5B5KUGcFSup',  'MNGO'],   // Mango Markets
-    ['SRMuApVNdxXokk5GT7XD5cUUgXMBCoAz2LHeuAoKgThh', 'SRM'],    // Serum (legacy)
-    ['3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', 'WBTC'],   // Wrapped BTC (Wormhole)
+  // Removed rather than re-described: MNGO (drained Oct 2022, DAO wound down), SRM (abandoned
+  // post-FTX), stSOL (Lido sunset Solana staking). All three were still labelled "audited …
+  // transparent team and real on-chain utility". They now score on their own merits.
+  //
+  // Also removed: soBTC (9n4nbM75…FeJ9E), listed here as "BTC (Wormhole)" but actually the
+  // Sollet bridge, dead since FTX. Trading at $42 against BTC's $78k — a 99.95% depeg, on
+  // $2.6k of liquidity — while CLASS_STABLECOIN suppressed the price-history and 24h signals
+  // that say so. Every key below was resolved against Jupiter's verified list on 2026-09-14.
+  const ASSET_CLASS = new Map([
+    ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', CLASS_STABLECOIN], // USDC   (Circle)
+    ['Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', CLASS_STABLECOIN], // USDT   (Tether)
+    ['EjmyN6qEC1Tf1JxiG1ae7UTJhUxSwk1TCWNWqxWV4J6o', CLASS_STABLECOIN], // DAI    (MakerDAO bridged)
+    ['7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs', CLASS_STABLECOIN], // ETH    (Wormhole)
+    ['A9mUU4qviSctJVPJdBJWkb28deg915LYJKrzQ19ji3FM', CLASS_STABLECOIN], // USDCet (Portal USDC)
+    ['4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R', CLASS_PROTOCOL],   // RAY    (Raydium)
+    ['JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',  CLASS_PROTOCOL],   // JUP    (Jupiter)
+    ['So11111111111111111111111111111111111111112',  CLASS_PROTOCOL],   // SOL    (Wrapped SOL)
+    ['orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE', CLASS_PROTOCOL],   // ORCA   (Orca)
+    ['3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', CLASS_PROTOCOL],   // WBTC   (Wormhole)
+    ['mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',  CLASS_LST],        // mSOL   (Marinade)
   ]);
 
   // ── Known speculative memecoins — get a base market-risk factor ─────────────
@@ -388,7 +408,7 @@
       };
     }
 
-    return { mintInfo, holderData };
+    return { mintInfo, holderData, accountMissing: _accountNotFound };
   }
 
   // ── pump.fun coin API: immediate data for brand-new meme tokens ────────────
@@ -443,8 +463,26 @@
       const solPairs = data.pairs.filter(p =>
         p.chainId === 'solana' && (p.baseToken?.address ?? '') === mint);
       if (!solPairs.length) return null;
-      solPairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-      const p = solPairs[0];
+      // Ranking by liquidity alone actively prefers a broken pool: a pair misreporting its
+      // reserves reports both a huge depth and a wrong price, and wins on the former. ORCA's
+      // top pool read $7,540 and a $401.7B cap while 29 others agreed on $1.34. Take the
+      // deepest pool that agrees with the crowd instead of the deepest pool outright.
+      const _priced = solPairs.filter(p => parseFloat(p.priceUsd) > 0);
+      let _ranked = solPairs;
+      // Below three quotes there is no crowd to disagree with — two prices that differ give no
+      // way to tell which one is wrong, so consensus is not claimed.
+      if (_priced.length >= 3) {
+        const _sorted = _priced.map(p => parseFloat(p.priceUsd)).sort((a, b) => a - b);
+        const _median = _sorted[Math.floor(_sorted.length / 2)];
+        // Wide on purpose. This rejects broken data, not genuine cross-pool spread.
+        const _agreed = _priced.filter(p => {
+          const v = parseFloat(p.priceUsd);
+          return v <= _median * 5 && v >= _median / 5;
+        });
+        if (_agreed.length) _ranked = _agreed;
+      }
+      _ranked = _ranked.slice().sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+      const p = _ranked[0];
       return {
         symbol:          p.baseToken?.symbol ?? null,
         name:            p.baseToken?.name   ?? null,
@@ -558,6 +596,19 @@
     'holders high ownership',
   ];
 
+  // Same again for signals 1 and 2, which resolve from this very payload. Left in, RugCheck's
+  // copy charged a second time for one fact and reinstated a charge an asset class had ruled
+  // inapplicable — an LST was still marked down for the mint authority it needs to function.
+  const RUGCHECK_MINT_AUTH = [
+    'mint authority',
+    'unlimited supply',
+    'mintable',
+  ];
+  const RUGCHECK_FREEZE_AUTH = [
+    'freeze authority',
+    'freezable',
+  ];
+
   // Keys we know a RugCheck report carries. Used as a positive shape check: testing for the
   // absence of `risks` alone cannot tell a clean token from a payload we no longer understand.
   const RUGCHECK_SHAPE = ['risks', 'rugged', 'token', 'tokenMeta', 'topHolders', 'markets', 'score', 'score_normalised'];
@@ -576,6 +627,22 @@
   const UNKNOWN_SIGNAL_LIMIT = 3;
 
   function _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleLaunchData, srcStatus = {}) {
+    // Chain answered and there is no mint at this address, so there is nothing to weigh up.
+    // Scored signals would all come back empty and cap out as uncertainty below the MEDIUM
+    // edge, returning LOW for a mistyped or spoofed address.
+    if (srcStatus.onchain === 'missing') {
+      return {
+        mint, symbol: null, score: 100, level: 'CRITICAL', loaded: true, error: null,
+        dataSource: 'onchain', sources: srcStatus, unknown: false, unknownSignals: 0,
+        deployer: null, deployerTokenCount: null,
+        factors: [{
+          name: 'Token does not exist on-chain',
+          severity: 'CRITICAL',
+          detail: 'No mint account exists at this address. It may be mistyped, or come from a spoofed token list or phishing link. Nothing can be verified about it \u2014 do not trade it.',
+        }],
+      };
+    }
+
     let score   = 0;
     const factors = [];
     // A source that errored, timed out or came back unusable is not the same as one we
@@ -587,6 +654,12 @@
     let _uncertainty    = 0;
     let _unknownSignals = 0;
     const _unsure = (pts, factor) => { _uncertainty += pts; _unknownSignals++; factors.push(factor); };
+
+    // A signal that does not apply is skipped outright rather than scored as a pass — a green
+    // row for a check we chose not to run is the same lie the old allowlist told.
+    const _cls = ASSET_CLASS.get(mint) ?? null;
+    const _na  = (k) => _cls?.na.has(k) === true;
+    if (_cls) factors.push({ name: _cls.label, severity: 'LOW', detail: _cls.detail });
 
     // ── 1. Mint authority ──────────────────────────────────────────────────────
     // Resolution order:
@@ -606,7 +679,9 @@
       mintAuth = undefined; // both fetches failed
     }
 
-    if (mintAuth === undefined) {
+    if (_na('mintAuth')) {
+      // Minting is the mechanism, not the hazard, for this asset class.
+    } else if (mintAuth === undefined) {
       // Severity must not be LOW: LOW draws a green tick, which reads as "checked and fine".
       _unsure(5, { name: 'Mint authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether devs can print more tokens. Neither confirmed nor ruled out; check manually before buying.' });
     } else if (mintAuth === null || mintAuth === '') {
@@ -626,7 +701,9 @@
       freezeAuth = undefined;
     }
 
-    if (freezeAuth === undefined) {
+    if (_na('freezeAuth')) {
+      // Freezing is a compliance obligation for this asset class, not a dev backdoor.
+    } else if (freezeAuth === undefined) {
       _unsure(5, { name: 'Freeze authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether the contract can freeze your tokens. Neither confirmed nor ruled out; check manually before buying.' });
     } else if (freezeAuth === null || freezeAuth === '') {
       factors.push({ name: 'No freeze authority', severity: 'LOW', detail: 'Freeze authority revoked — your tokens cannot be frozen by the contract' });
@@ -650,7 +727,9 @@
     }
 
     // A top holder of exactly 0% is not a real reading — treat it as missing, never as a pass.
-    if (top1Pct != null && isFinite(top1Pct) && top1Pct > 0) {
+    if (_na('concentration')) {
+      // Top wallets are issuer treasury and exchange custody here, not insider supply.
+    } else if (top1Pct != null && isFinite(top1Pct) && top1Pct > 0) {
       _readHolderTable = true;
       if (top1Pct > 50) {
         score += 30;
@@ -670,7 +749,9 @@
       _unsure(10, { name: 'Top holder: data unavailable', severity: 'MEDIUM', detail: 'Holder distribution could not be read, so insider supply is neither confirmed nor ruled out. This is not an all-clear — check the holder list manually.' });
     }
 
-    if (top5Pct != null && isFinite(top5Pct) && top5Pct > 0) {
+    if (_na('concentration')) {
+      // Same reason as top-1 above.
+    } else if (top5Pct != null && isFinite(top5Pct) && top5Pct > 0) {
       if (top5Pct > 70) {
         score += 15;
         factors.push({ name: `Insider supply: top 5 hold ${top5Pct.toFixed(1)}%`, severity: 'HIGH', detail: 'Supply heavily concentrated among 5 wallets — coordinated selling is possible' });
@@ -708,6 +789,10 @@
         // Same holder table, already scored above — charging it again ranked concentration
         // above liquidity and price collapse.
         if (_readHolderTable && RUGCHECK_CONCENTRATION.some(n => rNameLow.includes(n))) continue;
+        // Signals 1 and 2 own these facts whenever they resolved, and own the decision to
+        // skip them when the asset class says they do not apply.
+        if ((mintAuth !== undefined || _na('mintAuth')) && RUGCHECK_MINT_AUTH.some(n => rNameLow.includes(n))) continue;
+        if ((freezeAuth !== undefined || _na('freezeAuth')) && RUGCHECK_FREEZE_AUTH.some(n => rNameLow.includes(n))) continue;
         const g = grouped.get(rNameLow);
         if (!g) {
           grouped.set(rNameLow, { name: rName, level: lvl, detail: r.description ?? '', count: 1 });
@@ -746,7 +831,7 @@
     const _isPumpFunSite = window.location.hostname?.includes('pump.fun');
     const _createdAt = dexData?.pairCreatedAt ?? bundleLaunchData?.createdAtMs ?? null;
     const _ageDays   = _createdAt ? (Date.now() - _createdAt) / 86400000 : null;
-    {
+    if (!_na('speculative')) {
       // Meme-launch context: pump.fun native, axiom.trade (all meme launches),
       // or any mint address ending in 'pump' (pump.fun vanity address pattern).
       const _isMemeContext = _isPumpFunSite
@@ -790,7 +875,7 @@
 
     // ── 6. Liquidity pool lock status ──────────────────────────────────────
     // Unlocked LP means devs or early investors can pull liquidity at any time.
-    if (Array.isArray(rugCheck?.markets) && rugCheck.markets.length) {
+    if (!_na('lpLock') && Array.isArray(rugCheck?.markets) && rugCheck.markets.length) {
       const avgLpLockedPct = rugCheck.markets.reduce((s, m) => s + (m.lp?.lpLockedPct ?? 0), 0) / rugCheck.markets.length;
       if (avgLpLockedPct < 5) {
         score += 10;
@@ -820,14 +905,17 @@
     // 3M window, so summing them charged a single decline twice; only the heavier of the
     // two is taken. The block total is then capped — see PRICE_ACTION_CAP.
     let _p3m = 0, _pLong = 0, _pVol = 0;
+    // Suppression here is about the data, not the verdict: a stablecoin pool's OHLCV tracks
+    // the asset it is paired against, so all three windows below would read someone else's chart.
+    const _gd = _na('priceHistory') ? null : geckoData;
 
     // ── 7. 3-month price change ────────────────────────────────────────────────
     // Source: GeckoTerminal daily OHLCV, candle ~90 days back vs latest close.
     // Thresholds: -15% MEDIUM (+8) | -35% HIGH (+15) | -60% CRITICAL (+22)
     // Weighted higher than 24h — a 3-month decline is a structural signal, not volatility.
     // Only penalised for drops — positive or flat is neutral (not a risk signal).
-    if (geckoData?.change3m != null && geckoData.weeksOfData >= 13) {
-      const chg = geckoData.change3m;
+    if (_gd?.change3m != null && _gd.weeksOfData >= 13) {
+      const chg = _gd.change3m;
       if (chg <= -60) {
         _p3m = 22;
         factors.push({ name: `3M price: −${Math.abs(chg).toFixed(0)}%`, severity: 'CRITICAL', detail: `Token has lost ${Math.abs(chg).toFixed(1)}% of its value over the last 3 months. Severe sustained structural decline.` });
@@ -841,9 +929,9 @@
         const sign = chg >= 0 ? '+' : '';
         factors.push({ name: `3M price: ${sign}${chg.toFixed(0)}%`, severity: 'LOW', detail: `Price change of ${sign}${chg.toFixed(1)}% over the last 3 months. No significant sustained decline.` });
       }
-    } else if (geckoData != null) {
+    } else if (_gd != null) {
       // Token is less than 3 months old — already penalised under token age; no double-penalty.
-      const _d = geckoData.daysOfData ?? 0;
+      const _d = _gd.daysOfData ?? 0;
       const _dLabel = _d < 14 ? `${_d}d` : `${Math.floor(_d / 7)}w`;
       factors.push({ name: `3M history: only ${_dLabel} data`, severity: 'LOW', detail: `Only ${_dLabel} of price history available — 3-month comparison is not yet possible. Token age penalty already applied.` });
     }
@@ -853,9 +941,9 @@
     // Free API max: ~181 daily candles (~6 months). Label reflects actual data span.
     // Thresholds: -20% MEDIUM (+8) | -45% HIGH (+15) | -70% CRITICAL (+22)
     // This is the heaviest price-action signal — a 6-month decline is structural, not noise.
-    if (geckoData?.change1y != null && geckoData.weeksOfData >= 25) {
-      const chg   = geckoData.change1y;
-      const months = Math.round((geckoData.daysOfData ?? (geckoData.weeksOfData * 7)) / 30);
+    if (_gd?.change1y != null && _gd.weeksOfData >= 25) {
+      const chg   = _gd.change1y;
+      const months = Math.round((_gd.daysOfData ?? (_gd.weeksOfData * 7)) / 30);
       const label = months >= 11 ? '1Y' : `${months}M`;
       if (chg <= -70) {
         _pLong = 22;
@@ -870,8 +958,8 @@
         const sign = chg >= 0 ? '+' : '';
         factors.push({ name: `${label} price: ${sign}${chg.toFixed(0)}%`, severity: 'LOW', detail: `Price change of ${sign}${chg.toFixed(1)}% over ${label}. No severe long-term decline detected.` });
       }
-    } else if (geckoData != null) {
-      const _d2 = geckoData.daysOfData ?? 0;
+    } else if (_gd != null) {
+      const _d2 = _gd.daysOfData ?? 0;
       const _d2Label = _d2 < 14 ? `${_d2}d` : `${Math.floor(_d2 / 7)}w`;
       factors.push({ name: `Long-term: only ${_d2Label} data`, severity: 'LOW', detail: `Only ${_d2Label} of price history — long-term comparison is not yet possible.` });
     }
@@ -881,8 +969,8 @@
     // Compares last 7-day avg to the preceding 30–90 day window.
     // Detects "dying" tokens where sentiment and trading activity have collapsed
     // even when the spot price hasn't fully reflected the abandonment yet.
-    if (geckoData?.volTrend != null) {
-      const { ratio, recentAvg, baselineAvg } = geckoData.volTrend;
+    if (_gd?.volTrend != null) {
+      const { ratio, recentAvg, baselineAvg } = _gd.volTrend;
       const dropPct = Math.round((1 - ratio) * 100);
       const _fmtV = (v) => v >= 1_000_000 ? `$${(v/1_000_000).toFixed(1)}M` : v >= 1_000 ? `$${(v/1000).toFixed(0)}k` : `$${v.toFixed(0)}`;
       if (ratio < 0.05) {
@@ -903,7 +991,7 @@
 
     // GeckoTerminal is deliberately skipped on meme-launch sites (no OHLCV exists there),
     // which is not a failure. A genuine outage silently drops all three signals above.
-    if (geckoData == null && _failed('gecko')) {
+    if (!_na('priceHistory') && geckoData == null && _failed('gecko')) {
       _unsure(5, {
         name: 'Price history unavailable',
         severity: 'MEDIUM',
@@ -942,34 +1030,41 @@
     }
 
     // ── 11. 24h price change ──────────────────────────────────────────────────
-    // On pump.fun a large GAIN means the pump phase is active and a dump is
-    // likely imminent — the inverse of the normal exit-rug signal.
-    if (dexData?.priceChange24h != null) {
+    // A large gain means a dump is likely imminent — the inverse of the normal exit-rug
+    // signal. Magnitude is scored wherever the token trades: gating this on the open page
+    // meant no rise was scorable at all on jup.ag, whatever its size.
+    if (!_na('price24h') && dexData?.priceChange24h != null) {
       const chg = parseFloat(dexData.priceChange24h);
-      if (isFinite(chg)) {
-        if (_isMemeContext2 && chg >= 200) {
-          score += 12;
-          factors.push({ name: `Active pump: +${chg.toFixed(0)}% in 24h`, severity: 'CRITICAL', detail: `+${chg.toFixed(1)}% since launch \u2014 token is in the pump phase. Dump typically follows immediately after this level of gain.` });
-        } else if (_isMemeContext2 && chg >= 80) {
-          score += 8;
-          factors.push({ name: `Pump in progress: +${chg.toFixed(0)}% in 24h`, severity: 'HIGH', detail: `+${chg.toFixed(1)}% since launch \u2014 significant pump detected. High probability of sharp reversal.` });
-        } else if (_isMemeContext2 && chg >= 30) {
-          score += 4;
-          factors.push({ name: `Rising fast: +${chg.toFixed(0)}% in 24h`, severity: 'MEDIUM', detail: `+${chg.toFixed(1)}% since launch \u2014 elevated momentum. Watch for a sudden reversal.` });
-        } else if (chg <= -50) {
-          score += 12;
-          factors.push({ name: `Price \u2212${Math.abs(chg).toFixed(0)}% in 24h`, severity: 'CRITICAL', detail: `Token has lost ${Math.abs(chg).toFixed(1)}% of its value in the last 24 hours. This level of drop often indicates a rug pull or coordinated exit.` });
-        } else if (chg <= -30) {
-          score += 8;
-          factors.push({ name: `Price \u2212${Math.abs(chg).toFixed(0)}% in 24h`, severity: 'HIGH', detail: `Significant 24h drawdown of ${Math.abs(chg).toFixed(1)}%.` });
-        } else if (chg <= -15) {
-          score += 4;
-          factors.push({ name: `Price \u2212${Math.abs(chg).toFixed(0)}% in 24h`, severity: 'MEDIUM', detail: `Notable 24h price decline of ${Math.abs(chg).toFixed(1)}%.` });
-        } else {
-          const sign = chg >= 0 ? '+' : '';
-          factors.push({ name: `24h price: ${sign}${chg.toFixed(1)}%`, severity: 'LOW', detail: _isMemeContext2 ? `Modest movement since launch \u2014 not yet in active pump territory.` : `No significant downward movement detected.` });
-        }
+      if (!isFinite(chg) || Math.abs(chg) >= 10_000) {
+        // No token moves five figures percent in a day; this is a bad feed, and reading it
+        // either way — as a pump or as calm — would be inventing a fact.
+        _unsure(5, { name: '24h price: data unavailable', severity: 'MEDIUM', detail: 'The reported 24h price change is outside any plausible range, so the price feed for this pool cannot be trusted. Recent price action is neither confirmed nor ruled out — check the chart manually.' });
+      } else if (chg >= 200) {
+        score += 12;
+        factors.push({ name: `Active pump: +${chg.toFixed(0)}% in 24h`, severity: 'CRITICAL', detail: `+${chg.toFixed(1)}% in 24 hours — token is in a pump phase. A dump typically follows this level of gain.` });
+      } else if (chg >= 80) {
+        score += 8;
+        factors.push({ name: `Pump in progress: +${chg.toFixed(0)}% in 24h`, severity: 'HIGH', detail: `+${chg.toFixed(1)}% in 24 hours — significant pump detected. High probability of a sharp reversal.` });
+      } else if (chg >= 30) {
+        score += 4;
+        factors.push({ name: `Rising fast: +${chg.toFixed(0)}% in 24h`, severity: 'MEDIUM', detail: `+${chg.toFixed(1)}% in 24 hours — elevated momentum. Watch for a sudden reversal.` });
+      } else if (chg <= -50) {
+        score += 12;
+        factors.push({ name: `Price \u2212${Math.abs(chg).toFixed(0)}% in 24h`, severity: 'CRITICAL', detail: `Token has lost ${Math.abs(chg).toFixed(1)}% of its value in the last 24 hours. This level of drop often indicates a rug pull or coordinated exit.` });
+      } else if (chg <= -30) {
+        score += 8;
+        factors.push({ name: `Price \u2212${Math.abs(chg).toFixed(0)}% in 24h`, severity: 'HIGH', detail: `Significant 24h drawdown of ${Math.abs(chg).toFixed(1)}%.` });
+      } else if (chg <= -15) {
+        score += 4;
+        factors.push({ name: `Price \u2212${Math.abs(chg).toFixed(0)}% in 24h`, severity: 'MEDIUM', detail: `Notable 24h price decline of ${Math.abs(chg).toFixed(1)}%.` });
+      } else {
+        const sign = chg >= 0 ? '+' : '';
+        factors.push({ name: `24h price: ${sign}${chg.toFixed(1)}%`, severity: 'LOW', detail: _isMemeContext2 ? `Modest movement since launch \u2014 not yet in active pump territory.` : `No significant price movement in either direction.` });
       }
+    } else if (!_na('price24h') && dexData) {
+      // The source answered and this field was not in it. Without this the row simply
+      // vanishes and the card reads as though recent price action had been checked.
+      _unsure(5, { name: '24h price: data unavailable', severity: 'MEDIUM', detail: 'No 24h price change was reported for this pool, so a recent pump or collapse is neither confirmed nor ruled out. This is not an all-clear \u2014 check the chart manually.' });
     }
 
     // ── 12. Liquidity depth ────────────────────────────────────────────────────
@@ -991,6 +1086,8 @@
         const fmt = liq >= 1_000_000 ? `$${(liq/1_000_000).toFixed(1)}M` : `$${(liq/1000).toFixed(0)}k`;
         factors.push({ name: `Liquidity: ${fmt}`, severity: 'LOW', detail: `${fmt} in the trading pool. Sufficient liquidity for normal trading.` });
       }
+    } else if (dexData) {
+      _unsure(5, { name: 'Liquidity: data unavailable', severity: 'MEDIUM', detail: 'Pool depth was not reported, so it is unknown whether this token can absorb your trade or whether the pool is thin enough to drain. This is not an all-clear.' });
     }
 
     // ── 13. Market cap ────────────────────────────────────────────────────────
@@ -1012,6 +1109,10 @@
         const fmt = mc >= 1_000_000_000 ? `$${(mc/1_000_000_000).toFixed(1)}B` : `$${(mc/1_000_000).toFixed(0)}M`;
         factors.push({ name: `Market cap: ${fmt}`, severity: 'LOW', detail: `Market cap of ${fmt}. Large enough that price manipulation by a single actor is significantly harder.` });
       }
+    } else if (dexData || bundleLaunchData) {
+      // The micro-cap branch is the one that matters here, and the tokens most likely to hit
+      // it are the newest — exactly the ones a source is most likely to have no cap for.
+      _unsure(5, { name: 'Market cap: data unavailable', severity: 'MEDIUM', detail: 'No market cap or fully-diluted value was reported, so it is unknown whether this token is large enough to resist manipulation by a single trader. This is not an all-clear.' });
     }
 
     // ── 14. Serial deployer ───────────────────────────────────────────────────
@@ -1021,7 +1122,7 @@
     //   ≥25 = near-automated (physically implausible manually)
     //   ≥10 = systematic serial launcher
     //    ≥3 = repeat experimenter / early-stage bad actor
-    if (deployerData?.address) {
+    if (!_na('deployer') && deployerData?.address) {
       const tc       = deployerData.tokenCount;
       const complete = deployerData.complete !== false;
       // An incomplete scan can only undercount, so a tier that is already hit stays valid.
@@ -1067,7 +1168,7 @@
     // ── 15. Deployer rug rate ─────────────────────────────────────────────────
     // rugRateData: { checked: number, ruggedCount: number } | null
     // Only scored when we've sampled at least 3 of the deployer's previous tokens.
-    if (rugRateData?.checked >= 3) {
+    if (!_na('deployer') && rugRateData?.checked >= 3) {
       const { checked, ruggedCount } = rugRateData;
       const rugPct = Math.round((ruggedCount / checked) * 100);
       if (rugPct >= 80) {
@@ -1088,7 +1189,9 @@
     // Checks whether multiple wallets bought in the token's creation slot —
     // the on-chain fingerprint of a Jito bundle coordinated supply grab.
     // +40 CRITICAL (≥5 wallets/txs) | +20 HIGH (3–4) | LOW (1–2) | skip (null/error)
-    if (bundleLaunchData != null && !bundleLaunchData.inconclusive) {
+    if (_na('bundle')) {
+      // Creation block is years past and unfetchable; absence of a reading is not a gap here.
+    } else if (bundleLaunchData != null && !bundleLaunchData.inconclusive) {
       const { bundleLevel, creationSlotTxCount } = bundleLaunchData;
       const count = creationSlotTxCount ?? 0;
       // Current detection counts transactions in the creation slot (not distinct wallets).
@@ -1158,40 +1261,52 @@
     };
   }
 
+  // A Solana pubkey is exactly 32 bytes. Length alone does not prove it — 'SRMuApVN…KgThh' is
+  // 44 chars and decodes to 33 — so decode and measure. Returns -1 for a non-base58 character.
+  const _B58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  function _b58DecodeLen(s) {
+    const bytes = [];
+    for (let i = 0; i < s.length; i++) {
+      let carry = _B58_ALPHABET.indexOf(s[i]);
+      if (carry < 0) return -1;
+      for (let j = 0; j < bytes.length; j++) {
+        carry += bytes[j] * 58;
+        bytes[j] = carry & 0xff;
+        carry >>= 8;
+      }
+      while (carry > 0) { bytes.push(carry & 0xff); carry >>= 8; }
+    }
+    let zeros = 0;
+    while (zeros < s.length && s[zeros] === '1') zeros++;
+    return bytes.length + zeros;
+  }
+
   // ── Public: fetchTokenScore(mint, symbol?) ───────────────────────────────────
   async function fetchTokenScore(mint, symbol) {
     if (!mint || typeof mint !== 'string') {
       return { mint, score: 0, level: 'LOW', factors: [], loaded: false, error: 'No mint address', dataSource: 'unknown' };
     }
 
-    // Regulated stablecoins — mint/freeze authorities are institutional compliance features,
-    // not rug risks. GeckoTerminal price data reflects the paired asset, not the stablecoin.
-    if (STABLECOIN_MINTS.has(mint)) {
-      const sym = symbol ?? mint.slice(0, 4) + '…';
-      const result = {
-        mint, score: 0, level: 'LOW',
-        factors: [{ name: `Regulated stablecoin (${sym})`, severity: 'LOW', detail: 'Issued by a regulated institution (e.g. Circle/Tether). Mint and freeze authorities are compliance features, not rug risks. Price data in pools reflects the paired asset.' }],
-        loaded: true, error: null, dataSource: 'safe',
+    // Not a judgement call and not worth an RPC round-trip: this string cannot address a mint,
+    // so every source would come back empty and the result would read as merely unknown.
+    if (_b58DecodeLen(mint) !== 32) {
+      return {
+        mint, symbol: symbol ?? null, score: 100, level: 'CRITICAL', loaded: true, error: null,
+        dataSource: 'local', sources: { local: 'invalid' }, unknown: false, unknownSignals: 0,
+        deployer: null, deployerTokenCount: null,
+        factors: [{
+          name: 'Invalid token address',
+          severity: 'CRITICAL',
+          detail: 'This is not a valid Solana address, so no token can exist at it. It is most likely mistyped or taken from a spoofed token list or phishing link \u2014 do not trade it.',
+        }],
       };
-      _setCached(mint, result);
-      ns.tokenScoreResult = result;
-      try { ns.renderWidgetPanel?.(); } catch (_) {}
-      return result;
     }
-    // Blue-chip DeFi protocol tokens — audited deployments with real utility.
-    // Rug heuristics (LP lock, 3M price, RugCheck noise) produce false MEDIUM signals.
-    if (KNOWN_BLUECHIP_MINTS.has(mint)) {
-      const sym = KNOWN_BLUECHIP_MINTS.get(mint);
-      const result = {
-        mint, score: 0, level: 'LOW',
-        factors: [{ name: `Established protocol token (${sym})`, severity: 'LOW', detail: 'Audited Solana DeFi protocol token with transparent team and real on-chain utility. Rug-pull heuristics are not applicable.' }],
-        loaded: true, error: null, dataSource: 'safe',
-      };
-      _setCached(mint, result);
-      ns.tokenScoreResult = result;
-      try { ns.renderWidgetPanel?.(); } catch (_) {}
-      return result;
-    }
+
+    // Known assets are no longer short-circuited here. The scan runs for every mint and the
+    // asset class only suppresses the signals it makes inapplicable — see ASSET_CLASS. A
+    // hardcoded LOW meant an impostor address, or a protocol that had since died, returned a
+    // clean verdict that no amount of on-chain evidence could contradict.
+
     // Cache hit — show cached immediately and re-render.
     const cached = _getCached(mint);
     if (cached) {
@@ -1261,6 +1376,9 @@
       ]);
       const mintInfo   = _onchain?.mintInfo   ?? null;
       const holderData = _onchain?.holderData ?? null;
+      // Overwrites the 'ok' _t() set from a non-null return: the call succeeded, the account
+      // does not exist. Reporting that leg as healthy is what let a missing mint read LOW.
+      if (_onchain?.accountMissing) _srcStatus.onchain = 'missing';
       // Use real DexScreener data if available, fall back to pump.fun coin API
       const dexData = dexRaw ?? pumpCoin;
 

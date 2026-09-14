@@ -200,6 +200,25 @@
         console.warn('[ZQ:AXIOM] approved ' + _side + ' did not fire \u2014 button no longer on the page');
         return;
       }
+      // Only past the button check is the fallback certainly going out. A live
+      // "nothing has been sent yet" notice would otherwise reassure the user about
+      // the very trade they are being asked to sign.
+      if (ns.axiomOptimizeAbandoned && !ns.axiomOptimizeAbandoned.sent) {
+        ns.axiomOptimizeAbandoned.sent = true;
+      }
+      // Signing happens in Axiom's own dialog, which carries no ZendIQ marking, so
+      // an optimized trade and an unprotected one are indistinguishable at the one
+      // moment it matters. Both states are recorded, never just the bad one.
+      if (!ns.axiomTradeProtection) {
+        const _applied = ns.axiomOptimizing === true && ns.axiomLastOptimization;
+        const _st  = _applied ? null : _readSettings();
+        const _own = _st ? _preset(_st, _st.currentSolPresetKey, _side) : null;
+        ns.axiomTradeProtection = _applied
+          ? { state: 'protected',   slippage: ns.axiomLastOptimization.slipTo, mev: 'Secure', at: Date.now(), verdict: null }
+          : { state: 'unprotected', slippage: _own ? parseFloat(_own.slippage) : null,
+              mev: _own?.enhancedMevProtection ? 'Secure' : 'off', at: Date.now(), verdict: null };
+      }
+      try { ns.renderWidgetPanel?.(); } catch (_) {}
       // Fire the full pointer → mouse → click chain so Axiom's handler fires
       // regardless of whether they use onPointerDown, onMouseDown, or onClick.
       // _axiomBypassNext lets all three events pass through our capture listeners.
@@ -481,6 +500,14 @@
           + '; intended ' + _optDetail.slipTo + '% slippage, MEV Secure');
       }
       const _optConfirmed = _optApplied === 'confirmed';
+      // The strip claimed a state before signing on the strength of the echo. This is
+      // Axiom's record of what it actually ran, so the claim is corrected against it.
+      if (ns.axiomTradeProtection) {
+        ns.axiomTradeProtection.verdict  = _optApplied;
+        ns.axiomTradeProtection.execSlip = ev.slippage ?? null;
+        ns.axiomTradeProtection.execMev  = ev.enhancedMev === true ? 'Secure' : 'off';
+        try { ns.renderWidgetPanel?.(); } catch (_) {}
+      }
       const _token = ns._tokenScoreMint || null;
       const _risk  = (ns.tokenScoreResult?.loaded) ? ns.tokenScoreResult : null;
       const _SOL   = 'So11111111111111111111111111111111111111112';
@@ -1274,7 +1301,14 @@
     const fields       = _diffFields(localBuy,  intended);
     const serverFields = _diffFields(serverBuy, intended);
     // Already at the safe values: nothing to undo, so nothing to hold the lock for.
-    if (!Object.keys(fields).length && !Object.keys(serverFields).length) { _releaseLock(); ns.axiomProceedTrade?.(); return; }
+    if (!Object.keys(fields).length && !Object.keys(serverFields).length) {
+      // Nothing to write means the preset is already at target — the trade is protected,
+      // not unoptimized, and must not fall through to the unprotected label.
+      ns.axiomTradeProtection = { state: 'protected', slippage: opt.slipTo, mev: 'Secure', at: Date.now(), verdict: null };
+      _releaseLock();
+      ns.axiomProceedTrade?.();
+      return;
+    }
 
     // Write-ahead: the obligation is recorded before the mutation, so a crash
     // between the two leaves a record to heal from rather than a silent change.
@@ -2008,6 +2042,7 @@
         _approvedAddr          = _readMintFromUrl();
         ns.axiomRiskAcknowledged = false; // new intercept — reset acknowledgement
         ns.axiomOptimizeAbandoned = null; // last trade's notice no longer applies
+        ns.axiomTradeProtection   = null; // nor does the last trade's protection state
         _axEngaged = false;
         // _axiomBuyAmountSol is read off the buy button, so it describes no sell.
         const _amtSol = _side === 'sell' ? null : (_axiomBuyAmountSol ?? null);
@@ -2649,18 +2684,61 @@
         'locked':               'Another Axiom tab was mid-change.',
         'restore-outstanding':  'ZendIQ was finishing an earlier restore first.',
       };
+      // ── Protection state of the trade that was just sent ─────────────────
+      // Stated for both outcomes on purpose: absence of a badge is also what a
+      // successful optimization looks like, so silence cannot carry the signal.
+      const _tp = ns.axiomTradeProtection;
+      const _tpHtml = _tp ? (function () {
+        const _pct = _tp.slippage != null ? _tp.slippage + '%' : '\u2014';
+        let _col, _head, _sub;
+        if (_tp.state === 'protected' && _tp.verdict === 'not-applied') {
+          _col  = '#FF6B6B';
+          _head = 'Not protected \u2014 Axiom used your own preset';
+          _sub  = 'ZendIQ applied ' + _pct + ' slippage and MEV Secure, but Axiom executed at '
+                + (_tp.execSlip != null ? _tp.execSlip + '%' : 'an unrecorded slippage')
+                + ' with MEV ' + (_tp.execMev ?? 'off') + '.';
+        } else if (_tp.state === 'protected' && _tp.verdict === 'unverified') {
+          _col  = '#FFB547';
+          _head = 'Could not confirm protection';
+          _sub  = 'ZendIQ applied ' + _pct + ' slippage and MEV Secure, but Axiom\u2019s record of the trade '
+                + 'did not say what it executed with.';
+        } else if (_tp.state === 'protected') {
+          _col  = '#14F195';
+          _head = 'Protected \u2014 ' + _pct + ' slippage, MEV Secure';
+          _sub  = _tp.verdict === 'confirmed'
+            ? 'Confirmed against Axiom\u2019s own record of this trade.'
+            : 'Sent using ZendIQ\u2019s preset. Your own settings go back the moment it settles.';
+        } else {
+          _col  = '#FFB547';
+          _head = 'Not protected \u2014 your own preset';
+          _sub  = 'Sent at ' + _pct + ' slippage with MEV ' + (_tp.mev ?? 'off')
+                + '. ZendIQ changed nothing for this trade.';
+        }
+        return '<div style="background:rgba(255,255,255,0.03);border-left:3px solid ' + _col + ';border-radius:6px;padding:8px 11px;margin-bottom:10px">'
+          + '<div style="color:' + _col + ';font-size:12.5px;font-weight:700;margin-bottom:2px">' + _esc(_head) + '</div>'
+          + '<div style="color:#8A8AA3;font-size:11.5px;line-height:1.5">' + _esc(_sub) + '</div>'
+          + '</div>';
+      })() : '';
+
       const _abReason = ns.axiomOptimizeAbandoned?.why ?? null;
+      // The notice outlives the decision it describes, so its closing claim has to
+      // track whether the fallback has since gone out.
+      const _abSent   = !!ns.axiomOptimizeAbandoned?.sent;
+      const _abTail   = _abSent
+        ? ' Your Axiom settings were left exactly as they were.'
+        : ' Your Axiom settings were left exactly as they were, and nothing has been sent yet.';
       const _abandonHtml = (_abReason && !_skipWhy[_abReason])
         ? '<div style="background:rgba(255,181,71,0.10);border:1px solid rgba(255,181,71,0.45);border-radius:8px;padding:9px 12px;margin-bottom:10px">'
           + '<div style="color:#FFB547;font-size:13px;font-weight:700;margin-bottom:3px">\u26a0 Could not optimize this trade</div>'
           + '<div style="color:#C2C2D4;font-size:12px;line-height:1.5">'
           +   _esc(_abWhy[_abReason] ?? 'ZendIQ could not apply the safer preset.')
-          +   ' Your Axiom settings were left exactly as they were, and nothing has been sent yet.</div>'
+          +   _abTail + '</div>'
           + '</div>'
         : '';
       const _skipHtml = (_abReason && _skipWhy[_abReason])
         ? '<div style="color:#6B6B8A;font-size:11.5px;line-height:1.5;margin-bottom:10px;padding:0 2px">'
-          + 'Not optimized \u2014 ' + _esc(_skipWhy[_abReason]) + ' Nothing has been sent yet.</div>'
+          + 'Not optimized \u2014 ' + _esc(_skipWhy[_abReason])
+          + (_abSent ? '' : ' Nothing has been sent yet.') + '</div>'
         : '';
 
       // ── Outstanding restore — split by surface ───────────────────────────
@@ -2783,6 +2861,7 @@
       return '<div style="padding:14px 16px 0">'
         + (_token ? '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.7px;color:#6B6B8A;margin-bottom:10px">TOKEN RISK \u00b7 ' + _sym + '</div>' : '')
         + _consentHtml
+        + _tpHtml
         + _obHtml
         + _abandonHtml
         + _skipHtml
