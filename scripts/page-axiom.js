@@ -311,21 +311,37 @@
   // Last resort: _readFromAxiomSettings supersedes this wherever Axiom has written its
   // wallet list. No stable pubkey-bearing DOM attribute exists (confirmed 22 Aug 2026).
   const _DOM_ATTRS = ['data-pubkey', 'data-wallet', 'data-address', 'data-wallet-address'];
+
+  // Accepts only a unanimous answer. Holder, top-trader and tracker tables sit inside
+  // these same zones, so first-match-wins could return a stranger's wallet — and since
+  // Axiom's X-identity release an opted-in wallet renders a display name in place of its
+  // address, which can remove the real owner's address while leaving everyone else's.
+  function _ambiguous(n, where) {
+    console.warn('[ZQ:AXIOM] ' + n + ' candidate pubkeys in ' + where + ' — no session wallet read from DOM');
+    return null;
+  }
   function _readFromDom() {
+    const found = new Set();
     for (const attr of _DOM_ATTRS) {
-      const el = document.querySelector('[' + attr + ']');
-      const v  = el?.getAttribute(attr)?.trim();
-      if (v && _PUBKEY_RE.test(v)) return v;
+      for (const el of document.querySelectorAll('[' + attr + ']')) {
+        const v = el.getAttribute(attr)?.trim();
+        if (v && _PUBKEY_RE.test(v)) found.add(v);
+      }
     }
+    if (found.size === 1) return [...found][0];
+    if (found.size > 1) return _ambiguous(found.size, 'wallet attributes');
+
     const zones = document.querySelectorAll(
       'header, nav, [class*="wallet"], [class*="profile"], [class*="account"], [class*="user"]'
     );
     for (const zone of zones) {
       for (const el of zone.querySelectorAll('*')) {
         const text = (el.firstChild?.nodeType === 3 ? el.firstChild.textContent : '').trim();
-        if (_PUBKEY_RE.test(text)) return text;
+        if (_PUBKEY_RE.test(text)) found.add(text);
       }
     }
+    if (found.size === 1) return [...found][0];
+    if (found.size > 1) return _ambiguous(found.size, 'page text');
     return null;
   }
 
