@@ -3336,13 +3336,23 @@ ${!ns.axiomVerifyOnly ? '' : `
             if (_axP.provider) t += row('Provider', escapeHtml(_axP.provider));
             if (_axP.timeTakenMs != null) t += row('Settlement', `${_axP.timeTakenMs}ms`);
             if (_axP.slippage != null) t += row('Slippage tolerance', `${_axP.slippage}%`);
-            if (h.optimized && h.axiomOptimization) {
+            if (h.axiomOptimization) {
               const _aoW = h.axiomOptimization;
+              // Entries written before the executed preset was reconciled carry no
+              // verdict, but they do carry Axiom's reported preset, so judge it here.
+              const _aoWApplied = h.axiomOptimizeApplied ?? (_axP.slippage == null ? 'unverified'
+                : (Math.abs(_axP.slippage - _aoW.slipTo) < 0.51 && _axP.enhancedMevProtection === true) ? 'confirmed' : 'not-applied');
+              const _aoWOk  = _aoWApplied === 'confirmed';
+              const _aoWClr = _aoWOk ? '#14F195' : '#FFB547';
               t += divider;
-              t += `<div style="font-size:12px;font-weight:700;color:#14F195;margin-bottom:6px">\ud83d\udee1 ZendIQ Optimization</div>`;
-              if (Array.isArray(_aoW.changes)) _aoW.changes.forEach(c => { t += row(escapeHtml(c.label), `${escapeHtml(String(c.from))} \u2192 ${escapeHtml(String(c.to))}`, '#14F195'); });
-              if (_aoW.estSavingsUsd > 0.0001) t += row('Est. exposure removed', `~$${_aoW.estSavingsUsd.toFixed(_aoW.estSavingsUsd < 1 ? 4 : 2)}`, '#14F195');
-              t += `<div style="margin-top:4px;font-size:10px;color:#9B9BAD">ZendIQ tightened your preset for this trade, then restored your original settings automatically.</div>`;
+              t += `<div style="font-size:12px;font-weight:700;color:${_aoWClr};margin-bottom:6px">${_aoWOk ? '\ud83d\udee1 ZendIQ Optimization' : '\u26a0 ZendIQ Optimization did not apply'}</div>`;
+              if (Array.isArray(_aoW.changes)) _aoW.changes.forEach(c => { t += row(escapeHtml(c.label), `${escapeHtml(String(c.from))} \u2192 ${escapeHtml(String(c.to))}`, _aoWClr); });
+              if (_aoWOk && _aoW.estSavingsUsd > 0.0001) t += row('Est. exposure removed', `~$${_aoW.estSavingsUsd.toFixed(_aoW.estSavingsUsd < 1 ? 4 : 2)}`, '#14F195');
+              t += `<div style="margin-top:4px;font-size:10px;color:#9B9BAD">${_aoWOk
+                ? 'ZendIQ tightened your preset for this trade, then restored your original settings automatically.'
+                : _aoWApplied === 'not-applied'
+                  ? 'Axiom executed this trade on the preset shown above, not the one ZendIQ applied. Your settings were restored either way.'
+                  : 'ZendIQ could not confirm from Axiom\u2019s record whether this change reached the trade.'}</div>`;
             }
             t += `<div style="margin-top:6px;font-size:10px;color:#9B9BAD">ZendIQ monitors Axiom trades post-settlement and can pre-apply a safer preset. It cannot route or re-execute Axiom trades.</div>`;
           } else if (h.optimized) {

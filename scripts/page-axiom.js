@@ -468,13 +468,26 @@
       // Was this the trade we just optimized? Capture before restore clears the flag.
       const _wasOptimized = ns.axiomOptimizing === true;
       const _optDetail    = _wasOptimized ? (ns.axiomLastOptimization ?? null) : null;
+      // log-tx-v3 is Axiom's record of what it executed, so it is the only sound
+      // basis for the badge — the flag above proves only that we asked. A missing
+      // enhancedMev counts as off, so an unreadable field cannot read as applied.
+      const _optApplied = !_optDetail ? null
+        : ev.slippage == null ? 'unverified'
+        : (Math.abs(ev.slippage - _optDetail.slipTo) < 0.51 && ev.enhancedMev === true) ? 'confirmed'
+        : 'not-applied';
+      if (_optApplied === 'not-applied') {
+        console.warn('[ZQ:AXIOM] optimization did not reach the trade \u2014 executed at ' + ev.slippage
+          + '% slippage, MEV ' + (ev.enhancedMev ? 'Secure' : 'off')
+          + '; intended ' + _optDetail.slipTo + '% slippage, MEV Secure');
+      }
+      const _optConfirmed = _optApplied === 'confirmed';
       const _token = ns._tokenScoreMint || null;
       const _risk  = (ns.tokenScoreResult?.loaded) ? ns.tokenScoreResult : null;
       const _SOL   = 'So11111111111111111111111111111111111111112';
       const _entry = {
         source:      'axiom',
         chain:       _chain(),
-        optimized:   _wasOptimized,
+        optimized:   _optConfirmed,
         signature:   ev.signature,
         success:     ev.success,
         timestamp:   Date.now(),
@@ -508,6 +521,9 @@
         sandwichResult: null,   // filled async below
         // ZendIQ optimization breakdown (present only when this buy was optimized).
         axiomOptimization: _optDetail,
+        // Whether Axiom's executed preset matched what we applied. Rendered, because
+        // an optimization that was asked for and did not land is a fact worth stating.
+        axiomOptimizeApplied: _optApplied,
       };
       try {
         window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: _entry } }, '*');
@@ -525,7 +541,7 @@
       const _axUsd     = (_axiomBuyAmountSol != null && _axSolUsd != null) ? _axiomBuyAmountSol * _axSolUsd : null;
       const _axFeesSol = (ev.priorityFeeSol ?? 0) + (ev.bribeFeeSol ?? 0);
       try { ns.logTrade?.({
-        user_action:       _wasOptimized ? 'optimised' : 'proceeded',
+        user_action:       _optConfirmed ? 'optimised' : 'proceeded',
         dex:               _AX_SITE,
         exec_path:         (ev.enhancedMev || ev.mevProtection) ? 'axiom_mev' : 'axiom_direct',
         tx_sig:            ev.signature,
@@ -548,8 +564,11 @@
         // can only be answered by comparing bribe_fee_sol against trade_sol.
         priority_fee_sol:  ev.priorityFeeSol ?? null,
         bribe_fee_sol:     ev.bribeFeeSol    ?? null,
+        // Separates "we did not try" from "we tried and Axiom traded on the old values",
+        // which is the only way to measure how often the apply fails to reach the trade.
+        optimize_applied:  _optApplied,
       }); } catch (_) {}
-      try { ns.logProEvent?.(_wasOptimized ? 'swap_optimised' : 'swap_proceeded', {
+      try { ns.logProEvent?.(_optConfirmed ? 'swap_optimised' : 'swap_proceeded', {
         site:         _AX_SITE,
         token_level:  _risk?.level ?? null,
         mev_level:    ns.axiomMevRisk?.riskLevel ?? null,
@@ -1279,8 +1298,10 @@
     ns.axiomOptimizing = true;
     for (const k of Object.keys(serverFields)) serverBuy[k] = serverFields[k].to;
     server.lastUpdatedAt = Date.now();
+    const _waitEcho = _armPresetEcho(opt.key, opt.side, intended);
     const ok = await _postSettings(server);
     if (!ok) {
+      _echoWait = null;
       // Write failed — but "failed" here cannot be trusted (H.10), so read the
       // server rather than assuming nothing landed. Only an observed 'from'
       // clears the obligation; an unreadable server leaves it outstanding.
@@ -1294,15 +1315,25 @@
     }
 
     if (!_writeLocalFields(opt.key, fields, 'to', opt.side)) {
-      // The mirror is what Axiom actually reads (H.11), so a server-only write
-      // protects nothing. Put the server back rather than claim a protected trade.
+      // The mirror is not what Axiom trades on (the socket echo is), but leaving it
+      // out of step with the server would desync the restore. Put the server back.
+      _echoWait = null;
       ns.axiomLastOptimization = null;
       ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'mirror-unwritable' };
       await _restoreSettings('mirror-write-failed');
       return _holdForUser();
     }
 
-    // Settings are safe on both surfaces. Fire the original Buy click.
+    // Settings are safe on both surfaces, but Axiom trades on its in-memory copy —
+    // firing now sends the old values (OPS-265). Wait for the venue to echo ours back.
+    if (!(await _waitEcho())) {
+      ns.axiomLastOptimization = null;
+      ns.axiomOptimizeAbandoned = { at: Date.now(), why: 'not-confirmed-by-venue' };
+      await _restoreSettings('echo-timeout');
+      return _holdForUser();
+    }
+
+    // Fire the original Buy click.
     ns.axiomProceedTrade?.();
 
     // Read back the server's own timestamp for this write, after the buy so the
@@ -1593,6 +1624,88 @@
       }
     } catch (_) {}
     return _origSend.apply(this, arguments);
+  };
+
+  // ── WebSocket observer (OPS-265) ────────────────────────────────────────────────
+  // Axiom submits orders over the socket and builds them from in-memory state, which
+  // moves only when the server pushes a settings change back. Watching that push is
+  // the only way to know our write is live before the order goes out.
+  let _missLogged    = 0;
+  let _echoWait      = null;
+  // The push carries the whole settings object; the envelope around it is unknown.
+  function _findPresets(v, d) {
+    if (!v || typeof v !== 'object' || d > 6) return null;
+    if (v.solPresets && typeof v.solPresets === 'object') return v.solPresets;
+    for (const k in v) { const r = _findPresets(v[k], d + 1); if (r) return r; }
+    return null;
+  }
+  // Pushed values are strings and ours are mixed, so compare as text — true never equals "true".
+  function _presetMatches(p, want) {
+    if (!p) return false;
+    for (const k in want) if (String(p[k]) !== String(want[k])) return false;
+    return true;
+  }
+  function _onInbound(tag, data) {
+    if (!_echoWait || typeof data !== 'string' || !data) return;
+    if (data.indexOf('lippage') === -1 && data.indexOf('evProtection') === -1) return;
+    let parsed = null;
+    try { parsed = JSON.parse(data); } catch (_) { return; }
+    const sp = _findPresets(parsed, 0);
+    if (!sp) return;
+    const _got = sp[_echoWait.key]?.[_echoWait.side];
+    if (_presetMatches(_got, _echoWait.want)) return _echoWait.hit();
+    if (_missLogged >= 6) return;
+    _missLogged++;
+    // A near-miss means the echo arrived but a field we demand does not match, which
+    // is indistinguishable from silence unless the difference is shown.
+    try {
+      console.log('[ZQ:AXIOM] echo near-miss ' + _echoWait.key + '.' + _echoWait.side + ' \u2192 '
+        + Object.keys(_echoWait.want).map(function (k) {
+            return k + '=' + String(_got?.[k]) + (String(_got?.[k]) === String(_echoWait.want[k]) ? '' : ' (want ' + String(_echoWait.want[k]) + ')');
+          }).join(' '));
+    } catch (_) {}
+  }
+
+  // Axiom builds the order from in-memory state, which moves only when the server
+  // pushes the change back. That echo is the only evidence our write is live.
+  const _ECHO_TIMEOUT_MS = 3000;
+  // Armed before the write, awaited after it: the echo can outrun the rest of the
+  // apply, and Axiom pushes only on change, so a missed frame never comes again.
+  function _armPresetEcho(key, side, want) {
+    const t0 = Date.now();
+    const w = { key: key, side: side === 'sell' ? 'sell' : 'buy', want: want, seenAt: 0 };
+    w.hit = function () { if (!w.seenAt) w.seenAt = Date.now(); };
+    _echoWait = w;
+    return function () {
+      return new Promise(function (resolve) {
+        let done = false;
+        const finish = function (ok) {
+          if (done) return;
+          done = true;
+          if (_echoWait === w) _echoWait = null;
+          console.log('[ZQ:AXIOM] preset echo ' + (ok ? 'confirmed in ' + (w.seenAt - t0) + 'ms'
+                                                     : 'timed out after ' + _ECHO_TIMEOUT_MS + 'ms'));
+          resolve(ok);
+        };
+        if (w.seenAt) return finish(true);
+        w.hit = function () { w.seenAt = Date.now(); finish(true); };
+        setTimeout(function () { finish(false); }, Math.max(0, _ECHO_TIMEOUT_MS - (Date.now() - t0)));
+      });
+    };
+  }
+
+  const _origWsSend = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (data) {
+    try {
+      // Attached here rather than by wrapping the constructor: every live socket
+      // sends, and patching WebSocket itself risks its static members.
+      if (!this.__zq_ax_rx) {
+        this.__zq_ax_rx = true;
+        const _u = this.url ?? '';
+        this.addEventListener('message', function (e) { _onInbound(_u, e.data); });
+      }
+    } catch (_) {}
+    return _origWsSend.apply(this, arguments);
   };
 
   // ── SPA URL listener (step 5) ────────────────────────────────────────────
@@ -2523,6 +2636,7 @@
         'settings-unreadable':  'ZendIQ could not read your Axiom settings safely.',
         'settings-write-failed':'Axiom rejected the settings change.',
         'mirror-unwritable':    'The change could not be applied to this browser, so it was undone.',
+        'not-confirmed-by-venue':'Axiom did not confirm the change in time, so it was undone rather than traded on.',
         'unknown-field':        'A setting ZendIQ needed to change was not in the expected format.',
         // Amber, not the grey line below: a failure to verify is not a choice not to act.
         'obligation-unreadable':'ZendIQ could not confirm an earlier change had already been undone.',

@@ -305,15 +305,25 @@ function _buildTooltipHtml(h) {
     }
     if (p.provider) html += row('Provider', escapeHtml(p.provider));
     if (p.timeTakenMs != null) html += row('Settlement', `${p.timeTakenMs}ms`);
-    if (h.optimized && h.axiomOptimization) {
+    if (h.axiomOptimization) {
       const _ao = h.axiomOptimization;
+      // Entries written before the executed preset was reconciled carry no verdict,
+      // but they do carry the preset Axiom reported, so they can be judged here.
+      const _applied = h.axiomOptimizeApplied ?? (p.slippage == null ? 'unverified'
+        : (Math.abs(p.slippage - _ao.slipTo) < 0.51 && p.enhancedMevProtection === true) ? 'confirmed' : 'not-applied');
+      const _aoOk  = _applied === 'confirmed';
+      const _aoClr = _aoOk ? '#14F195' : '#FFB547';
       html += divider;
-      html += `<div style="font-size:var(--fs-base);font-weight:700;color:#14F195;margin-bottom:6px">\ud83d\udee1 ZendIQ Optimization</div>`;
+      html += `<div style="font-size:var(--fs-base);font-weight:700;color:${_aoClr};margin-bottom:6px">${_aoOk ? '\ud83d\udee1 ZendIQ Optimization' : '\u26a0 ZendIQ Optimization did not apply'}</div>`;
       if (Array.isArray(_ao.changes)) {
-        _ao.changes.forEach(c => { html += row(escapeHtml(c.label), `${escapeHtml(String(c.from))} \u2192 ${escapeHtml(String(c.to))}`, '#14F195'); });
+        _ao.changes.forEach(c => { html += row(escapeHtml(c.label), `${escapeHtml(String(c.from))} \u2192 ${escapeHtml(String(c.to))}`, _aoClr); });
       }
-      if (_ao.estSavingsUsd > 0.0001) html += row('Est. exposure removed', `~$${_ao.estSavingsUsd.toFixed(_ao.estSavingsUsd < 1 ? 4 : 2)}`, '#14F195');
-      html += `<div style="margin-top:4px;font-size:var(--fs-xs);color:var(--muted)">ZendIQ tightened your preset for this trade, then restored your original settings automatically.</div>`;
+      if (_aoOk && _ao.estSavingsUsd > 0.0001) html += row('Est. exposure removed', `~$${_ao.estSavingsUsd.toFixed(_ao.estSavingsUsd < 1 ? 4 : 2)}`, '#14F195');
+      html += `<div style="margin-top:4px;font-size:var(--fs-xs);color:var(--muted)">${_aoOk
+        ? 'ZendIQ tightened your preset for this trade, then restored your original settings automatically.'
+        : _applied === 'not-applied'
+          ? 'Axiom executed this trade on the preset shown above, not the one ZendIQ applied. Your settings were restored either way.'
+          : 'ZendIQ could not confirm from Axiom\u2019s record whether this change reached the trade.'}</div>`;
     }
     html += `<div style="margin-top:6px;font-size:var(--fs-xs);color:var(--muted)">ZendIQ monitors Axiom trades post-settlement and can pre-apply a safer preset. It cannot route or re-execute Axiom trades.</div>`;
     return html;
