@@ -446,33 +446,47 @@
   async function _awaitJitoBundleConfirmation(bundleId, jitoBase, maxWaitMs = 20000) {
     const _inflightUrl = jitoBase + '/api/v1/getInflightBundleStatuses';
     const _statusUrl   = jitoBase + '/api/v1/getBundleStatuses';
+    // Return the HTTP disposition, not just the parsed body. A 429 or 5xx from the
+    // status endpoint carries no result.value -- byte-identical to "pending" if you only
+    // read the JSON -- so collapsing them reports a status outage as an unlanded bundle
+    // (OPS-182). Never throws; the loop reads the shape instead.
     const _post = async (url, body) => {
-      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body), signal: AbortSignal.timeout(4000) });
-      return r.json();
-    };
-    const start = Date.now();
-    let _sawInvalid = false;
-    // Step 1: poll inflight statuses (updated every slot ~400ms)
-    while (Date.now() - start < maxWaitMs) {
-      await new Promise(r => setTimeout(r, 1000));
+      let r;
       try {
-        const d  = await _post(_inflightUrl, { jsonrpc: '2.0', id: 1, method: 'getInflightBundleStatuses', params: [[bundleId]] });
-        const sv = d?.result?.value?.[0];
-        if (!sv) continue; // not yet in tracker
-        if (sv.status === 'Landed') return { ok: true };
-        if (sv.status === 'Failed') return { ok: false, err: 'Jito bundle failed on-chain' };
-        if (sv.status === 'Invalid') { _sawInvalid = true; break; } // left inflight tracker — check chain history below
-      } catch (_) {}
+        r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body), signal: AbortSignal.timeout(4000) });
+      } catch (_) {
+        return { unavailable: true };
+      }
+      if (r.status === 429) return { rateLimited: true };
+      if (!r.ok) return { unavailable: true };
+      try { return { json: await r.json() }; } catch (_) { return { unavailable: true }; }
+    };
+    const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const start = Date.now();
+    let _sawInvalid  = false;
+    let _extraBudget = 0;              // rate-limit backoff is refunded so 429s never shorten real polling
+    const _EXTRA_CAP = maxWaitMs;      // but total wall-clock stays bounded to ~2x maxWaitMs
+    // Step 1: poll inflight statuses (updated every slot ~400ms)
+    while (Date.now() - start < maxWaitMs + _extraBudget) {
+      await _sleep(1000);
+      const res = await _post(_inflightUrl, { jsonrpc: '2.0', id: 1, method: 'getInflightBundleStatuses', params: [[bundleId]] });
+      // Jito is 1 req/s/IP/region, so 429 is the expected steady state under load:
+      // back off and refund the wait; never read it as "not landed".
+      if (res.rateLimited) { if (_extraBudget < _EXTRA_CAP) _extraBudget = Math.min(_EXTRA_CAP, _extraBudget + 2000); await _sleep(1000); continue; }
+      if (res.unavailable) continue;   // status endpoint down -- keep polling, conclude nothing
+      const sv = res.json?.result?.value?.[0];
+      if (!sv) continue;               // genuinely pending -- not yet in tracker
+      if (sv.status === 'Landed') return { ok: true };
+      if (sv.status === 'Failed') return { ok: false, err: 'Jito bundle failed on-chain' };
+      if (sv.status === 'Invalid') { _sawInvalid = true; break; } // left inflight tracker; check chain history below
     }
-    // Step 2: getBundleStatuses — authoritative chain history check
-    try {
-      const d  = await _post(_statusUrl, { jsonrpc: '2.0', id: 1, method: 'getBundleStatuses', params: [[bundleId]] });
-      const sv = d?.result?.value?.[0];
-      if (sv?.confirmation_status) return { ok: true };
-    } catch (_) {}
-    // Distinguish: timed out without ever seeing Invalid (unknown — may have landed)
-    // vs definitively saw Invalid + not on chain (bundle was dropped, tx never broadcast).
+    // Step 2: getBundleStatuses -- authoritative chain history check
+    const res2 = await _post(_statusUrl, { jsonrpc: '2.0', id: 1, method: 'getBundleStatuses', params: [[bundleId]] });
+    if (res2.json?.result?.value?.[0]?.confirmation_status) return { ok: true };
+    // Definitive "not landed" only when Jito said Invalid AND chain history has nothing.
+    // Otherwise the outcome is genuinely unknown (pending past our window, or the status
+    // endpoint was unavailable) -- never assert "not landed" from an absence of data.
     return _sawInvalid ? { ok: false, err: 'bundle_invalid' } : null;
   }
 
@@ -818,10 +832,10 @@
         confirmed = null;
       }
 
-      if (!confirmed) {
-        confirmed = { ok: false, err: 'bundle not confirmed \u2014 click Buy to retry.' };
-      }
-
+      // A bundle whose status we could not read (Jito 429/outage, or still pending past
+      // our poll window) is NOT a failure: the buy tx was signed and broadcast. Leaving
+      // `confirmed` null falls through to the optimistic-done branch below; asserting a
+      // failure here would invite a duplicate buy (OPS-182).
       const _confirmedBundleId = _jitoResult?.bundleId ?? null;
 
       if (confirmed === null) {

@@ -333,7 +333,13 @@
             body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses', params: [[sig]] }),
             signal: AbortSignal.timeout(4000),
           });
-          d = (await r.json())?.result;
+          // fetch resolves on 4xx/5xx, and most RPCs return a parseable JSON error body.
+          // Without this, a rate-limited poll sets `answered` and downgrades "unknown" to
+          // "did not land" — the one verdict we must never state without evidence.
+          if (!r.ok) throw new Error('rpc_http_' + r.status);
+          const j = await r.json();
+          if (j?.error) throw new Error('rpc_error_' + (j.error.code ?? '?'));
+          d = j?.result;
         } else {
           d = await ns.rpcCall('getSignatureStatuses', [[sig]]);
         }
