@@ -78,27 +78,108 @@ function _clearReportedProFailures(n) {
   } catch (_) {}
 }
 
-// Single exit point for every analytics POST. Never throws; always resolves.
-async function _postProEvent(payload) {
+// Durable outbox — OPS-169. The Pro backend is always-on (paid tier, no spin-down), so
+// the drop mechanism is client-side: an MV3 service worker is killed ~30s after firing an
+// event and can be torn down before the POST completes; deploys, transient 5xx and an
+// offline client also lose a fire-and-forget send. `keepalive` covers the common teardown
+// case but is best-effort and size-capped, so this persists the event itself and re-delivers
+// it on the next SW wake / keepalive alarm with backoff — giving fee-bearing events (paid
+// launch) an acknowledged, retried delivery instead of best-effort.
+const _PRO_OUTBOX_KEY = 'sendiq_pro_outbox';
+const _PRO_OUTBOX_MAX = 200;          // cap persisted events; oldest dropped past this
+const _PRO_OUTBOX_MAX_ATTEMPTS = 10;  // give up on an event after this many failed tries
+const _PRO_DROP_KEY = 'sendiq_pro_outbox_dropped'; // count of events we gave up on
+let _proFlushInFlight = false;
+
+// Only queue failures a retry could actually clear. A 4xx (bad payload, ext-id gate)
+// is a permanent reject — retrying it forever just churns the outbox.
+function _proRetriable(status) {
+  return status === 0 || status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function _enqueueProEvent(payload) {
+  try {
+    chrome.storage.local.get([_PRO_OUTBOX_KEY, _PRO_DROP_KEY], (r) => {
+      let box = Array.isArray(r?.[_PRO_OUTBOX_KEY]) ? r[_PRO_OUTBOX_KEY] : [];
+      let dropped = Number(r?.[_PRO_DROP_KEY]) || 0;
+      box.push({ id: crypto.randomUUID(), payload, attempts: 0, next_try: 0, first_ts: Date.now() });
+      if (box.length > _PRO_OUTBOX_MAX) { dropped += box.length - _PRO_OUTBOX_MAX; box = box.slice(-_PRO_OUTBOX_MAX); }
+      chrome.storage.local.set({ [_PRO_OUTBOX_KEY]: box, [_PRO_DROP_KEY]: dropped });
+    });
+  } catch (_) {}
+}
+
+// Retry every due event once. Runs on SW startup and the 24s keepalive alarm; the
+// re-entrancy guard stops the alarm from overlapping a still-running flush.
+async function _flushProOutbox() {
+  if (_proFlushInFlight) return;
+  _proFlushInFlight = true;
+  try {
+    const box = await new Promise((res) => {
+      try { chrome.storage.local.get([_PRO_OUTBOX_KEY], (r) => res(Array.isArray(r?.[_PRO_OUTBOX_KEY]) ? r[_PRO_OUTBOX_KEY] : [])); }
+      catch (_) { res([]); }
+    });
+    if (!box.length) return;
+    const now = Date.now();
+    const keep = [];
+    let gaveUp = 0;
+    for (const entry of box) {
+      if ((entry.next_try || 0) > now) { keep.push(entry); continue; }
+      const ok = await _postProEvent(entry.payload, { fromOutbox: true });
+      if (ok) continue;
+      entry.attempts = (entry.attempts || 0) + 1;
+      if (entry.attempts >= _PRO_OUTBOX_MAX_ATTEMPTS) { gaveUp++; continue; }
+      entry.next_try = Date.now() + Math.min(30 * 60_000, 1000 * 2 ** entry.attempts); // 2s → cap 30 min
+      keep.push(entry);
+    }
+    // Re-read before writing: a direct send may have enqueued a new event mid-flush.
+    const processed = new Set(box.map((e) => e.id));
+    await new Promise((res) => {
+      try {
+        chrome.storage.local.get([_PRO_OUTBOX_KEY, _PRO_DROP_KEY], (r) => {
+          const current = Array.isArray(r?.[_PRO_OUTBOX_KEY]) ? r[_PRO_OUTBOX_KEY] : [];
+          let merged = keep.concat(current.filter((e) => !processed.has(e.id)));
+          let dropped = (Number(r?.[_PRO_DROP_KEY]) || 0) + gaveUp;
+          if (merged.length > _PRO_OUTBOX_MAX) { dropped += merged.length - _PRO_OUTBOX_MAX; merged = merged.slice(-_PRO_OUTBOX_MAX); }
+          chrome.storage.local.set({ [_PRO_OUTBOX_KEY]: merged, [_PRO_DROP_KEY]: dropped }, () => res());
+        });
+      } catch (_) { res(); }
+    });
+  } finally {
+    _proFlushInFlight = false;
+  }
+}
+
+// Single exit point for every analytics POST. Never throws. Returns true on delivery,
+// false on failure. `keepalive` lets the request outlive service-worker teardown; a
+// failed but retriable direct send is persisted to the outbox for later re-delivery.
+async function _postProEvent(payload, opts) {
+  const fromOutbox = opts?.fromOutbox === true;
   const pending = await _peekProFailures();
   try {
     const r = await fetch(PRO_BACKEND_URL + '/api/events', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(pending ? { ...payload, prior_failures: pending.summary } : payload),
+      keepalive: true,
     });
     if (r.ok) {
       if (pending) _clearReportedProFailures(pending.reported);
-      return;
+      return true;
     }
     let detail = '';
     try { detail = (await r.text()).slice(0, 200); } catch (_) {}
     console.warn('[ZendIQ] telemetry rejected', r.status, payload?.type, detail);
-    _recordProSendFailure(r.status, payload?.type, detail);
+    if (!fromOutbox) {
+      _recordProSendFailure(r.status, payload?.type, detail);
+      if (_proRetriable(r.status)) _enqueueProEvent(payload);
+    }
+    return false;
   } catch (err) {
     const m = err?.message ?? String(err);
     console.warn('[ZendIQ] telemetry send failed', payload?.type, m);
-    _recordProSendFailure(0, payload?.type, m);
+    if (!fromOutbox) { _recordProSendFailure(0, payload?.type, m); _enqueueProEvent(payload); }
+    return false;
   }
 }
 
@@ -159,6 +240,8 @@ async function _fetchAndCacheSolPrice() {
 
 // Fetch immediately on every SW startup (covers install, update, and SW wakeup cycles)
 _fetchAndCacheSolPrice();
+// OPS-169: drain any telemetry that failed to send before the SW last slept.
+_flushProOutbox();
 // Alarm persists across SW hibernation — wakes the SW and re-fetches every 5 min
 chrome.alarms.create('zq-sol-price',   { periodInMinutes: 5    });
 // Keepalive: Chrome MV3 service workers sleep after ~30s of inactivity.
@@ -168,7 +251,8 @@ chrome.alarms.create('zq-sol-price',   { periodInMinutes: 5    });
 chrome.alarms.create('zq-sw-keepalive', { periodInMinutes: 0.4 });
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === 'zq-sol-price') _fetchAndCacheSolPrice();
-  // zq-sw-keepalive: secondary keepalive via alarms (belt-and-suspenders)
+  // zq-sw-keepalive doubles as the telemetry retry tick — flush any queued events on wake.
+  else if (alarm.name === 'zq-sw-keepalive') _flushProOutbox();
 });
 
 // ── Persistent port keepalive ─────────────────────────────────────────────────
