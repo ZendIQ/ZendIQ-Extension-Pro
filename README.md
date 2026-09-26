@@ -3,6 +3,8 @@
 > **Solana swap optimiser with MEV protection.** Intercepts swaps on Jupiter, Raydium, Pump.fun, and Axiom, scores risk in real time, and rebuilds your route through Jupiter Ultra to get you more tokens — before you sign.
 >
 > 🌐 [zendiq.ai](https://zendiq.ai)
+>
+> 🤖 **Building an AI agent?** The same risk engine is available as the [ZendIQ Agent API](https://zendiq.ai/agents/): token screening, swap verdicts and unsigned optimised transactions, paid per call over x402 or used as MCP tools. [llms.txt](https://zendiq.ai/llms.txt) · [OpenAPI](https://zendiq.ai/openapi.json) · [GitHub](https://github.com/ZendIQ/ZendIQ-Agent-API)
 
 > **Status:** Live on the Chrome Web Store — [Install ZendIQ Pro →](https://chromewebstore.google.com/detail/adnicpcaldagdfgncabogjbamhbnhjhe). **ZendIQ Lite** (the free edition) is also live: [Install ZendIQ Lite →](https://chromewebstore.google.com/detail/piacdmhfdpnddopdojdfkjbbbcpgpblf)
 
