@@ -81,7 +81,7 @@
     }
 
     if (attempts > 40) {
-      console.warn('[ZendIQ] Wallet not detected after 10 seconds');
+      if (!ns.walletHooked) console.warn('[ZendIQ] Wallet not detected after 10 seconds');
       return;
     }
 
@@ -284,6 +284,8 @@
             ns._wsWallet  = w;
             ns._wsAccount = acc;
             if (isNew) hookWsWallet(w, acc);
+            // Wallet registered before connecting, so hookWsWallet saw no accounts then.
+            else _markWsHooked(w);
             return String(addr);
           }
         }
@@ -781,10 +783,51 @@
     }
   }
 
+  // WS-only wallets (e.g. Jupiter Wallet via Privy on pump.fun) never create window.solana,
+  // so detectAndHookWallet never marks them hooked and the pill stays 'Connecting...'.
+  function _markWsHooked(w) {
+    if (ns.walletHooked) return;
+    const f = w?.features;
+    if (!f?.['solana:signAndSendTransaction']?.__zendiq_hooked_sast && !f?.['solana:signTransaction']?.__zendiq_hooked_st) return;
+    ns.walletHooked = true;
+    ns.updateWidgetStatus?.('Active');
+  }
+
+  // Wallet Standard wallets commonly expose `features` as a getter that builds a new object
+  // on every access (Jupiter Wallet does), so patching one returned object hooks nothing.
+  // Wrap the getter itself so every features object the DEX reads comes back hooked.
+  function _hookFeaturesGetter(w) {
+    try {
+      let owner = w;
+      while (owner && !Object.prototype.hasOwnProperty.call(owner, 'features')) owner = Object.getPrototypeOf(owner);
+      const desc = owner && Object.getOwnPropertyDescriptor(owner, 'features');
+      if (!desc?.get || desc.get.__zendiq_wrapped) return;
+      const origGet = desc.get;
+      const get = function () {
+        const f = origGet.call(this);
+        _wrapWsFeatures(this, f);
+        return f;
+      };
+      get.__zendiq_wrapped = true;
+      Object.defineProperty(owner, 'features', { ...desc, get });
+    } catch (e) {
+      console.warn('[ZendIQ] Could not hook WS features getter:', e.message);
+    }
+  }
+
   // ── hookWsWallet ─────────────────────────────────────────────────────────
   function hookWsWallet(w, _acc) {
+    _hookFeaturesGetter(w);
+    _wrapWsFeatures(w, w?.features);
+
+    if (w?.accounts?.length) _markWsHooked(w);
+    _hookWsEvents(w, _acc);
+  }
+
+  const _wsWrapWarned = new WeakSet();
+  function _wrapWsFeatures(w, features) {
     try {
-      const feat = w?.features?.['solana:signAndSendTransaction'];
+      const feat = features?.['solana:signAndSendTransaction'];
       if (feat?.signAndSendTransaction && !feat.__zendiq_hooked_sast) {
         const orig = feat.signAndSendTransaction.bind(feat);
         feat.__zendiq_hooked_sast = true;
@@ -799,11 +842,12 @@
         });
       }
     } catch (e) {
-      console.warn('[ZendIQ] Could not hook WS signAndSendTransaction:', e.message);
+      // Runs on every features read once the getter is wrapped, so warn once per wallet.
+      if (!_wsWrapWarned.has(w)) { _wsWrapWarned.add(w); console.warn('[ZendIQ] Could not hook WS signAndSendTransaction:', e.message); }
     }
 
     try {
-      const feat = w?.features?.['solana:signTransaction'];
+      const feat = features?.['solana:signTransaction'];
       if (feat?.signTransaction && !feat.__zendiq_hooked_st) {
         const orig = feat.signTransaction.bind(feat);
         feat.__zendiq_hooked_st = true;
@@ -818,21 +862,28 @@
         });
       }
     } catch (e) {
-      console.warn('[ZendIQ] Could not hook WS signTransaction:', e.message);
+      if (!_wsWrapWarned.has(w)) { _wsWrapWarned.add(w); console.warn('[ZendIQ] Could not hook WS signTransaction:', e.message); }
     }
+  }
 
+  function _hookWsEvents(w, _acc) {
     // Track wallet connect/disconnect — update active wallet state when accounts change.
     // Fires when the user switches wallets in the DEX UI (Wallet Standard change event).
     try {
-      if (typeof w.on === 'function' && !w.__zendiq_change_hooked) {
+      // Wallet Standard puts `on` under the standard:events feature; w.on is a non-standard extra.
+      const _evFeat = w?.features?.['standard:events'];
+      const _on = typeof _evFeat?.on === 'function' ? _evFeat.on.bind(_evFeat)
+                : typeof w.on === 'function' ? w.on.bind(w) : null;
+      if (_on && !w.__zendiq_change_hooked) {
         w.__zendiq_change_hooked = true;
-        w.on('change', (changes) => {
+        _on('change', (changes) => {
           try {
             if (!changes?.accounts) return;
             if (changes.accounts.length > 0) {
               // Wallet just connected or account changed — this is now the active wallet.
               ns._wsWallet  = w;
               ns._wsAccount = changes.accounts[0];
+              _markWsHooked(w);
               const _pk = ns._wsAccount?.address;
               if (_pk) {
                 window.postMessage({ type: 'ZENDIQ_SAVE_WALLET_PUBKEY', pubkey: String(_pk) }, '*');
@@ -845,6 +896,11 @@
               // call picks up the newly active wallet from the registry.
               ns._wsWallet  = null;
               ns._wsAccount = null;
+              // Only a WS-set flag is ours to clear; a legacy window.solana hook is still live.
+              if (!ns._hookedSolanaObj && ns.walletHooked) {
+                ns.walletHooked = false;
+                ns.updateWidgetStatus?.('Connecting...');
+              }
             }
           } catch (_) {}
         });

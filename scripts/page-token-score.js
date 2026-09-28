@@ -415,39 +415,34 @@
   // DexScreener / RugCheck can take 1–5 min to index a newly launched token.
   // The pump.fun coins API has data from the very first block — use as fallback
   // dex source so new axiom.trade / pump.fun tokens still get marketCap + age signals.
+  // `/coins/<mint>` 404s for every mint since Sep 26 2026 (OPS-338); `/coins-v2/` is the live one.
   async function _fetchPumpFunCoin(mint) {
-    const _urls = [
-      `https://frontend-api-v3.pump.fun/coins/${mint}`,
-      `https://frontend-api-v2.pump.fun/coins/${mint}`,
-      `https://frontend-api.pump.fun/coins/${mint}`,
-    ];
-    for (const url of _urls) {
-      try {
-        const data = await ns.pageJsonFetch(url);
-        if (!data?.mint) continue;
-        // Derive SOL price from price_in_usd / price_in_sol so we can convert
-        // real_sol_reserves to a USD liquidity estimate without a hardcoded price.
-        const _pInSol = parseFloat(data.price_in_sol ?? 0);
-        const _pInUsd = parseFloat(data.price_in_usd ?? 0);
-        const _solPx  = (_pInSol > 0 && _pInUsd > 0) ? _pInUsd / _pInSol : null;
-        // real_sol_reserves = actual SOL raised from buyers (lamports).
-        // Multiply by 2 for both sides of the virtual pool; capped to avoid overflow.
-        const _realSol  = parseFloat(data.real_sol_reserves ?? 0) / 1e9;
-        const _liqUsd   = (_solPx && _realSol > 0) ? Math.round(_realSol * _solPx * 2) : null;
-        // Normalise to dexData shape so _computeScore works unchanged.
-        return {
-          symbol:        data.symbol          ?? null,
-          name:          data.name            ?? null,
-          priceChange24h: null,               // no OHLC in /coins/ endpoint
-          volume24h:     null,
-          liquidityUsd:  _liqUsd,             // derived from bonding-curve reserves
-          marketCap:     data.usd_market_cap  ?? null,
-          pairCreatedAt: data.created_timestamp ?? null,  // already ms
-          dexId:         'pump.fun',
-          pairUrl:       `https://pump.fun/coin/${mint}`,
-        };
-      } catch (_) {}
-    }
+    try {
+      const data = await ns.pageJsonFetch(`https://frontend-api-v3.pump.fun/coins-v2/${mint}`);
+      if (!data?.mint) return null;
+      // v2 indexes every mint; for a non-launchpad token created_timestamp is the index date, not its age.
+      if ((data.protocol ?? data.program) === 'non_launchpad') return null;
+      // v2 has no price_in_sol/usd: USD cap over quote-unit cap is the quote token's USD price.
+      const _mcUsd   = parseFloat(data.usd_market_cap ?? 0);
+      const _mcQuote = parseFloat(data.market_cap_quote ?? 0);
+      const _quotePx = (_mcUsd > 0 && _mcQuote > 0) ? _mcUsd / _mcQuote : null;
+      const _realQuote = parseFloat(data.real_quote_reserves ?? data.real_sol_reserves ?? 0)
+        / 10 ** parseFloat(data.quote_decimals ?? 9);
+      // Both sides of the pool, as the curve holds token value equal to the quote raised.
+      const _liqUsd = (_quotePx && _realQuote > 0) ? Math.round(_realQuote * _quotePx * 2) : null;
+      // Normalise to dexData shape so _computeScore works unchanged.
+      return {
+        symbol:        data.symbol          ?? null,
+        name:          data.name            ?? null,
+        priceChange24h: null,               // no OHLC in the coin endpoint
+        volume24h:     null,
+        liquidityUsd:  _liqUsd,             // derived from bonding-curve reserves
+        marketCap:     data.usd_market_cap  ?? null,
+        pairCreatedAt: data.created_timestamp ?? null,  // already ms
+        dexId:         'pump.fun',
+        pairUrl:       `https://pump.fun/coin/${mint}`,
+      };
+    } catch (_) {}
     return null;
   }
 
