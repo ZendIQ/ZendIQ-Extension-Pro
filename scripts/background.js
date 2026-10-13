@@ -213,7 +213,6 @@ const FETCH_JSON_ALLOWED = [
   'https://dublin.mainnet.block-engine.jito.wtf',
   'https://slc.mainnet.block-engine.jito.wtf',
   'https://singapore.mainnet.block-engine.jito.wtf',
-  'https://bundles.jito.wtf',
   'https://pumpportal.fun',
   'https://api.binance.com',
 ];

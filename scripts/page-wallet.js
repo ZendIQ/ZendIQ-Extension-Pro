@@ -514,6 +514,8 @@
     const key = kind + '|' + progs.join(',');
     if (_passReported.has(key)) return;
     _passReported.add(key);
+    // Shares the error-event budget: at most 20 error events per page load (privacy policy §2).
+    if ((ns._ec = (ns._ec ?? 0) + 1) > 20) return;
     const h = window.location.hostname;
     try {
       ns.logError?.('wallet_hook', {
