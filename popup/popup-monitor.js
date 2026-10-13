@@ -96,7 +96,7 @@ async function loadMonitor() {
         <span class="mon-status-dot"></span>
         <strong style="color:var(--text)">Monitoring not active</strong>
         <ol class="monitor-steps">
-          <li><div class="ms-num">1</div><span>Open <a href="https://jup.ag" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">jup.ag</a>, <a href="https://raydium.io/swap/" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">Raydium</a>, <a href="https://pump.fun" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">pump.fun</a>, or <a href="https://axiom.trade" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">Axiom</a> in this browser</span></li>
+          <li><div class="ms-num">1</div><span>Open <a href="https://jup.ag" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">jup.ag</a>, <a href="https://raydium.io/swap/" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">Raydium</a>${AXIOM_ENABLED ? ', ' : ' or '}<a href="https://pump.fun" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">pump.fun</a>${AXIOM_ENABLED ? `, or <a href="https://axiom.trade" target="_blank" rel="noopener" style="color:var(--purple);font-weight:700;text-decoration:none">Axiom</a>` : ''} in this browser</span></li>
           <li><div class="ms-num">2</div><span>Connect your Solana wallet</span></li>
           <li><div class="ms-num">3</div><span>Trade as normal — ZendIQ will appear automatically before you sign and show you if a better route is available</span></li>
         </ol>
@@ -113,6 +113,8 @@ async function loadMonitor() {
 // to be reachable with no axiom.trade open. The popup cannot fix it from here —
 // the restore needs the page's own authenticated session — so it points there.
 async function _renderAxiomObligation(el) {
+  // A build without Axiom cannot finish the restore, so it does not offer one.
+  if (!AXIOM_ENABLED) return;
   const ob = await new Promise(r => chrome.storage.local.get(['sendiq_axiom_obligation'], x => r(x.sendiq_axiom_obligation)));
   if (!ob || !ob.fields || (ob.localRestored && ob.serverRestored)) return;
 

@@ -48,7 +48,7 @@
   const CLASS_STABLECOIN = {
     label: 'Regulated stablecoin',
     detail: 'Issued by a regulated institution. Mint and freeze authorities are compliance features rather than rug risks, holders are exchange and treasury wallets, and pool price history tracks the paired asset rather than this token. Those signals are not scored. Liquidity, market cap, token age and RugCheck findings are still checked normally.',
-    na: new Set(['mintAuth', 'freezeAuth', 'concentration', 'speculative', 'lpLock', 'priceHistory', 'price24h', 'deployer', 'bundle']),
+    na: new Set(['mintAuth', 'freezeAuth', 'tokenControls', 'concentration', 'speculative', 'lpLock', 'priceHistory', 'price24h', 'deployer', 'bundle']),
   };
   const CLASS_PROTOCOL = {
     label: 'Established protocol token',
@@ -60,7 +60,90 @@
     detail: 'Liquid staking token. An active mint authority is how new tokens are issued against deposits, so that one signal is not scored. Everything else is checked normally.',
     na: new Set(['mintAuth', 'speculative', 'lpLock', 'deployer', 'bundle']),
   };
+  // Same class and exemptions as the backend (OPS-410). The mint authority is not exempted:
+  // it must be a verified bridge authority (KNOWN_AUTHORITIES) or it scores as a live one.
+  const CLASS_BRIDGED = {
+    label: 'Bridged asset',
+    detail: 'Wrapped from another chain by a token bridge, which mints it against assets locked on the home chain. Holders are mostly protocol and exchange custody accounts, its price tracks the asset on its home chain, and launch, LP-lock, creator and creation-block signals describe new launches. Those signals are not scored. The mint authority is checked as the bridge\u2019s; freeze authority, liquidity, market cap, token age and RugCheck findings are checked normally.',
+    na: new Set(['concentration', 'speculative', 'lpLock', 'priceHistory', 'price24h', 'deployer', 'bundle']),
+  };
 
+  // ── Issuer and bridge authorities (backend OPS-402) ─────────────────────────
+  // A bridge mints its wrapped tokens from a program-derived authority: no private key exists,
+  // so only the bridge program can mint. A matching authority scores +5 MEDIUM instead of the
+  // +35 "Unlimited supply risk". It applies only when, at scan time, the authority equals
+  // `address`, re-derives from `seeds` under `program`, and `program` is executable on chain.
+  // Matching the address alone is not enough: the derivation proves no key holder can mint.
+  const KNOWN_AUTHORITIES = [
+    {
+      address: 'BCD75RNBHrJJpW4dXVagL5mPjzRLnVZq4YirJdjEYMV7',
+      program: 'wormDTUJ6AWPNvk59vGQbDvGJmqbDTdgWgAqcLBCgUb',
+      seeds: ['mint_signer'],
+      issuer: 'Wormhole Token Bridge',
+    },
+    {
+      address: 'FvULawNPGBbuwYus74ECaQoV1oH9Tk6XPN7VPN51NYds',
+      program: 'dahPEoZGXfyV58JqqH85okdHmpN8U2q8owgPUXSCPxe',
+      seeds: ['authority'],
+      issuer: 'NEAR Omni Bridge',
+    },
+  ];
+
+  // ── Holder custody (backend OPS-269 / OPS-402) ──────────────────────────────
+  const PUMP_PROGRAM   = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+  // pump.fun Mayhem Mode: one agent vault for every Mayhem launch, PDA(["sol-vault"]).
+  const MAYHEM_PROGRAM = 'MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+  // Matched by constant with no off-curve test: the System Program address sits on the curve.
+  const BURN_OWNERS = new Set([
+    '1nc1nerator11111111111111111111111111111111',
+    '11111111111111111111111111111111',
+  ]);
+  // Every Raydium AMM v4 / CPMM pool's vaults are owned by one program-wide authority, so the
+  // pool address never appears as the owner. Same addresses as the backend.
+  const VENUE_AUTHORITIES = new Map([
+    ['5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1', 'raydium_amm_v4'],
+    ['GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL', 'cpmm'],
+  ]);
+
+  // ed25519 point test, as curve25519-dalek's decompress: a 32-byte value is on the curve when
+  // (y² − 1) / (d·y² + 1) is a square mod p. A PDA is off-curve, so no private key exists for it.
+  const _P = (1n << 255n) - 19n;
+  const _D = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
+  function _modPow(b, e) {
+    let r = 1n; b %= _P;
+    while (e > 0n) { if (e & 1n) r = r * b % _P; b = b * b % _P; e >>= 1n; }
+    return r;
+  }
+  function _isOnCurve(bytes) {
+    let y = 0n;
+    for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(i === 31 ? bytes[i] & 0x7f : bytes[i]);
+    y %= _P;
+    const y2 = y * y % _P;
+    const u = (y2 - 1n + _P) % _P;
+    const v = (_D * y2 + 1n) % _P;
+    if (u === 0n) return true;
+    return _modPow(u * _modPow(v, _P - 2n) % _P, (_P - 1n) / 2n) === 1n;
+  }
+  const _isOffCurveB58 = (addr) => { try { return !_isOnCurve(ns.b58Decode(addr)); } catch (_) { return false; } };
+
+  // Canonical PDA: SHA-256(seeds || bump || program || "ProgramDerivedAddress"), first
+  // off-curve result from bump 255 down — what findProgramAddressSync returns.
+  async function _findPda(seeds, programB58) {
+    const program = ns.b58Decode(programB58);
+    const tag = new TextEncoder().encode('ProgramDerivedAddress');
+    for (let bump = 255; bump >= 0; bump--) {
+      const parts = [...seeds, Uint8Array.of(bump), program, tag];
+      const buf = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+      let o = 0;
+      for (const p of parts) { buf.set(p, o); o += p.length; }
+      const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', buf));
+      if (!_isOnCurve(hash)) return ns.b58Encode(hash);
+    }
+    return null;
+  }
+  let _mayhemVaultP = null;
+  const _mayhemVault = () => (_mayhemVaultP ??= _findPda([new TextEncoder().encode('sol-vault')], MAYHEM_PROGRAM)
+    .catch((e) => { _mayhemVaultP = null; throw e; }));
   // Removed rather than re-described: MNGO (drained Oct 2022, DAO wound down), SRM (abandoned
   // post-FTX), stSOL (Lido sunset Solana staking). All three were still labelled "audited …
   // transparent team and real on-chain utility". They now score on their own merits.
@@ -73,13 +156,18 @@
     ['EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', CLASS_STABLECOIN], // USDC   (Circle)
     ['Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', CLASS_STABLECOIN], // USDT   (Tether)
     ['EjmyN6qEC1Tf1JxiG1ae7UTJhUxSwk1TCWNWqxWV4J6o', CLASS_STABLECOIN], // DAI    (MakerDAO bridged)
-    ['7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs', CLASS_STABLECOIN], // ETH    (Wormhole)
+    ['7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs', CLASS_BRIDGED],    // ETH    (Wormhole); not a stablecoin (backend OPS-410)
     ['A9mUU4qviSctJVPJdBJWkb28deg915LYJKrzQ19ji3FM', CLASS_STABLECOIN], // USDCet (Portal USDC)
+    // Same mints and issuers as the backend (OPS-402); resolved against Jupiter's verified list 2026-10-05.
+    ['2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo', CLASS_STABLECOIN], // PYUSD  (Paxos, PayPal USD)
+    ['HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr', CLASS_STABLECOIN], // EURC   (Circle)
+    ['2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH', CLASS_STABLECOIN], // USDG   (Paxos, Global Dollar)
+    ['USDSwr9ApdHk5bvJKMjzff41FfuX8bSxdKcR81vTwcA',  CLASS_STABLECOIN], // USDS   (Sky)
     ['4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R', CLASS_PROTOCOL],   // RAY    (Raydium)
     ['JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',  CLASS_PROTOCOL],   // JUP    (Jupiter)
     ['So11111111111111111111111111111111111111112',  CLASS_PROTOCOL],   // SOL    (Wrapped SOL)
     ['orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE', CLASS_PROTOCOL],   // ORCA   (Orca)
-    ['3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', CLASS_PROTOCOL],   // WBTC   (Wormhole)
+    ['3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh', CLASS_BRIDGED],    // WBTC   (Wormhole); was "Established protocol token" (backend OPS-410)
     ['mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',  CLASS_LST],        // mSOL   (Marinade)
   ]);
 
@@ -343,6 +431,83 @@
   }
 
   // ── On-chain: mint info + holder distribution ────────────────────────────────
+  // Which of a token's live authorities are a listed bridge's (backend _verifyIssuerAuthorities).
+  // The address must be the canonical PDA(seeds, program). Then the program must be executable.
+  // A definite "not executable" drops the entry, so the +35 stands; a read that cannot run keeps
+  // it as 'partial', so an RPC timeout never turns a bridge into an unlimited-supply flag.
+  async function _verifyIssuerAuthorities(authorities) {
+    const verified = new Map();
+    for (const a of new Set(authorities.filter(x => typeof x === 'string' && x))) {
+      const entry = KNOWN_AUTHORITIES.find(e => e.address === a);
+      if (!entry || !ns.b58Decode || !ns.b58Encode || !globalThis.crypto?.subtle) continue;
+      let derives = false;
+      try {
+        const enc = new TextEncoder();
+        derives = (await _findPda(entry.seeds.map(s => enc.encode(s)), entry.program)) === a;
+      } catch (_) { derives = false; }
+      if (!derives) {
+        console.warn(`[ZendIQ] issuer authority ${a} (${entry.issuer}) does not re-derive; treated as unlisted`);
+        continue;
+      }
+      let executable = null;
+      try {
+        const info = await Promise.race([
+          ns.rpcCall('getAccountInfo', [entry.program, { encoding: 'base64', dataSlice: { offset: 0, length: 0 } }]),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000)),
+        ]);
+        if (info !== undefined) executable = info?.value?.executable === true;
+      } catch (_) { executable = null; }
+      if (executable === false) continue;
+      verified.set(a, { address: a, program: entry.program, issuer: entry.issuer, verification: executable ? 'full' : 'partial' });
+    }
+    return verified;
+  }
+
+  // Separate protocol custody from real holders (backend _classifyHolders, OPS-269 / OPS-402).
+  // A row is excluded only when its owner is a burn address, this mint's pump.fun bonding-curve
+  // PDA, the Mayhem vault, a pool address from DexScreener or pump.fun, or a shared Raydium
+  // vault authority. Every rule except burn also requires the owner to be off-curve, so an
+  // address a data source calls a pool but which is really a wallet stays counted. Off-curve
+  // owners matching no rule stay counted. A row with no owner makes the whole table
+  // unresolved: concentration is then reported unavailable, never computed from raw accounts.
+  async function _resolveHolderCustody(mint, holderData, pools) {
+    if (!holderData?.holderPcts?.length) return holderData;
+    const _unresolved = (why) => ({ ...holderData, top1Pct: null, top5Pct: null, ownersUnresolved: why });
+    if (holderData.ownerLookupError || holderData.holderPcts.some(r => typeof r.owner !== 'string' || !r.owner)) {
+      return _unresolved(holderData.ownerLookupError ?? 'owner missing for one or more holder rows');
+    }
+    // Without these the curve cannot be recognised, and an unrecognised curve counts as a holder.
+    if (!ns.b58Decode || !ns.b58Encode || !globalThis.crypto?.subtle) return _unresolved('custody check unavailable');
+    let curve = null, mayhem = null;
+    try { curve = await _findPda([new TextEncoder().encode('bonding-curve'), ns.b58Decode(mint)], PUMP_PROGRAM); } catch (_) {}
+    if (!curve) return _unresolved('bonding-curve address could not be derived');
+    try { mayhem = await _mayhemVault(); } catch (_) {}
+    const poolVenue = new Map();
+    for (const p of pools) if (typeof p?.address === 'string' && !poolVenue.has(p.address)) poolVenue.set(p.address, p.venue || 'unknown');
+
+    const excluded = [];
+    for (const row of holderData.holderPcts) {
+      let reason = null;
+      if (BURN_OWNERS.has(row.owner)) reason = 'burn';
+      else if (!_isOffCurveB58(row.owner)) continue;
+      else if (row.owner === curve) reason = 'bonding_curve';
+      else if (row.owner === mayhem) reason = 'pumpfun_mayhem_vault';
+      else if (poolVenue.has(row.owner)) reason = `pool:${poolVenue.get(row.owner)}`;
+      else if (VENUE_AUTHORITIES.has(row.owner)) reason = `venue_authority:${VENUE_AUTHORITIES.get(row.owner)}`;
+      if (reason) excluded.push({ address: row.address, reason, pct: row.pct });
+    }
+    const out = new Set(excluded.map(e => e.address));
+    const holderPcts = holderData.holderPcts.filter(r => !out.has(r.address));
+    return {
+      ...holderData,
+      holderPcts,
+      top1Pct:      holderPcts[0]?.pct ?? null,
+      top5Pct:      holderPcts.slice(0, 5).reduce((s, h) => s + h.pct, 0),
+      totalHolders: holderPcts.length,
+      excludedAccounts: excluded,
+    };
+  }
+
   // Three calls run SEQUENTIALLY (not in parallel) so publicnode only gets one
   // request at a time — parallel calls triggered 429 rate-limits on the 2nd/3rd hit.
   async function _fetchTokenOnChain(mint) {
@@ -399,12 +564,35 @@
       const holderPcts = holders.map(h => ({
         address: h.address,
         pct:     (parseFloat(h.uiAmount ?? 0) / totalSupply) * 100,
+        owner:   null,
       }));
+      // Who owns each token account, in ONE batched read (OPS-269): the custody check needs it to
+      // tell the bonding curve and pool vaults from real holders. On failure no owner is guessed;
+      // the holder signal then reports itself unavailable rather than counting raw accounts.
+      let ownerLookupError = null;
+      if (holderPcts.length) {
+        try {
+          const mr = await ns.rpcCall('getMultipleAccounts', [
+            holderPcts.map(h => h.address),
+            { encoding: 'base64', dataSlice: { offset: 32, length: 32 } },
+          ]);
+          const vals = mr?.value;
+          if (!Array.isArray(vals) || vals.length !== holderPcts.length) throw new Error('malformed getMultipleAccounts response');
+          vals.forEach((v, i) => {
+            const b64 = Array.isArray(v?.data) ? v.data[0] : null;
+            const bytes = b64 ? ns.base64ToUint8Array(b64) : null;
+            holderPcts[i].owner = bytes?.length === 32 ? ns.b58Encode(bytes) : null;
+          });
+        } catch (e) {
+          ownerLookupError = /\b429\b|rate.?limit/i.test(e?.message ?? '') ? 'rate_limited' : (e?.message ?? 'owner lookup failed');
+        }
+      }
       holderData = {
         holderPcts,
         top1Pct:      holderPcts[0]?.pct ?? null,
         top5Pct:      holderPcts.slice(0, 5).reduce((s, h) => s + h.pct, 0),
         totalHolders: holders.length,
+        ownerLookupError,
       };
     }
 
@@ -429,17 +617,29 @@
       const _realQuote = parseFloat(data.real_quote_reserves ?? data.real_sol_reserves ?? 0)
         / 10 ** parseFloat(data.quote_decimals ?? 9);
       // Both sides of the pool, as the curve holds token value equal to the quote raised.
-      const _liqUsd = (_quotePx && _realQuote > 0) ? Math.round(_realQuote * _quotePx * 2) : null;
+      const _curveLiq = (_quotePx && _realQuote > 0) ? Math.round(_realQuote * _quotePx * 2) : null;
+      // A graduated coin trades in its migrated pool; the drained curve reserves understate it.
+      const _poolLiq  = parseFloat(data.canonical_pool_liquidity_usd ?? 0);
+      const _liqUsd   = _poolLiq > 0 ? Math.round(_poolLiq) : _curveLiq;
+      const _supply   = parseFloat(data.total_supply ?? 0) / 10 ** parseFloat(data.base_decimals ?? 6);
+      const _priceUsd = (_mcUsd > 0 && _supply > 0) ? _mcUsd / _supply : null;
       // Normalise to dexData shape so _computeScore works unchanged.
       return {
         symbol:        data.symbol          ?? null,
         name:          data.name            ?? null,
         priceChange24h: null,               // no OHLC in the coin endpoint
         volume24h:     null,
-        liquidityUsd:  _liqUsd,             // derived from bonding-curve reserves
+        liquidityUsd:  _liqUsd,
         marketCap:     data.usd_market_cap  ?? null,
+        priceUsd:      _priceUsd,
         pairCreatedAt: data.created_timestamp ?? null,  // already ms
         dexId:         'pump.fun',
+        // Custody candidates for the holder check (OPS-269). Venue fields only: `pool_address`
+        // is filled for un-graduated coins too.
+        pools: [
+          data.pump_swap_pool && { venue: 'pumpswap', address: data.pump_swap_pool },
+          data.raydium_pool && { venue: 'raydium', address: data.raydium_pool },
+        ].filter(Boolean),
         pairUrl:       `https://pump.fun/coin/${mint}`,
       };
     } catch (_) {}
@@ -485,9 +685,15 @@
         volume24h:       p.volume?.h24       ?? null,  // USD
         liquidityUsd:    p.liquidity?.usd    ?? null,  // USD
         marketCap:       p.marketCap         ?? p.fdv ?? null, // USD
+        // Consensus-checked above, so this is the crowd's price rather than the
+        // deepest pool's. Callers value held positions with it.
+        priceUsd:        parseFloat(p.priceUsd) > 0 ? parseFloat(p.priceUsd) : null,
         pairCreatedAt:   p.pairCreatedAt     ?? null,  // Unix ms
         dexId:           p.dexId             ?? null,
         pairUrl:         p.url               ?? null,
+        // Every pool trading this mint, as custody candidates for the holder check (OPS-269).
+        poolPairs:       solPairs.filter(x => typeof x.pairAddress === 'string')
+          .map(x => ({ venue: x.dexId ?? 'unknown', address: x.pairAddress })),
       };
     } catch (e) {
       // Swallowing this reported a throttled request as "no data" — a claim about the token.
@@ -603,6 +809,14 @@
     'freeze authority',
     'freezable',
   ];
+  // RugCheck's name for a Token-2022 permanent delegate. Dropped only where the asset class
+  // rules holder controls out (a regulated issuer's compliance control), as the backend does.
+  const RUGCHECK_TOKEN_CONTROLS = [
+    'permanent control',
+  ];
+  // RugCheck findings about the token's size, not evidence of intent (backend RUGCHECK_PRIOR).
+  // They score as before but never make the level CRITICAL on their own.
+  const RUGCHECK_PRIOR = ['low liquidity', 'low amount of lp providers', 'high market cap per holder'];
 
   // Keys we know a RugCheck report carries. Used as a positive shape check: testing for the
   // absence of `risks` alone cannot tell a clean token from a payload we no longer understand.
@@ -621,7 +835,7 @@
   // Number of unreadable signals past which the score stops being an assessment of the token.
   const UNKNOWN_SIGNAL_LIMIT = 3;
 
-  function _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleLaunchData, srcStatus = {}) {
+  function _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleLaunchData, srcStatus = {}, issuerAuthorities = null) {
     // Chain answered and there is no mint at this address, so there is nothing to weigh up.
     // Scored signals would all come back empty and cap out as uncertainty below the MEDIUM
     // edge, returning LOW for a mistyped or spoofed address.
@@ -649,6 +863,11 @@
     let _uncertainty    = 0;
     let _unknownSignals = 0;
     const _unsure = (pts, factor) => { _uncertainty += pts; _unknownSignals++; factors.push(factor); };
+    // Evidence: measured facts about THIS token (the backend's "red flags"), as opposed to base
+    // rates for its kind (launch venue, age, size, price action) or signals we could not read.
+    // Only evidence can make the level CRITICAL (backend OPS-402 a2b554c). Tags the factor just pushed.
+    let _evidence = 0;
+    const _ev = (pts) => { _evidence += pts; const f = factors[factors.length - 1]; if (f) f.evidence = true; };
 
     // A signal that does not apply is skipped outright rather than scored as a pass — a green
     // row for a check we chose not to run is the same lie the old allowlist told.
@@ -681,9 +900,19 @@
       _unsure(5, { name: 'Mint authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether devs can print more tokens. Neither confirmed nor ruled out; check manually before buying.' });
     } else if (mintAuth === null || mintAuth === '') {
       factors.push({ name: 'Supply fixed (mint burned)', severity: 'LOW', detail: 'Mint authority revoked — devs cannot print more tokens' });
+    } else if (issuerAuthorities?.get(mintAuth)) {
+      const ia = issuerAuthorities.get(mintAuth);
+      score += 5;
+      factors.push({
+        name: `${ia.issuer} controls mint authority`, severity: 'MEDIUM',
+        detail: `The mint authority is a program-derived address of the ${ia.issuer} program (${ia.program}): no key holder can mint, only the bridge or issuer program. Supply can still grow as the program mints wrapped tokens, so you are trusting that program.`
+          + (ia.verification === 'partial' ? ' The address and its derivation were verified; the on-chain check that the program is deployed could not run on this scan.' : ''),
+      });
+      _ev(5);
     } else {
       score += 35;
       factors.push({ name: 'Unlimited supply risk', severity: 'CRITICAL', detail: 'Mint authority is active — devs can create unlimited tokens at any time' });
+      _ev(35);
     }
 
     // ── 2. Freeze authority ────────────────────────────────────────────────────
@@ -702,21 +931,29 @@
       _unsure(5, { name: 'Freeze authority: data unavailable', severity: 'MEDIUM', detail: 'On-chain lookup failed — could not confirm whether the contract can freeze your tokens. Neither confirmed nor ruled out; check manually before buying.' });
     } else if (freezeAuth === null || freezeAuth === '') {
       factors.push({ name: 'No freeze authority', severity: 'LOW', detail: 'Freeze authority revoked — your tokens cannot be frozen by the contract' });
+    } else if (issuerAuthorities?.get(freezeAuth)) {
+      const ia = issuerAuthorities.get(freezeAuth);
+      score += 5;
+      factors.push({
+        name: `${ia.issuer} controls freeze authority`, severity: 'MEDIUM',
+        detail: `The freeze authority is a program-derived address of the ${ia.issuer} program (${ia.program}): no key holder can freeze accounts, only that program.`
+          + (ia.verification === 'partial' ? ' The address and its derivation were verified; the on-chain check that the program is deployed could not run on this scan.' : ''),
+      });
+      _ev(5);
     } else {
       score += 20;
       factors.push({ name: 'Freeze authority active', severity: 'HIGH', detail: 'Developer can freeze token transfers in your wallet at any time' });
+      _ev(20);
     }
 
     // ── 3. Top holder concentration ────────────────────────────────────────────
-    // Prefer RugCheck's topHolders (they filter out exchange wallets); fallback to on-chain
+    // Only the on-chain table, with custody removed (OPS-269). RugCheck's topHolders is not read:
+    // its table counts the bonding curve and pool vaults as holders, which is what made every
+    // fresh curve token CRITICAL. (/report/summary does not return it anyway.)
     let top1Pct  = null;
     let top5Pct  = null;
-    let _readHolderTable = false;
-    if (rugCheck?.topHolders?.length) {
-      const th = rugCheck.topHolders;
-      top1Pct = parseFloat(th[0]?.pct ?? th[0]?.amount ?? NaN);
-      top5Pct = th.slice(0, 5).reduce((s, h) => s + parseFloat(h.pct ?? h.amount ?? 0), 0);
-    } else if (holderData) {
+    const _ownersUnresolved = holderData?.ownersUnresolved ?? null;
+    if (holderData && !_ownersUnresolved) {
       top1Pct = holderData.top1Pct;
       top5Pct = holderData.top5Pct;
     }
@@ -724,17 +961,23 @@
     // A top holder of exactly 0% is not a real reading — treat it as missing, never as a pass.
     if (_na('concentration')) {
       // Top wallets are issuer treasury and exchange custody here, not insider supply.
+    } else if (_ownersUnresolved) {
+      // Charged nothing: the table was read, only who owns each account was not, and counting
+      // the raw accounts instead would put the curve back in as a holder.
+      factors.push({ name: 'Holder concentration: unavailable', severity: 'MEDIUM', detail: 'Could not read who owns the largest token accounts, so the bonding curve and pool vaults could not be told apart from real holders. Concentration was not scored. This is not an all-clear — check the holder list manually.' });
     } else if (top1Pct != null && isFinite(top1Pct) && top1Pct > 0) {
-      _readHolderTable = true;
       if (top1Pct > 50) {
         score += 30;
         factors.push({ name: `Whale risk: ${top1Pct.toFixed(1)}% in one wallet`, severity: 'CRITICAL', detail: 'A single wallet controls the majority of supply — a dump would decimate price' });
+        _ev(30);
       } else if (top1Pct > 30) {
         score += 20;
         factors.push({ name: `Large holder: ${top1Pct.toFixed(1)}% in one wallet`, severity: 'HIGH', detail: 'Single wallet holds a large portion of supply — high dump risk' });
+        _ev(20);
       } else if (top1Pct > 15) {
         score += 10;
         factors.push({ name: `Concentrated: ${top1Pct.toFixed(1)}% top holder`, severity: 'MEDIUM', detail: 'Notable concentration in a single wallet' });
+        _ev(10);
       } else {
         factors.push({ name: `Top holder: ${top1Pct.toFixed(1)}%`, severity: 'LOW', detail: 'Supply appears reasonably distributed' });
       }
@@ -744,15 +987,17 @@
       _unsure(10, { name: 'Top holder: data unavailable', severity: 'MEDIUM', detail: 'Holder distribution could not be read, so insider supply is neither confirmed nor ruled out. This is not an all-clear — check the holder list manually.' });
     }
 
-    if (_na('concentration')) {
-      // Same reason as top-1 above.
+    if (_na('concentration') || _ownersUnresolved) {
+      // Same reasons as top-1 above.
     } else if (top5Pct != null && isFinite(top5Pct) && top5Pct > 0) {
       if (top5Pct > 70) {
         score += 15;
         factors.push({ name: `Insider supply: top 5 hold ${top5Pct.toFixed(1)}%`, severity: 'HIGH', detail: 'Supply heavily concentrated among 5 wallets — coordinated selling is possible' });
+        _ev(15);
       } else if (top5Pct > 50) {
         score += 5;
         factors.push({ name: `Top 5 hold ${top5Pct.toFixed(1)}% of supply`, severity: 'MEDIUM', detail: 'Above-average supply concentration in top wallets' });
+        _ev(5);
       } else {
         factors.push({ name: `Top 5 hold ${top5Pct.toFixed(1)}% of supply`, severity: 'LOW', detail: 'Supply distribution looks reasonable' });
       }
@@ -765,7 +1010,8 @@
     // ── 4. RugCheck risk items ────────────────────────────────────────────────
     if (rugCheck?.rugged === true) {
       score = 100;
-      factors.unshift({ name: 'PREVIOUSLY RUGGED', severity: 'CRITICAL', detail: 'RugCheck has flagged this token as a confirmed rug pull' });
+      factors.unshift({ name: 'PREVIOUSLY RUGGED', severity: 'CRITICAL', evidence: true, detail: 'RugCheck has flagged this token as a confirmed rug pull' });
+      _evidence += 100;
     }
     if (Array.isArray(rugCheck?.risks)) {
       // RugCheck emits one entry per flagged holder, so a name like 'Single holder ownership'
@@ -782,12 +1028,14 @@
         // Mutable metadata is normal — not a rug signal on its own.
         if (RUGCHECK_NOISE.some(n => rNameLow.includes(n))) continue;
         // Same holder table, already scored above — charging it again ranked concentration
-        // above liquidity and price collapse.
-        if (_readHolderTable && RUGCHECK_CONCENTRATION.some(n => rNameLow.includes(n))) continue;
+        // above liquidity and price collapse. Never used as a fallback either: RugCheck's table
+        // counts the bonding curve and pool vaults as holders (OPS-269).
+        if (RUGCHECK_CONCENTRATION.some(n => rNameLow.includes(n))) continue;
         // Signals 1 and 2 own these facts whenever they resolved, and own the decision to
         // skip them when the asset class says they do not apply.
         if ((mintAuth !== undefined || _na('mintAuth')) && RUGCHECK_MINT_AUTH.some(n => rNameLow.includes(n))) continue;
         if ((freezeAuth !== undefined || _na('freezeAuth')) && RUGCHECK_FREEZE_AUTH.some(n => rNameLow.includes(n))) continue;
+        if (_na('tokenControls') && RUGCHECK_TOKEN_CONTROLS.some(n => rNameLow.includes(n))) continue;
         const g = grouped.get(rNameLow);
         if (!g) {
           grouped.set(rNameLow, { name: rName, level: lvl, detail: r.description ?? '', count: 1 });
@@ -803,12 +1051,15 @@
         // 'danger' items add HIGH signal; 'warn' adds MEDIUM noise
         const per = g.level === 'danger' ? 15 : 5;
         // Repeats still carry some breadth signal, so allow one escalation but no more.
-        score += Math.min(per * g.count, per * 2);
+        const pts = Math.min(per * g.count, per * 2);
+        score += pts;
         factors.push({
           name: g.count > 1 ? `${g.name} (${g.count}\u00D7)` : g.name,
           severity: g.level === 'danger' ? 'HIGH' : 'MEDIUM',
           detail: g.detail,
         });
+        // Market-size findings describe the token's kind, not intent; the rest is evidence.
+        if (!RUGCHECK_PRIOR.some(n => g.name.toLowerCase().includes(n))) _ev(pts);
       }
     } else if (rugCheck == null ? _failed('rugcheck') : !RUGCHECK_SHAPE.some(k => k in rugCheck)) {
       // Without this the entire rug-risk section simply vanishes and the card reads clean.
@@ -879,6 +1130,7 @@
           severity: 'MEDIUM',
           detail: 'Liquidity pool is unlocked — liquidity can be withdrawn at any time, crashing the price.',
         });
+        _ev(10);
       } else if (avgLpLockedPct < 30) {
         score += 5;
         factors.push({
@@ -886,6 +1138,7 @@
           severity: 'MEDIUM',
           detail: 'Most LP tokens are unlocked — partial liquidity withdrawal risk.',
         });
+        _ev(5);
       } else {
         factors.push({
           name: `LP locked (${avgLpLockedPct.toFixed(0)}%)`,
@@ -1134,15 +1387,19 @@
       } else if (tc >= 50) {
         score += 35;
         factors.push({ name: `Bot factory — ${n} deploys in 30d`, severity: 'CRITICAL', detail: `Creator wallet launched ${n} tokens in 30 days (~1 every 14h). Scripted bot factory — near-certain rug.` + partial });
+        _ev(35);
       } else if (tc >= 25) {
         score += 30;
         factors.push({ name: `Bot-created token — ${n} deploys in 30d`, severity: 'CRITICAL', detail: `Creator wallet launched ${n} tokens in 30 days — physically implausible without automation. Automated rug pipeline.` + partial });
+        _ev(30);
       } else if (tc >= 10) {
         score += 20;
         factors.push({ name: `Serial launcher — ${n} tokens in 30d`, severity: 'HIGH', detail: `Creator wallet has launched ${n} tokens in 30 days. Systematic serial launches are a strong rug-pull indicator.` + partial });
+        _ev(20);
       } else if (tc >= 3) {
         score += 8;
         factors.push({ name: `Repeat creator — ${n} tokens in 30d`, severity: 'MEDIUM', detail: `Creator has launched ${n} tokens in the last 30 days. May be an experimenter or early-stage bad actor.` + partial });
+        _ev(8);
       } else if (!complete) {
         factors.push({
           name: 'Creator history: partial scan',
@@ -1198,6 +1455,7 @@
           severity: 'CRITICAL',
           detail: `${count} ${unit === 'wallets' ? 'wallets' : 'transactions'} executed in the token\'s creation block \u2014 consistent with Jito bundle manipulation. Insiders pre-load supply across multiple wallets for a coordinated dump on retail buyers.`,
         });
+        _ev(40);
       } else if (bundleLevel === 'medium') {
         score += 20;
         factors.push({
@@ -1205,6 +1463,7 @@
           severity: 'HIGH',
           detail: `${count} ${unit === 'wallets' ? 'wallets' : 'transactions'} in the creation block. Consistent with a small Jito bundle \u2014 check top holder concentration for confirmation.`,
         });
+        _ev(20);
       } else {
         // bundleLevel === 'low': 1\u20132 txs/wallets \u2014 normal launch pattern
         factors.push({
@@ -1240,18 +1499,26 @@
     const unknown = _unknownSignals >= UNKNOWN_SIGNAL_LIMIT;
 
     const finalScore = Math.max(0, Math.min(100, score));
-    const level      = finalScore >= 75 ? 'CRITICAL'
+    // CRITICAL means evidence the token is rigged against you. Base rates and unread signals
+    // alone cannot say that, so without evidence the level stops at HIGH. The score is
+    // unchanged (backend OPS-402 a2b554c).
+    const level      = finalScore >= 75 && _evidence > 0 ? 'CRITICAL'
       : finalScore >= 50 ? 'HIGH'
       : finalScore >= 25 ? 'MEDIUM'
       : 'LOW';
+    // A held level must not show a CRITICAL-range number: "100 HIGH" reads as a contradiction.
+    // `score` is what every card shows; `scoreRaw` is the unclamped sum, for telemetry and for
+    // the slippage paths that were tuned on it.
+    const displayScore = level === 'HIGH' && finalScore >= 75 ? 74 : finalScore;
 
     const dataSource = [rugCheck && 'rugcheck', (mintInfo || holderData) && 'onchain', dexData && 'dex', geckoData && 'gecko']
       .filter(Boolean).join('+') || 'unknown';
     const symbol = rugCheck?.tokenMeta?.symbol ?? dexData?.symbol ?? null;
 
     return {
-      mint, symbol, score: finalScore, level, factors, loaded: true, error: null, dataSource,
+      mint, symbol, score: displayScore, scoreRaw: finalScore, level, factors, loaded: true, error: null, dataSource,
       sources: srcStatus, unknown, unknownSignals: _unknownSignals,
+      priceUsd: dexData?.priceUsd ?? null,
       deployer: deployerData?.address ?? null, deployerTokenCount: deployerData?.tokenCount ?? null,
     };
   }
@@ -1370,15 +1637,26 @@
         _isMeme ? _t('pump', _fetchPumpFunCoin(mint)) : _skip('pump'),
       ]);
       const mintInfo   = _onchain?.mintInfo   ?? null;
-      const holderData = _onchain?.holderData ?? null;
+      // Custody (curve, pools, burn) removed before anything scores concentration (OPS-269).
+      const holderData = await _resolveHolderCustody(mint, _onchain?.holderData ?? null, [
+        ...(dexRaw?.poolPairs ?? []),
+        ...(pumpCoin?.pools ?? []),
+      ]).catch(() => _onchain?.holderData
+        ? { ..._onchain.holderData, top1Pct: null, top5Pct: null, ownersUnresolved: 'custody check failed' }
+        : null);
       // Overwrites the 'ok' _t() set from a non-null return: the call succeeded, the account
       // does not exist. Reporting that leg as healthy is what let a missing mint read LOW.
       if (_onchain?.accountMissing) _srcStatus.onchain = 'missing';
       // Use real DexScreener data if available, fall back to pump.fun coin API
       const dexData = dexRaw ?? pumpCoin;
+      // Only a listed bridge authority costs anything here (SHA-256 + one RPC read).
+      const issuerAuthorities = await _verifyIssuerAuthorities([
+        rugCheck?.token?.mintAuthority, rugCheck?.token?.freezeAuthority,
+        mintInfo?.mintAuthority, mintInfo?.freezeAuthority,
+      ]).catch(() => new Map());
 
       // Phase 1: publish result immediately — bundle + deployer still pending.
-      const _partial = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, null, null, null, _srcStatus);
+      const _partial = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, null, null, null, _srcStatus, issuerAuthorities);
       _partial.factors.push({ name: 'Bundle check — scanning on-chain…', severity: 'LOW', _pending: true, detail: 'Checking whether multiple wallets bought in the token\'s creation block (Jito bundle rug pattern).' });
       _partial.factors.push({ name: 'Creator history — scanning on-chain…', severity: 'LOW', _pending: true, detail: 'Checking how many tokens this wallet has deployed and how many went to zero.' });
       _partial._deployerPending = true;
@@ -1441,7 +1719,7 @@
 
       // Publish bundle result immediately — don't wait for the slower deployer lookup.
       // Replaces the "Bundle check — scanning…" spinner row with the real verdict.
-      const _bundlePartial = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, null, null, bundleFinal, _srcStatus);
+      const _bundlePartial = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, null, null, bundleFinal, _srcStatus, issuerAuthorities);
       _bundlePartial.factors.push({ name: 'Creator history — scanning on-chain…', severity: 'LOW', _pending: true, detail: 'Checking how many tokens this wallet has deployed and how many went to zero.' });
       _bundlePartial._deployerPending = true;
       if (_stillActive()) {
@@ -1469,7 +1747,7 @@
         }
       } catch (_) { deployerFailed = true; }
 
-      const result = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleFinal, _srcStatus);
+      const result = _computeScore(mintInfo, holderData, rugCheck, dexData, geckoData, mint, deployerData, rugRateData, bundleFinal, _srcStatus, issuerAuthorities);
       // Deployer address itself could not be resolved, so _computeScore pushed no creator row.
       // Add an explicit "unavailable" row so the pending spinner is replaced (not left hanging).
       if (deployerFailed && !deployerData) {

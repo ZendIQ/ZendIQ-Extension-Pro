@@ -64,12 +64,32 @@
   // Venue fee as a share of the trade. Banded harder than slippage because it is a
   // certainty, not a tolerance — the whole amount is paid on every fill, so there is
   // no equivalent of SLIPPAGE_FILL_RATE to discount it by.
+  // The top band is not hypothetical: Axiom's bribe is a flat SOL charge, so a small
+  // exit routinely pays more to submit than it returns.
+  // Labels ending in 'the' take the denominator's noun; the rest carry it in the suffix.
   const VENUE_FEE_BANDS = [
-    [50, 45, 'CRITICAL', 'Venue fee exceeds half the trade'],
+    [100, 60, 'CRITICAL', 'Venue fee exceeds the whole'],
+    [50, 45, 'CRITICAL', 'Venue fee exceeds half the'],
     [20, 28, 'HIGH',     'High venue fee'],
     [10, 14, 'MEDIUM',   'Elevated venue fee'],
     [0,   4, 'LOW',      'Venue fee'],
   ];
+
+  // What the venue-fee percentage is a share of. A sell's denominator is its
+  // estimated proceeds, or the whole holding when the exit's share is unreadable.
+  function _venueFeeNoun(basis) {
+    return basis === 'proceeds' ? 'proceeds'
+      : basis === 'position' ? 'position value'
+      : 'trade';
+  }
+
+  // Band on the figure the user is shown, not the raw one. Banding on the raw value
+  // put "exceeds half" beside a number that displayed as 100%, and "Venue fee" (LOW)
+  // beside one that displayed as 10% — the MEDIUM threshold.
+  function _venueFeePctDisplay(pct) {
+    const r = pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct);
+    return { value: r, text: r.toFixed(r < 10 ? 1 : 0) + '%' };
+  }
 
   const DEMOTE_ONE_BAND = { CRITICAL: 'HIGH', HIGH: 'MEDIUM', MEDIUM: 'LOW', LOW: 'LOW' };
   async function calculateRisk(txInfo, context) {
@@ -137,11 +157,15 @@
     // a smaller number, it is a different claim.
     const venueFeePct = swapInfo?.venueFeePct;
     const venueFeeUsd = swapInfo?.venueFeeUsd;
+    const _feeNoun    = _venueFeeNoun(swapInfo?.venueFeeBasis);
     if (venueFeePct != null && !isNaN(venueFeePct)) {
-      const [, vAdd, vSev, vLabel] = VENUE_FEE_BANDS.find(b => venueFeePct >= b[0]) ?? VENUE_FEE_BANDS[VENUE_FEE_BANDS.length - 1];
+      const _d = _venueFeePctDisplay(venueFeePct);
+      const [, vAdd, vSev, vLabel] = VENUE_FEE_BANDS.find(b => _d.value >= b[0]) ?? VENUE_FEE_BANDS[VENUE_FEE_BANDS.length - 1];
       score += vAdd;
       factors.push({
-        name: `${vLabel} (${venueFeePct.toFixed(venueFeePct < 10 ? 1 : 0)}% of trade)`,
+        name: vLabel.endsWith('the')
+          ? `${vLabel} ${_feeNoun} (${_d.text})`
+          : `${vLabel} (${_d.text} of ${_feeNoun})`,
         severity: vSev,
         lossContrib: swapInfo?.venueFeeUsd ?? 0,
       });
@@ -156,11 +180,11 @@
     } else if (swapInfo?.venueFeeCapPct != null) {
       // Only a ceiling is knowable. Scored at half weight for the same reason slippage
       // is discounted: a bound the venue may not reach is weaker evidence than a cost.
-      const _cp = swapInfo.venueFeeCapPct;
-      const [, cAdd, cSev] = VENUE_FEE_BANDS.find(b => _cp >= b[0]) ?? VENUE_FEE_BANDS[VENUE_FEE_BANDS.length - 1];
+      const _cp = _venueFeePctDisplay(swapInfo.venueFeeCapPct);
+      const [, cAdd, cSev] = VENUE_FEE_BANDS.find(b => _cp.value >= b[0]) ?? VENUE_FEE_BANDS[VENUE_FEE_BANDS.length - 1];
       score += Math.round(cAdd / 2);
       factors.push({
-        name: `Auto Fee ceiling (up to ${_cp.toFixed(_cp < 10 ? 1 : 0)}% of trade)`,
+        name: `Auto Fee ceiling (up to ${_cp.text} of ${_feeNoun})`,
         severity: DEMOTE_ONE_BAND[cSev] ?? cSev,   // the pill must match the halved weight
         lossContrib: 0,
       });

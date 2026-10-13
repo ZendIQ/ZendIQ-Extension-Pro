@@ -7,6 +7,12 @@
 // Analytics backend — Pro extension telemetry (anonymous aggregate events only)
 const PRO_BACKEND_URL = 'https://zendiq-backend.onrender.com';
 
+// Axiom ships only in builds whose manifest injects into axiom.trade (unpacked dev builds); the
+// store build strips it (scripts/build-pro-store.js). Broadcasts skip axiom.trade tabs otherwise.
+const AXIOM_ENABLED = (chrome.runtime.getManifest().content_scripts ?? [])
+  .some(cs => (cs.matches ?? []).some(m => m.includes('axiom.trade')));
+const _AXIOM_TAB_URLS = AXIOM_ENABLED ? ['*://axiom.trade/*', '*://*.axiom.trade/*'] : [];
+
 // ── Anonymous install identifier ────────────────────────────────────────────
 // UUID generated once per browser profile; injected into every analytics POST.
 const _PRO_IID_KEY  = 'sendiq_pro_install_id';
@@ -226,7 +232,7 @@ async function _fetchAndCacheSolPrice() {
     const _DEX_URLS = [
       '*://*.jup.ag/*', '*://*.raydium.io/*', '*://raydium.io/*',
       '*://pump.fun/*', '*://*.pump.fun/*',
-      '*://axiom.trade/*', '*://*.axiom.trade/*',
+      ..._AXIOM_TAB_URLS,
     ];
     _DEX_URLS.forEach(pattern => {
       chrome.tabs.query({ url: pattern }, (tabs) => {
@@ -746,7 +752,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           chrome.storage.local.set({ sendiq_swap_history: hist }, () => {
             // After persisting, forward update to all supported DEX tabs so their widget can refresh
             const _send2 = (id, m) => chrome.tabs.sendMessage(id, m, () => { void chrome.runtime.lastError; });
-            const _dexUrls = ['*://*.jup.ag/*', '*://*.raydium.io/*', '*://raydium.io/*', '*://*.pump.fun/*', '*://pump.fun/*', '*://*.axiom.trade/*', '*://axiom.trade/*'];
+            const _dexUrls = ['*://*.jup.ag/*', '*://*.raydium.io/*', '*://raydium.io/*', '*://*.pump.fun/*', '*://pump.fun/*', ..._AXIOM_TAB_URLS];
             _dexUrls.forEach(pattern => {
               chrome.tabs.query({ url: pattern }, (tabs) => {
                 if (tabs && tabs.length) tabs.forEach(t => _send2(t.id, msg));

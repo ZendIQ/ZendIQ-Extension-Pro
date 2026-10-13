@@ -57,6 +57,21 @@
     initPage() {
       const _readUrlParams = () => {
         try {
+          // OPS-421: leaving the swap route ends the trade being set up there. Its pair and amount
+          // must not follow the user to Reclaim Rent, liquidity or any other page.
+          if (!/^\/swap(\/|$)/i.test(window.location.pathname)) {
+            const _busy = !!ns.pendingDecisionResolve
+              || ['fetching', 'signing', 'signing-original', 'sending'].includes(ns.widgetSwapStatus);
+            if (!_busy && (window.__zendiq_last_order_params || ns.widgetCapturedTrade)) {
+              window.__zendiq_last_order_params = null;
+              ns.widgetCapturedTrade = null;
+              ns.widgetLastOrder     = null;
+              ns._rdmMinAmountOut    = null;
+              ns._rdmMinAmountOutKey = null;
+              ns._rdmSwapAttempted   = false;
+            }
+            return;
+          }
           const p    = new URLSearchParams(window.location.search);
           const inM  = p.get('inputMint');
           const outM = p.get('outputMint');

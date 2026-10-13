@@ -18,7 +18,14 @@
   // Every venue's Activity card leads with this badge. Kept in one place because
   // each venue branch builds its own markup, and hand-copying it let Axiom drift.
   // Mirrored in popup-activity.js — the popup is a separate context with no imports.
-  function _optBadgeHtml(optimized) {
+  function _optBadgeHtml(optimized, atTarget, applied) {
+    // ZendIQ wrote nothing on an at-target trade, so no credit is claimed — but it ran
+    // at the values we would have written, which "Not optimized" reads as the opposite
+    // of. A claim Axiom's record contradicts falls through to the amber badge.
+    if (!optimized && atTarget && applied !== 'not-applied') {
+      const ok = applied === 'confirmed';
+      return `<span style="font-size:${_FS_BASE};font-weight:700;color:${ok ? '#14F195' : '#FFB547'}">${ok ? '\u2713' : '\u26a0'} Already at target${ok ? '' : ' \u2014 unverified'}</span>`;
+    }
     return optimized
       ? `<span style="font-size:${_FS_BASE};font-weight:700;color:#E8E8F0">Swapped <span style="font-size:9px;font-weight:700;background:linear-gradient(135deg,rgba(153,69,255,0.15),rgba(20,241,149,0.06));border:1px solid rgba(153,69,255,0.3);color:#9945FF;border-radius:10px;padding:1px 6px;vertical-align:middle">ZendIQ Optimized</span></span>`
       : `<span style="font-size:${_FS_BASE};font-weight:700;color:#FFB547">\u26a0 Not optimized</span>`;
@@ -877,7 +884,7 @@
                 const _axMevOn  = _axPres.mevProtection === true;
                 const _axMevStr = _axMevSecure ? 'MEV Secure' : _axMevOn ? 'MEV On' : 'MEV Off';
                 const _axMevClr = (_axMevSecure || _axMevOn) ? '#14F195' : '#FFB547';
-                const _axOptBadge = _optBadgeHtml(h.optimized);
+                const _axOptBadge = _optBadgeHtml(h.optimized, h.axiomAtTarget, h.axiomOptimizeApplied);
                 const _axMsNum  = _axPres.timeTakenMs != null ? `${_axPres.timeTakenMs}ms` : '';
                 const _axOutFmt = h.amountOut != null ? '+ ' + _fmtW(h.amountOut, h.tokenOut || (h.outputMint ? h.outputMint.slice(0, 8) + '\u2026' : '?')) : null;
                 const _axInFmt  = h.amountIn  != null ? '\u2212 ' + _fmtW(h.amountIn, h.tokenIn || 'SOL') : null;
@@ -3360,6 +3367,17 @@ ${!ns.axiomVerifyOnly ? '' : `
                 : _aoWApplied === 'not-applied'
                   ? 'Axiom executed this trade on the preset shown above, not the one ZendIQ applied. Your settings were restored either way.'
                   : 'ZendIQ could not confirm from Axiom\u2019s record whether this change reached the trade.'}</div>`;
+            } else if (h.axiomAtTarget) {
+              const _atWOk  = h.axiomOptimizeApplied === 'confirmed';
+              const _atWNo  = h.axiomOptimizeApplied === 'not-applied';
+              const _atWClr = _atWOk ? '#14F195' : '#FFB547';
+              t += divider;
+              t += `<div style="font-size:12px;font-weight:700;color:${_atWClr};margin-bottom:6px">${_atWOk ? '\ud83d\udee1 Already at target' : _atWNo ? '\u26a0 Preset claim not met' : '\u26a0 Already at target \u2014 unverified'}</div>`;
+              t += `<div style="margin-top:4px;font-size:10px;color:#9B9BAD">${_atWOk
+                ? 'Your preset already met ZendIQ\u2019s target, so nothing was changed and nothing needed restoring. Axiom\u2019s record confirms it executed at those values.'
+                : _atWNo
+                  ? 'Your preset met ZendIQ\u2019s target, but Axiom executed this trade at the values shown above instead.'
+                  : 'Your preset already met ZendIQ\u2019s target, so nothing was changed. Axiom\u2019s record did not carry enough detail to confirm what it executed at.'}</div>`;
             }
             t += `<div style="margin-top:6px;font-size:10px;color:#9B9BAD">ZendIQ monitors Axiom trades post-settlement and can pre-apply a safer preset. It cannot route or re-execute Axiom trades.</div>`;
           } else if (h.optimized) {

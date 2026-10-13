@@ -266,6 +266,142 @@
     }
   }
 
+  // ── Is this transaction a swap? (OPS-421) ─────────────────────────────────
+  // The intercept used to treat every sign request as a trade, so Raydium's Reclaim Rent
+  // (token-account closes) opened Review Optimisation with the previous page's pair. The
+  // decision is now read from the transaction's own instructions. Raw bytes only: raydium.io
+  // bundles web3.js privately, so a deserialiser on window cannot be relied on.
+  //
+  // Program IDs verified 2026-10-13 as executable on chain and against Raydium's program list
+  // (docs.raydium.io/reference/program-addresses). Raydium's programs also add/remove liquidity,
+  // open positions and create launches, so only their swap instructions count: AMM v4 by its
+  // 1-byte tag (raydium-amm instruction.rs), the Anchor programs by discriminator (raydium-idl).
+  const _SWAP_PROGRAMS = new Map([
+    ['675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', { tags: [9, 11, 16, 17] }],             // Raydium AMM v4: SwapBaseIn/Out (+V2)
+    ['CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C', { disc: ['8fbe5adac41e33de', '37d96256a34ab4ad'] }], // CPMM swap_base_input/output
+    ['CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK', { disc: ['f8c69e91e17587c8', '2b04ed0b1ac91e62', '457d73daf5baf2c4'] }], // CLMM swap, swap_v2, swap_router_base_in
+    ['LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj', { disc: ['faea0d7bd59c13ec', '18d3742869039938', '9527de9bd37c981a', '5fc8472208090ba6'] }], // LaunchLab buy/sell exact in/out
+    ['routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS', { any: true }],   // Raydium AMM routing (multi-hop swaps)
+    ['JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', { any: true }],   // Jupiter v6 aggregator (Ultra "metis")
+    ['61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH', { any: true }],  // Jupiter order engine (Ultra "jupiterz" RFQ)
+    ['DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH', { any: true }],  // DFlow aggregator (an Ultra router)
+    // OKX DEX router (an Ultra router): web3.okx.com/onchainos/dev-docs/trade/dex-smart-contract,
+    // and the top-level program of live router=okx Ultra fills (OPS-336).
+    ['proVF4pMXVaYqmy4NjniPh4pqKNfMmsihgd4wdkCX3u', { any: true }],
+    ['6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', { any: true }],   // pump.fun bonding curve
+    ['pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA', { any: true }],   // PumpSwap AMM
+  ]);
+
+  const _B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  function _b58DecodeAny(str) {
+    let n = 0n;
+    for (const c of str) {
+      const i = _B58.indexOf(c);
+      if (i < 0) return null;
+      n = n * 58n + BigInt(i);
+    }
+    const bytes = [];
+    while (n > 0n) { bytes.unshift(Number(n & 0xffn)); n >>= 8n; }
+    for (let i = 0; i < str.length && str[i] === '1'; i++) bytes.unshift(0);
+    return new Uint8Array(bytes);
+  }
+
+  function _compactU16(b, o) {
+    let v = 0;
+    for (let i = 0; i < 3; i++) {
+      const x = b[o + i];
+      if (x === undefined) throw new Error('truncated');
+      v |= (x & 0x7f) << (7 * i);
+      if (!(x & 0x80)) return [v, o + i + 1];
+    }
+    throw new Error('bad compact-u16');
+  }
+
+  // Top-level instructions of a serialised transaction (legacy or v0). Program IDs are always
+  // static keys, so address lookup tables never need resolving here.
+  function _rawInstructions(bytes) {
+    let n, o;
+    [n, o] = _compactU16(bytes, 0);
+    o += 64 * n;
+    if (bytes[o] & 0x80) o += 1;          // versioned message prefix
+    o += 3;                               // message header
+    [n, o] = _compactU16(bytes, o);
+    const keys = [];
+    for (let i = 0; i < n; i++, o += 32) keys.push(bytes.subarray(o, o + 32));
+    o += 32;                              // recent blockhash
+    if (o > bytes.length) throw new Error('truncated');
+    [n, o] = _compactU16(bytes, o);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const p = bytes[o++];
+      let len;
+      [len, o] = _compactU16(bytes, o); o += len;
+      [len, o] = _compactU16(bytes, o);
+      const data = bytes.subarray(o, o + len); o += len;
+      if (p === undefined || p >= keys.length || o > bytes.length) throw new Error('truncated');
+      out.push({ program: ns.b58Encode(keys[p]), data });
+    }
+    return out;
+  }
+
+  // Every serialised transaction in a wallet / RPC argument: Uint8Array, base64 / base58
+  // string (per the RPC `encoding`), Wallet Standard inputs (single or array), or a web3.js
+  // transaction object. Null when an item cannot be turned into bytes.
+  function _txBytesList(input, encoding) {
+    if (input == null) return null;
+    if (Array.isArray(input)) {
+      const all = [];
+      for (const x of input) { const l = _txBytesList(x, encoding); if (!l) return null; all.push(...l); }
+      return all.length ? all : null;
+    }
+    if (input instanceof Uint8Array) return [input];
+    if (ArrayBuffer.isView(input)) return [new Uint8Array(input.buffer, input.byteOffset, input.byteLength)];
+    if (typeof input === 'string') {
+      if (encoding === 'base64') {
+        try { return [Uint8Array.from(atob(input), c => c.charCodeAt(0))]; } catch (_) { return null; }
+      }
+      const b = _b58DecodeAny(input);
+      return b ? [b] : null;
+    }
+    if (typeof input === 'object') {
+      if (input.transaction != null) return _txBytesList(input.transaction, encoding);
+      if (typeof input.serialize === 'function') {
+        try {
+          const s = input.serialize({ requireAllSignatures: false, verifySignatures: false });
+          return _txBytesList(s, encoding);
+        } catch (_) { return null; }
+      }
+    }
+    return null;
+  }
+
+  const _hex8 = (d) => Array.from(d.subarray(0, 8), x => x.toString(16).padStart(2, '0')).join('');
+
+  // 'swap' when any top-level instruction is a recognised swap, 'non-swap' when none is,
+  // 'unknown' when the transaction could not be read. Callers intercept only on 'swap'.
+  function classifyTxForIntercept(input, encoding) {
+    const list = _txBytesList(input, encoding);
+    if (!list) return { kind: 'unknown', programs: [] };
+    const programs = new Set();
+    try {
+      for (const bytes of list) {
+        for (const ix of _rawInstructions(bytes)) {
+          programs.add(ix.program);
+          const rule = _SWAP_PROGRAMS.get(ix.program);
+          if (!rule) continue;
+          if (rule.any
+              || (rule.tags && ix.data.length && rule.tags.includes(ix.data[0]))
+              || (rule.disc && ix.data.length >= 8 && rule.disc.includes(_hex8(ix.data)))) {
+            return { kind: 'swap', programs: [...programs] };
+          }
+        }
+      }
+    } catch (_) {
+      return { kind: 'unknown', programs: [...programs] };
+    }
+    return { kind: 'non-swap', programs: [...programs] };
+  }
+
   // ── Export ───────────────────────────────────────────────────────────────
   Object.assign(ns, {
     BinaryParser,
@@ -273,5 +409,6 @@
     RaydiumDecoder,
     parseSwapInstruction,
     extractTxInfo,
+    classifyTxForIntercept,
   });
 })();

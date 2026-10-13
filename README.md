@@ -1,6 +1,6 @@
 # ZendIQ Pro
 
-> **Solana swap optimiser with MEV protection.** Intercepts swaps on Jupiter, Raydium, Pump.fun, and Axiom, scores risk in real time, and rebuilds your route through Jupiter Ultra to get you more tokens — before you sign.
+> **Solana swap optimiser with MEV protection.** Intercepts swaps on Jupiter, Raydium, and Pump.fun, scores risk in real time, and rebuilds your route through Jupiter Ultra to get you more tokens — before you sign.
 >
 > 🌐 [zendiq.ai](https://zendiq.ai)
 >
@@ -20,7 +20,7 @@ ZendIQ Pro runs alongside your favourite Solana DEX and springs into action the 
 - A **savings preview** before you sign showing estimated routing gain and fee breakdown
 - **Auto-Profit mode** — ZendIQ signs automatically when the net gain is positive; passes Jupiter's route through when it is not
 
-It works on **Jupiter** (`jup.ag`), **Raydium** (`raydium.io`), **Pump.fun** (`pump.fun`), and **Axiom** (`axiom.trade`) without requiring any account, email, or backend service.
+It works on **Jupiter** (`jup.ag`), **Raydium** (`raydium.io`), and **Pump.fun** (`pump.fun`) without requiring any account, email, or backend service. Axiom (`axiom.trade`) support is in development and not yet available.
 
 ---
 

@@ -485,19 +485,35 @@
       // Was this the trade we just optimized? Capture before restore clears the flag.
       const _wasOptimized = ns.axiomOptimizing === true;
       const _optDetail    = _wasOptimized ? (ns.axiomLastOptimization ?? null) : null;
+      // A preset already at target makes the same green claim with no write behind it,
+      // and was the one branch nothing ever checked — the weaker one, since without a
+      // write we have less reason to believe the preset we read is the one Axiom used.
+      // Claimed once: a quick-buy that never opened the panel leaves the previous
+      // trade's record standing, and this badge is permanent, unlike the strip.
+      const _tpRec     = ns.axiomTradeProtection;
+      const _atTarget  = !_optDetail && _tpRec?.state === 'protected'
+                      && _tpRec.alreadySafe === true && _tpRec.claimed !== true;
+      if (_tpRec) _tpRec.claimed = true;
+      const _claimSlip = _optDetail ? _optDetail.slipTo
+        : (_atTarget && !isNaN(parseFloat(_tpRec.slippage))) ? parseFloat(_tpRec.slippage)
+        : null;
       // log-tx-v3 is Axiom's record of what it executed, so it is the only sound
       // basis for the badge — the flag above proves only that we asked. A missing
       // enhancedMev counts as off, so an unreadable field cannot read as applied.
-      const _optApplied = !_optDetail ? null
+      const _optApplied = _claimSlip == null ? null
         : ev.slippage == null ? 'unverified'
-        : (Math.abs(ev.slippage - _optDetail.slipTo) < 0.51 && ev.enhancedMev === true) ? 'confirmed'
+        : (Math.abs(ev.slippage - _claimSlip) < 0.51 && ev.enhancedMev === true) ? 'confirmed'
         : 'not-applied';
       if (_optApplied === 'not-applied') {
-        console.warn('[ZQ:AXIOM] optimization did not reach the trade \u2014 executed at ' + ev.slippage
+        console.warn('[ZQ:AXIOM] ' + (_optDetail ? 'optimization did not reach the trade'
+            : 'trade executed away from the preset we read')
+          + ' \u2014 executed at ' + ev.slippage
           + '% slippage, MEV ' + (ev.enhancedMev ? 'Secure' : 'off')
-          + '; intended ' + _optDetail.slipTo + '% slippage, MEV Secure');
+          + '; claimed ' + _claimSlip + '% slippage, MEV Secure');
       }
-      const _optConfirmed = _optApplied === 'confirmed';
+      // Confirming an at-target trade is not an optimization: ZendIQ wrote nothing, so
+      // taking the badge would claim credit for the user's own preset.
+      const _optConfirmed = _optApplied === 'confirmed' && _optDetail != null;
       // The strip claimed a state before signing on the strength of the echo. This is
       // Axiom's record of what it actually ran, so the claim is corrected against it.
       if (ns.axiomTradeProtection) {
@@ -554,6 +570,9 @@
         // Whether Axiom's executed preset matched what we applied. Rendered, because
         // an optimization that was asked for and did not land is a fact worth stating.
         axiomOptimizeApplied: _optApplied,
+        // Separates "nothing needed changing" from "unprotected" — both were written as
+        // optimized: false, so a trade already at safe values was badged Not optimized.
+        axiomAtTarget: _atTarget,
       };
       try {
         window.postMessage({ sr_bridge_to_ext: true, msg: { type: 'HISTORY_UPDATE', payload: _entry } }, '*');
@@ -584,7 +603,7 @@
         fees_usd:          (_axFeesSol > 0 && _axSolUsd != null) ? Math.min(_axFeesSol * _axSolUsd, 5000) : null,
         slot_latency_ms:   ev.timeTakenMs != null ? Math.min(300000, Math.round(ev.timeTakenMs)) : null,
         bot_risk_score:    ns.axiomMevRisk?.riskScore ?? null,
-        token_risk_score:  _risk?.score ?? null,
+        token_risk_score:  _risk?.scoreRaw ?? _risk?.score ?? null,
         tx_classification: _axLvl2Class(_risk?.level),
         auto_sign:         false,
         // Unvalidated extras land in trades.data_json — Axiom's sender attribution.
@@ -824,9 +843,12 @@
   }
 
   // Slippage ZendIQ would put this token at, from the worst of bot-attack and token risk.
+  // Token risk counts as CRITICAL at score >= 75 even when the evidence gate holds the level at
+  // HIGH (OPS-407): the target was tuned on the score, and the gate is about labelling, not this.
   function _slipTargetNow() {
     const botLvl = ns.axiomMevRisk?.riskLevel ?? null;
-    const tkLvl  = (ns.tokenScoreResult?.loaded) ? (ns.tokenScoreResult.level ?? null) : null;
+    const ts     = ns.tokenScoreResult?.loaded ? ns.tokenScoreResult : null;
+    const tkLvl  = ts ? ((ts.scoreRaw ?? ts.score ?? 0) >= 75 ? 'CRITICAL' : (ts.level ?? null)) : null;
     const worst  = _worstLevel(botLvl, tkLvl);
     return worst === 'CRITICAL' ? 10 : worst === 'LOW' ? 20 : 15;
   }
@@ -907,6 +929,85 @@
     return { prio: prio, bribe: bribe, tot: tot };
   }
 
+  // ── Sell size estimate ────────────────────────────────────────────────────
+  // A buy's leg is a SOL amount sitting on the button; a sell's is a token
+  // quantity, so the fee-to-trade ratio had no denominator on exits — which is
+  // exactly where it matters. The bribe is a flat SOL charge, so a small exit
+  // can cost more than it returns (observed 176–235% of proceeds).
+  //
+  // Valued from the wallet's own balance × the token price rather than from
+  // Axiom's DOM: both inputs travel with the trade, and neither depends on a
+  // settings panel happening to be open the way the Auto Fee read does.
+  let _axPosSol   = null;      // SOL value of the entire holding
+  let _axPosMint  = null;      // the mint _axPosSol describes
+  let _axPosState = 'idle';    // idle | pending | ok | unavailable
+
+  // Mirrored onto ns so the reason an exit has no fee ratio is inspectable. The
+  // card can only degrade to "share unknown"; without this, a dead RPC and a
+  // priceless token look identical from the outside.
+  function _setPos(state, why) {
+    _axPosState = state;
+    if (ns) ns.axiomPositionValue = { mint: _axPosMint, sol: _axPosSol, state: state, why: why ?? null };
+  }
+
+  async function _refreshPositionValue(mint) {
+    const owner = ns?.axiomSessionPubkey;
+    if (!mint || !owner || !ns?.rpcCall) {
+      _setPos('unavailable', !mint ? 'no-mint' : !owner ? 'no-wallet' : 'no-rpc');
+      return;
+    }
+    // A reading for this mint is already good or on its way.
+    if (_axPosMint === mint && (_axPosState === 'pending' || _axPosState === 'ok')) return;
+    _axPosMint  = mint;
+    _axPosSol   = null;
+    _setPos('pending');
+    try {
+      // getTokenAccountsByOwner is 403'd by publicnode but served by
+      // solanavibestation, which the background RPC pool races alongside it.
+      const r = await ns.rpcCall('getTokenAccountsByOwner',
+        [owner, { mint: mint }, { encoding: 'jsonParsed' }]);
+      // A wallet can hold the same mint in more than one account.
+      let qty = 0;
+      for (const a of (r?.value ?? [])) {
+        const ui = a?.account?.data?.parsed?.info?.tokenAmount?.uiAmount;
+        if (typeof ui === 'number' && isFinite(ui) && ui > 0) qty += ui;
+      }
+      const px = ns?.tokenScoreResult?.mint === mint ? ns.tokenScoreResult.priceUsd : null;
+      const sp = _solUsd();
+      if (_axPosMint !== mint) return;      // token changed under us — this answer is stale
+      if (qty > 0 && px > 0 && sp > 0) {
+        _axPosSol = (qty * px) / sp;
+        _setPos('ok');
+      } else {
+        // Any missing input makes the ratio a guess, and a guessed denominator
+        // would band a real fee against an invented trade size.
+        _setPos('unavailable', !(qty > 0) ? 'no-balance' : !(px > 0) ? 'no-price' : 'no-sol-price');
+      }
+    } catch (e) {
+      // Reading the failure costs nothing here — the trade is not waiting on it —
+      // and a swallowed RPC error is indistinguishable from a priceless token.
+      if (_axPosMint !== mint) return;
+      console.warn('[ZQ:AXIOM] position value lookup failed', e);
+      _setPos('unavailable', 'rpc-error');
+    }
+    if (_axPosMint !== mint) return;
+    // The fee ratio is computed inside calculateRisk, so the verdict has to be
+    // rebuilt now that a denominator exists — re-rendering alone would not.
+    _computeAxiomRisk(mint, null).catch(function () {});
+  }
+
+  // Axiom's sell buttons exit a share of the position. When the share cannot be
+  // read the whole holding is used: a partial exit returns less, so the real fee
+  // share is never lower than the one shown. Understating it is the safe error.
+  function _sellFraction() {
+    const txt = (ns?.axiomPendingBtnRef?.textContent ?? '').trim();
+    const m = /([0-9]+(?:\.[0-9]+)?)\s*%/.exec(txt);
+    if (!m) return { frac: 1, exact: false };
+    const v = parseFloat(m[1]);
+    if (isNaN(v) || v <= 0 || v > 100) return { frac: 1, exact: false };
+    return { frac: v / 100, exact: true };
+  }
+
   function _venueFeeTotals(side) {
     if (!_isSolana()) return null;
     const s = _readSettings();
@@ -915,12 +1016,24 @@
     const p = _preset(s, s.currentSolPresetKey, _side);
     if (!p) return null;
     const _auto = p.autoFee === true;
-    const leg = _side === 'buy' ? (_readBuyAmountFromButton() ?? _axiomBuyAmountSol) : null;
+    // legBasis names what the percentages below are a share of, so the surfaces
+    // can say "of proceeds" on an exit instead of "of trade".
+    let leg = null, legBasis = null;
+    if (_side === 'buy') {
+      leg = _readBuyAmountFromButton() ?? _axiomBuyAmountSol;
+      if (leg > 0) legBasis = 'trade';
+    } else if (_axPosState === 'ok' && _axPosSol > 0 && _axPosMint === (ns?._tokenScoreMint ?? null)) {
+      const f = _sellFraction();
+      leg = _axPosSol * f.frac;
+      legBasis = f.exact ? 'proceeds' : 'position';
+    }
     const sp  = _solUsd();
     const _cap   = parseFloat(p.maxFeeSol);
     const hasCap = !isNaN(_cap) && _cap > 0;
     const base = {
       autoFee: _auto, side: _side, presetKey: s.currentSolPresetKey ?? null,
+      legBasis: legBasis,
+      leg:    leg > 0 ? leg : null,
       cap:    hasCap ? _cap : null,
       capPct: (hasCap && leg > 0) ? (_cap / leg * 100) : null,
       capUsd: (hasCap && sp != null) ? _cap * sp : null,
@@ -1693,6 +1806,8 @@
           // user's own ceiling is knowable, and it is scored as a bound not a cost.
           venueFeePct:     _vf?.pct ?? null,
           venueFeeUsd:     _vf?.usd ?? null,
+          // Names the denominator so the factor can read "of proceeds" on an exit.
+          venueFeeBasis:   _vf?.legBasis ?? null,
           venueFeeCapPct:  (_vf?.pct == null ? (_vf?.capPct ?? null) : null),
           venueFeeAuto:    _vf?.autoFee === true,
         },
@@ -1807,10 +1922,17 @@
   // the only way to know our write is live before the order goes out.
   let _echoWait      = null;
   // The push carries the whole settings object; the envelope around it is unknown.
-  function _findPresets(v, d) {
-    if (!v || typeof v !== 'object' || d > 6) return null;
+  // Budgeted: worker messages are structured clones that can hold whole market feeds.
+  function _findPresets(v, d, budget) {
+    // A relay worker may forward the raw socket frame as a JSON string inside its own envelope.
+    if (typeof v === 'string') {
+      if (d > 6 || v.indexOf('solPresets') === -1) return null;
+      try { return _findPresets(JSON.parse(v), d + 1, budget); } catch (_) { return null; }
+    }
+    if (!v || typeof v !== 'object' || d > 6 || --budget.n < 0) return null;
+    if (v instanceof ArrayBuffer || ArrayBuffer.isView(v)) return null;
     if (v.solPresets && typeof v.solPresets === 'object') return v.solPresets;
-    for (const k in v) { const r = _findPresets(v[k], d + 1); if (r) return r; }
+    for (const k in v) { const r = _findPresets(v[k], d + 1, budget); if (r) return r; }
     return null;
   }
   // Pushed values are strings and ours are mixed, so compare as text — true never equals "true".
@@ -1820,14 +1942,37 @@
     return true;
   }
   function _onInbound(tag, data) {
-    if (!_echoWait || typeof data !== 'string' || !data) return;
-    if (data.indexOf('lippage') === -1 && data.indexOf('evProtection') === -1) return;
-    let parsed = null;
-    try { parsed = JSON.parse(data); } catch (_) { return; }
-    const sp = _findPresets(parsed, 0);
+    if (!_echoWait || !data) return;
+    _echoWait.seen[tag] = (_echoWait.seen[tag] || 0) + 1;
+    let parsed = data;
+    if (typeof data === 'string') {
+      if (data.indexOf('lippage') === -1 && data.indexOf('evProtection') === -1) return;
+      try { parsed = JSON.parse(data); } catch (_) { return; }
+    } else if (typeof data !== 'object') return;
+    const sp = _findPresets(parsed, 0, { n: 5000 });
     if (!sp) return;
     const _got = sp[_echoWait.key]?.[_echoWait.side];
-    if (_presetMatches(_got, _echoWait.want)) return _echoWait.hit();
+    if (_presetMatches(_got, _echoWait.want)) {
+      // OPS-361: a worker message carrying our values confirmed twice on 28 Sep, and both trades
+      // executed on the old preset. Seeing the values is not proof the order builder has them,
+      // so only the page-level socket push (the OPS-265 channel) may release a trade.
+      if (/^(Shared)?Worker:/.test(tag)) {
+        if (!_echoWait.untrustedLogged) {
+          _echoWait.untrustedLogged = true;
+          console.warn('[ZQ:AXIOM] preset match seen on ' + tag + ' at +' + (Date.now() - _echoWait.t0) + ' ms — not trusted as confirmation');
+        }
+        return;
+      }
+      return _echoWait.hit();
+    }
+    // A push that disagrees on one field is otherwise indistinguishable from silence.
+    if (_got && !_echoWait.nearMissLogged) {
+      _echoWait.nearMissLogged = true;
+      console.warn('[ZQ:AXIOM] settings push seen on ' + tag + ' but preset differs', JSON.stringify(_got));
+    } else if (!_got && !_echoWait.nearMissLogged) {
+      _echoWait.nearMissLogged = true;
+      console.warn('[ZQ:AXIOM] solPresets seen on ' + tag + ' without ' + _echoWait.key + '.' + _echoWait.side, JSON.stringify(Object.keys(sp)));
+    }
   }
 
   // Axiom builds the order from in-memory state, which moves only when the server
@@ -1837,7 +1982,7 @@
   // apply, and Axiom pushes only on change, so a missed frame never comes again.
   function _armPresetEcho(key, side, want) {
     const t0 = Date.now();
-    const w = { key: key, side: side === 'sell' ? 'sell' : 'buy', want: want, seenAt: 0 };
+    const w = { key: key, side: side === 'sell' ? 'sell' : 'buy', want: want, seenAt: 0, seen: {}, t0: t0 };
     w.hit = function () { if (!w.seenAt) w.seenAt = Date.now(); };
     _echoWait = w;
     return function () {
@@ -1847,6 +1992,8 @@
           if (done) return;
           done = true;
           if (_echoWait === w) _echoWait = null;
+          // Silence and "traffic, none of it ours" need different fixes, so say which.
+          if (!ok) console.warn('[ZQ:AXIOM] no matching settings push in ' + _ECHO_TIMEOUT_MS + ' ms; inbound by channel:', JSON.stringify(w.seen));
           resolve(ok);
         };
         if (w.seenAt) return finish(true);
@@ -1869,6 +2016,28 @@
     } catch (_) {}
     return _origWsSend.apply(this, arguments);
   };
+
+  // Axiom now opens its trading sockets inside Web Workers (PulseWorker, client-socket), where
+  // the send hook above cannot reach. Observed for diagnosis only: _onInbound never lets a
+  // worker message release a trade (OPS-361). Proxy, so instanceof and statics stay Axiom's.
+  function _tapWorkerCtor(name, portOf) {
+    const Orig = window[name];
+    if (typeof Orig !== 'function') return;
+    try {
+      window[name] = new Proxy(Orig, {
+        construct(target, args, newTarget) {
+          const inst = Reflect.construct(target, args, newTarget);
+          try {
+            const tag = name + ':' + String(args[0] ?? '').replace(/[?#].*/, '').split('/').pop();
+            portOf(inst).addEventListener('message', function (e) { _onInbound(tag, e.data); });
+          } catch (_) {}
+          return inst;
+        },
+      });
+    } catch (_) {}
+  }
+  _tapWorkerCtor('Worker', function (w) { return w; });
+  _tapWorkerCtor('SharedWorker', function (w) { return w.port; });
 
   // ── SPA URL listener (step 5) ────────────────────────────────────────────
   // Axiom is a React SPA. Token navigation uses history.pushState, which does
@@ -2175,6 +2344,11 @@
         // Every earlier scoring pass ran off the buy amount, so its slippage and fees
         // describe the buy preset. The side is only known here.
         _computeAxiomRisk(ns._tokenScoreMint ?? null, _iUsd).catch(function () {});
+        // An exit has no leg on the button to size the flat bribe against. Start the
+        // balance read now so the fee ratio can land while the panel is still open.
+        if (_side === 'sell' && ns._tokenScoreMint) {
+          _refreshPositionValue(ns._tokenScoreMint).catch(function () {});
+        }
       }
       const _w = document.getElementById('sr-widget');
       if (_w) {
@@ -2278,15 +2452,30 @@
     let ambiguous = false;
     if (!m) {
       // Live layout renders 買 as an icon, so it never reaches textContent and the
-      // amount abuts the symbol: "Buy catalyst0.001". A bare trailing integer is
-      // then indistinguishable from a symbol ending in a digit ("Buy CAT3").
-      m = /([0-9]+(?:\.[0-9]+)?)\s*$/.exec(txt);
-      ambiguous = !!m && !m[1].includes('.');
+      // amount abuts the symbol: "Buy catalyst0.001". A symbol ending in digits then
+      // merges into the amount — token "3310" buying 0.01 reads "Buy 33100.01".
+      const rest = txt.replace(/^\s*buy\s+/i, '').trim();
+      const ts   = ns?.tokenScoreResult;
+      const sym  = (ts?.loaded && ts.mint === ns?._tokenScoreMint && ts.symbol) ? String(ts.symbol) : null;
+      if (sym && rest.toLowerCase().startsWith(sym.toLowerCase())) {
+        m = /^([0-9]+(?:\.[0-9]+)?)$/.exec(rest.slice(sym.length).trim());
+      } else {
+        m = /([0-9]+(?:\.[0-9]+)?)\s*$/.exec(txt);
+        ambiguous = !!m;
+      }
     }
     if (!m) return null;
+    if (ambiguous) {
+      // Without the symbol, only a split the visible amount field agrees with is trusted.
+      for (let j = 0; j < m[1].length; j++) {
+        const cand = parseFloat(m[1].slice(j));
+        if (/^[0-9]/.test(m[1].slice(j)) && cand > 0 && cand < 100000 && _amountInputHas(cand)) return cand;
+      }
+      return null;
+    }
     const v = parseFloat(m[1]);
     if (isNaN(v) || v <= 0 || v >= 100000) return null;
-    return (ambiguous && !_amountInputHas(v)) ? null : v;
+    return v;
   }
 
   function _readBuyAmountFromButton() {
@@ -2723,7 +2912,8 @@
             ? 'Your MAX FEE caps it at ' + _esc(_capSol)
               + (_vf.capUsd != null ? ' (\u2248$' + _vf.capUsd.toFixed(2) + ')' : '')
               + (_vf.capPct != null
-                  ? ', which is ' + _vf.capPct.toFixed(_vf.capPct < 10 ? 1 : 0) + '% of this trade.'
+                  ? ', which is ' + _vf.capPct.toFixed(_vf.capPct < 10 ? 1 : 0) + '% of this '
+                    + (_fSide === 'sell' ? 'exit.' : 'trade.')
                   : '.')
             : '';
           return '<div title="Axiom&#39;s Auto Fee sizes the priority fee and bribe live and does not write them '
@@ -2743,7 +2933,17 @@
         const _prio = _vf.prio, _bribe = _vf.bribe;
         const _hasP = _prio != null, _hasB = _bribe != null;
         const _tot  = _vf.tot;
-        const _pct  = _vf.pct;
+        // Round once, then band and colour off the rounded value. Testing the raw one
+        // put an "exceeds half" warning beside a badge that read 100%.
+        const _pct    = _vf.pct == null ? null
+          : (_vf.pct < 10 ? Math.round(_vf.pct * 10) / 10 : Math.round(_vf.pct));
+        const _pctTxt = _pct == null ? null : _pct.toFixed(_pct < 10 ? 1 : 0) + '%';
+        // What the ratio is a share of. On an exit whose share of the position could
+        // not be read the denominator is the whole holding, and saying "proceeds"
+        // there would claim a precision the figure does not have.
+        const _noun = _vf.legBasis === 'proceeds' ? 'proceeds'
+          : _vf.legBasis === 'position' ? 'position value'
+          : 'trade';
         const _fc = _pct == null ? '#C2C2D4'
           : _pct >= 50 ? '#FF4444'
           : _pct >= 20 ? '#FF6B00'
@@ -2758,8 +2958,8 @@
         const _totUsd = _usd(_tot);
         _axFeeTotSol = _tot;
         _axFeeTotUsd = _spU != null ? _tot * _spU : null;
-        const _badge = _pct != null
-          ? _pct.toFixed(_pct < 10 ? 1 : 0) + '% of trade'
+        const _badge = _pctTxt != null
+          ? _pctTxt + ' of ' + _noun
           : _sol(_tot);
         const _feeTip = (_vf.live
             ? 'Auto Fee figures read live from Axiom\u2019s open ' + _fSide + ' settings panel.'
@@ -2784,7 +2984,19 @@
             + ';line-height:1.5;margin-top:7px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.08)">'
             + body + '</div>';
         };
-        const _warn = (_pct != null && _pct >= 20)
+        const _warn = (_pct != null && _pct >= 100)
+          // The trade destroys value outright. Nothing about fee proportionality is
+          // worth saying next to that, so it replaces the softer wording entirely.
+          ? _note('<span style="font-weight:700">This '
+              + (_fSide === 'sell' ? 'exit costs more than it returns' : 'trade costs more than it is worth')
+              + '.</span> The fee is ' + _esc(_sol(_tot)) + (_totUsd ? ' (' + _esc(_totUsd) + ')' : '')
+              + (_vf.leg != null
+                  ? ' against ' + (_vf.legBasis === 'position' ? 'a position worth ' : 'an estimated ')
+                    + _esc(_sol(_vf.leg))
+                  : '')
+              + '. Sell more of the position, or lower the bribe in your Axiom '
+              + _fSide + ' preset, so the fee is not the larger half of the trade.')
+          : (_pct != null && _pct >= 20)
           ? _note(_vf.live
               ? 'Auto Fee sizes this from network conditions rather than your trade size, so a small '
                 + 'trade pays a large share of its value in fees.'

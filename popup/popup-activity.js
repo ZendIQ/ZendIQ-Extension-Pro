@@ -330,6 +330,17 @@ function _buildTooltipHtml(h) {
         : _applied === 'not-applied'
           ? 'Axiom executed this trade on the preset shown above, not the one ZendIQ applied. Your settings were restored either way.'
           : 'ZendIQ could not confirm from Axiom\u2019s record whether this change reached the trade.'}</div>`;
+    } else if (h.axiomAtTarget) {
+      const _atOk = h.axiomOptimizeApplied === 'confirmed';
+      const _atNo = h.axiomOptimizeApplied === 'not-applied';
+      const _atClr = _atOk ? '#14F195' : '#FFB547';
+      html += divider;
+      html += `<div style="font-size:var(--fs-base);font-weight:700;color:${_atClr};margin-bottom:6px">${_atOk ? '\ud83d\udee1 Already at target' : _atNo ? '\u26a0 Preset claim not met' : '\u26a0 Already at target \u2014 unverified'}</div>`;
+      html += `<div style="margin-top:4px;font-size:var(--fs-xs);color:var(--muted)">${_atOk
+        ? 'Your preset already met ZendIQ\u2019s target, so nothing was changed and nothing needed restoring. Axiom\u2019s record confirms it executed at those values.'
+        : _atNo
+          ? 'Your preset met ZendIQ\u2019s target, but Axiom executed this trade at the values shown above instead.'
+          : 'Your preset already met ZendIQ\u2019s target, so nothing was changed. Axiom\u2019s record did not carry enough detail to confirm what it executed at.'}</div>`;
     }
     html += `<div style="margin-top:6px;font-size:var(--fs-xs);color:var(--muted)">ZendIQ monitors Axiom trades post-settlement and can pre-apply a safer preset. It cannot route or re-execute Axiom trades.</div>`;
     return html;
@@ -528,7 +539,14 @@ function _quoteAccuracy(h) {
 // Every venue's Activity card leads with this badge. Mirrors _optBadgeHtml in
 // page-widget.js — the widget runs in the page's MAIN world with no shared imports,
 // so the markup exists twice on purpose; change both together.
-function _optBadgeHtml(optimized, label) {
+function _optBadgeHtml(optimized, label, atTarget, applied) {
+  // ZendIQ wrote nothing on an at-target trade, so no credit is claimed — but it ran
+  // at the values we would have written, which "Not optimized" reads as the opposite
+  // of. A claim Axiom's record contradicts falls through to the amber badge.
+  if (!optimized && atTarget && applied !== 'not-applied') {
+    const ok = applied === 'confirmed';
+    return `<span style="font-size:var(--fs-base);font-weight:700;color:${ok ? '#14F195' : '#FFB547'}">${ok ? '\u2713' : '\u26a0'} Already at target${ok ? '' : ' \u2014 unverified'}</span>`;
+  }
   return optimized
     ? `<span style="font-size:var(--fs-base);font-weight:700;color:#E8E8F0">Swapped <span style="font-size:var(--fs-xs);font-weight:700;background:linear-gradient(135deg,rgba(153,69,255,0.15),rgba(20,241,149,0.06));border:1px solid rgba(153,69,255,0.3);color:#9945FF;border-radius:10px;padding:1px 6px;vertical-align:middle">${label ?? 'ZendIQ Optimized'}</span></span>`
     : `<span style="font-size:var(--fs-base);font-weight:700;color:#FFB547">\u26a0 Not optimized</span>`;
@@ -612,7 +630,7 @@ function _renderHistoryEntry(h, idx) {
     const _mevSecure = !!_preset.enhancedMevProtection;
     const _mevStr  = _mevSecure ? 'MEV Secure' : _preset.mevProtection ? 'MEV On' : 'MEV Off';
     const _mevCol  = (_mevSecure || _preset.mevProtection) ? '#14F195' : '#FFB547';
-    const _optBadge = _optBadgeHtml(h.optimized);
+    const _optBadge = _optBadgeHtml(h.optimized, null, h.axiomAtTarget, h.axiomOptimizeApplied);
     const _msStr   = _preset.timeTakenMs != null ? `${_preset.timeTakenMs}ms` : '';
     // The bribe is SOL, so the denominator is the trade's SOL leg: spent on a buy,
     // received on a sell. A flat ~0.01 SOL fee is unbounded as a ratio.

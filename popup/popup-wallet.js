@@ -22,11 +22,10 @@ function bgMsg(payload) {
 
 // ── Find a jup.ag / raydium / pump.fun tab ───────────────────────────────
 async function findDexTab() {
+  const urls = ['*://jup.ag/*', '*://*.jup.ag/*', '*://raydium.io/*', '*://*.raydium.io/*', '*://pump.fun/*'];
+  if (AXIOM_ENABLED) urls.push('*://axiom.trade/*', '*://*.axiom.trade/*');
   const byUrl = await new Promise(resolve => {
-    chrome.tabs.query(
-      { url: ['*://jup.ag/*', '*://*.jup.ag/*', '*://raydium.io/*', '*://*.raydium.io/*', '*://pump.fun/*', '*://axiom.trade/*', '*://*.axiom.trade/*'] },
-      tabs => resolve(tabs ?? [])
-    );
+    chrome.tabs.query({ url: urls }, tabs => resolve(tabs ?? []));
   });
   if (byUrl.length) return byUrl[0];
 
@@ -35,7 +34,7 @@ async function findDexTab() {
   });
   for (const tab of allTabs) {
     const url = tab.url ?? '';
-    if (url.includes('jup.ag') || url.includes('raydium.io') || url.includes('pump.fun') || url.includes('axiom.trade')) return tab;
+    if (url.includes('jup.ag') || url.includes('raydium.io') || url.includes('pump.fun') || (AXIOM_ENABLED && url.includes('axiom.trade'))) return tab;
   }
   return null;
 }
@@ -45,7 +44,7 @@ function _dexSiteFromTab(tab) {
   const url = tab?.url ?? '';
   if (url.includes('raydium.io')) return { name: 'Raydium', host: 'raydium.io', href: 'https://raydium.io/swap/', color: 'var(--purple)' };
   if (url.includes('pump.fun'))   return { name: 'pump.fun', host: 'pump.fun', href: 'https://pump.fun', color: 'var(--purple)' };
-  if (url.includes('axiom.trade')) return { name: 'Axiom', host: 'axiom.trade', href: 'https://axiom.trade', color: 'var(--purple)' };
+  if (AXIOM_ENABLED && url.includes('axiom.trade')) return { name: 'Axiom', host: 'axiom.trade', href: 'https://axiom.trade', color: 'var(--purple)' };
   return { name: 'jup.ag', host: 'jup.ag', href: 'https://jup.ag', color: 'var(--purple)' };
 }
 

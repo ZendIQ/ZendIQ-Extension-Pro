@@ -421,7 +421,7 @@ async function runCheck() {
     // Detect wallet type from injected providers via the active jup.ag tab
     let detectedType = 'unknown';
     try {
-      const [tab] = await new Promise(res => chrome.tabs.query({ url: ['*://*.jup.ag/*', '*://raydium.io/*', '*://*.raydium.io/*', '*://pump.fun/*', '*://*.pump.fun/*', '*://axiom.trade/*', '*://*.axiom.trade/*'], active: true }, ts => res(ts ?? [])));
+      const [tab] = await new Promise(res => chrome.tabs.query({ url: ['*://*.jup.ag/*', '*://raydium.io/*', '*://*.raydium.io/*', '*://pump.fun/*', '*://*.pump.fun/*', ...(AXIOM_ENABLED ? ['*://axiom.trade/*', '*://*.axiom.trade/*'] : [])], active: true }, ts => res(ts ?? [])));
       if (tab) {
         const [result] = await chrome.scripting.executeScript({
           target: { tabId: tab.id },

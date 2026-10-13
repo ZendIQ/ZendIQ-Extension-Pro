@@ -488,6 +488,49 @@
   }
 
   // ── zendiqWsOverlay ─────────────────────────────────────────────────────
+  // OPS-421: only a recognised swap opens the panel. Anything else — and anything that
+  // cannot be read — goes to the wallet untouched: the original transaction, never one
+  // ZendIQ built. Reclaim Rent, liquidity, claims and the like are not trades.
+  //
+  // Every pass-through is reported, so a real swap we fail to recognise shows up in data
+  // rather than as a user complaint: the classification and the top-level program IDs (public
+  // addresses, first 8 chars), never a wallet or an amount. Sent once per distinct program
+  // set per page load, which also stops one tx counting twice (signed, then broadcast).
+  const _passReported = new Set();
+  function _onSwapPage() {
+    const h = window.location.hostname, p = window.location.pathname;
+    if (h.includes('raydium.io')) return /^\/swap(\/|$)/i.test(p);
+    if (h.includes('pump.fun'))   return /^\/coin\//i.test(p);
+    if (h.includes('jup.ag'))     return p === '/' || /^\/(swap|ultra)(\/|$)/i.test(p);
+    return false;
+  }
+  ns.notePassThrough = function (c, where) {
+    const kind = c?.kind === 'non-swap' ? 'non-swap' : 'unknown';
+    const progs = (c?.programs ?? []).map(p => String(p).slice(0, 8));
+    const msg = `[ZendIQ] ${where}: ${kind === 'unknown' ? 'transaction not readable' : 'not a swap'} \u2014 passed through untouched`;
+    // An unreadable transaction on a swap page is the case that can hide a missed swap.
+    if (kind === 'unknown' && _onSwapPage()) console.warn(msg, c?.programs ?? []);
+    else console.info(msg, c?.programs ?? []);
+    const key = kind + '|' + progs.join(',');
+    if (_passReported.has(key)) return;
+    _passReported.add(key);
+    const h = window.location.hostname;
+    try {
+      ns.logError?.('wallet_hook', {
+        category: 'wallet_hook',
+        detail:   `intercept_passthrough:${kind}:${progs.join(',')}`.slice(0, 120),
+        dex:      h.includes('raydium') ? 'raydium.io' : h.includes('pump.fun') ? 'pump.fun' : h.includes('jup.ag') ? 'jup.ag' : 'unknown',
+      });
+    } catch (_) {}
+  };
+
+  function _passThroughNonSwap(input, label) {
+    const c = ns.classifyTxForIntercept?.(input) ?? { kind: 'unknown', programs: [] };
+    if (c.kind === 'swap') return false;
+    ns.notePassThrough(c, label);
+    return true;
+  }
+
   async function zendiqWsOverlay(callerLabel, origFn, args) {
     // Pump.fun signing — check BEFORE __zendiq_own_tx and __zendiq_ws_confirmed.
     if (ns.widgetSwapStatus === 'pump-signing') {
@@ -668,6 +711,7 @@
     }
     // Run ZendIQ risk analysis + show overlay — keep origFn OUTSIDE this try so
     // wallet rejections propagate cleanly and don't get wrapped by the catch block.
+    if (_passThroughNonSwap(args, callerLabel)) return origFn(...args);
     let signDecision;
     try {
       const p   = window.__zendiq_last_order_params;
@@ -991,6 +1035,7 @@
 
     // Run ZendIQ analysis — keep originalMethod OUTSIDE the catch so wallet
     // rejections propagate up cleanly and don't trigger a double sign prompt.
+    if (_passThroughNonSwap(transaction, methodName)) return originalMethod(transaction, options);
     let decision;
     try {
       const txInfo  = ns.extractTxInfo(transaction);

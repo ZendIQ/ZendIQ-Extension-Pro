@@ -207,7 +207,7 @@
             trade_usd:    entry.inUsdValue != null ? Math.min(Number(entry.inUsdValue), 50000) : null,
             profile:      ns.settingsProfile ?? 'unknown',
             bot_risk_score:    risk?.score ?? null,
-            token_risk_score:  ns.tokenScoreResult?.score ?? null,
+            token_risk_score:  ns.tokenScoreResult?.scoreRaw ?? ns.tokenScoreResult?.score ?? null,
             tx_classification: (function (lv) { return lv === 'LOW' ? 'safe' : lv === 'MEDIUM' ? 'caution' : lv ? 'danger' : null; })(risk?.level),
           });
         } } catch (_) {}
@@ -584,7 +584,7 @@
                     trade_usd:    entry.inUsdValue != null ? Math.min(Number(entry.inUsdValue), 50000) : null,
                     profile:      ns.settingsProfile ?? 'unknown',
                     bot_risk_score:    _rdmRisk?.score ?? null,
-                    token_risk_score:  ns.tokenScoreResult?.score ?? null,
+                    token_risk_score:  ns.tokenScoreResult?.scoreRaw ?? ns.tokenScoreResult?.score ?? null,
                     tx_classification: (function (lv) { return lv === 'LOW' ? 'safe' : lv === 'MEDIUM' ? 'caution' : lv ? 'danger' : null; })(_rdmRisk?.level),
                   });
                 } } catch (_) {}
@@ -650,6 +650,11 @@
             }).catch(() => {})).catch(() => {});
             return rdmResp;
           }
+
+          // OPS-421: a broadcast that is not a recognised swap (Reclaim Rent, liquidity, claims)
+          // goes to the RPC exactly as sent — no panel, no Activity entry.
+          const _bc = ns.classifyTxForIntercept?.(parsed?.params?.[0], parsed?.params?.[1]?.encoding) ?? { kind: 'unknown', programs: [] };
+          if (_bc.kind !== 'swap') { ns.notePassThrough?.(_bc, 'sendTransaction'); return origFetch(resource, init); }
 
           const overlayInfo = { method: methodName || 'send', params: parsed?.params };
 
@@ -958,6 +963,9 @@
 
         if (url.includes('api.mainnet-beta.solana.com') || url.includes('.helius-rpc.com') || url.includes('rpcpool.com')) {
           if (parsed?.method === 'sendTransaction' || parsed?.method === 'send_raw_transaction') {
+            // OPS-421: only a recognised swap is held for a decision; anything else is sent as is.
+            const _bcX = ns.classifyTxForIntercept?.(parsed?.params?.[0], parsed?.params?.[1]?.encoding) ?? { kind: 'unknown', programs: [] };
+            if (_bcX.kind !== 'swap') { ns.notePassThrough?.(_bcX, 'sendTransaction (XHR)'); return origSend.apply(this, arguments); }
             const xhr = this;
             ns.showPendingTransaction({ method: parsed.method, params: parsed.params }).then(decision => {
               if (decision === 'confirm') {

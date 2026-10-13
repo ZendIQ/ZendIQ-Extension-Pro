@@ -143,6 +143,7 @@
     axiomLastMevMode:   null,      // last known mevProtection boolean from log-tx-v3
     axiomMevRisk:       null,      // calculateMEVRisk result for current token
     axiomRiskResult:    null,      // calculateRisk result for current token (execution risk)
+    axiomPositionValue: null,      // {mint, sol, state, why} — sell-size estimate; `why` names the missing input
     axiomConfirmPending: false,    // true while buy-button intercept awaits user decision
     axiomAutoAccepting:  false,    // true while auto-accept optimizes without waiting for a click
     axiomPendingBtnRef:  null,     // DOM reference to the intercepted Buy button
@@ -256,7 +257,9 @@
     ]);
     let tokenClass = 'established'; // default (LOW risk, non-stable)
     const lvl = tokenScore?.level ?? null;
-    if (lvl === 'CRITICAL') {
+    // Keyed on the score, not the level: CRITICAL now also needs evidence (OPS-407), but this
+    // skip is about volatility, and a fresh launch held at HIGH is just as volatile.
+    if (lvl === 'CRITICAL' || (tokenScore?.scoreRaw ?? tokenScore?.score ?? 0) >= 75) {
       tokenClass = 'fresh_launch';  // high legitimate volatility — widest headroom
     } else if (lvl === 'HIGH') {
       tokenClass = 'memecoin';

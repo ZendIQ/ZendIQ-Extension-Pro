@@ -400,10 +400,9 @@
       const outputMint = innerData.outputMint ?? null;
       const isInputSol  = inputMint  === SOL_MINT;
       const isOutputSol = outputMint === SOL_MINT;
-      // Raydium expects micro-lamports per compute unit (~ 200k CU budget)
-      const microLamports = priorityFeeLamports > 0
-        ? String(Math.max(1, Math.round(priorityFeeLamports * 1_000_000 / 200_000)))
-        : '0';
+      // Despite the name, Raydium spends this as a total lamport budget: it picks the CU
+      // limit and back-solves the per-CU price so the whole amount is used.
+      const microLamports = priorityFeeLamports > 0 ? String(Math.max(1, Math.round(priorityFeeLamports))) : '0';
       const body = {
         computeUnitPriceMicroLamports: microLamports,
         swapResponse:  routeData,   // full {id, success, version, data} ? required by Raydium API
@@ -559,15 +558,15 @@
       //
       // Bundling path (jitoTip >= 1000): the swap tx carries NO priority fee ? bundle
       // ordering is set by the tip tx amount. Reserve = tip lamports + rent floor + base-fee headroom.
-      // Non-bundling path: reserve for worst-case CU price. Raydium routing can use up to
-      // 1.4M CU (7? our 200k assumption), so actual fee can be 7? priorityFeeLamports.
+      // Non-bundling path: the priority fee is a fixed budget Raydium spends in full, so it
+      // is reserved once — it does not scale with the CU limit Raydium chooses.
       const _rdmBundling = (ns.jitoMode ?? 'auto') !== 'never';
       const _rdmRentFloor = _rentExemptMin() + 16_000;   // rent floor + signature/ATA headroom
       const _rdmFeeReserve = (inputMint === _SOL_MINT)
         ? Math.max(1_000_000, (
             _rdmBundling
               ? (jitoTipLamports ?? 0) + _rdmRentFloor        // bundle: tip tx debit + rent-exempt floor
-              : (priorityFeeLamports ?? 0) * 7 + _rdmRentFloor // non-bundle: CU price worst case
+              : (priorityFeeLamports ?? 0) + _rdmRentFloor    // non-bundle: fee budget + rent-exempt floor
           ))
         : 0;
       const _rdmAmountStr = _rdmFeeReserve > 0
@@ -700,6 +699,11 @@
             // Scale Jupiter's outUsdValue by the output token ratio to get a Raydium estimate
             const _rdmOutUsd = (order_raw.outUsdValue != null && _jupOut > 0)
               ? order_raw.outUsdValue * (_rdmOut / _jupOut) : null;
+            // Raydium reports price impact as a percent; Jupiter and every consumer of this
+            // field use a fraction, so normalise here rather than at each read site.
+            const _rdmImpactFrac = Number.isFinite(Number(_rdmData.priceImpactPct))
+              ? Number(_rdmData.priceImpactPct) / 100
+              : null;
             // Build display order immediately from compute data ? Review & Sign renders from
             // this without waiting for the TX build (which takes another 1-3s via Raydium API).
             order = {
@@ -709,7 +713,7 @@
               _rdmPoolType:         _rdmData.routePlan?.[0]?.poolType ?? null,
               outAmount:            String(Math.floor(_rdmData.outputAmount ?? 0)),
               otherAmountThreshold: String(_rdmData.otherAmountThreshold ?? 0),
-              priceImpactPct:       _rdmData.priceImpactPct ?? null,
+              priceImpactPct:       _rdmImpactFrac,
               routePlan:            _rdmData.routePlan ?? [],
               swapType:             'amm',
               inUsdValue:           order_raw.inUsdValue ?? null,
@@ -742,7 +746,7 @@
             // Active mode: use tightenedBps so the sign-time minimumAmountOut is tighter.
             if (ns.dynamicSlippageMode !== 'off' && !ns._dynSlipOverride) {
               const _dynCalc = ns.calcDynSlippage?.({
-                priceImpactPct:    _rdmData.priceImpactPct ?? null,
+                priceImpactPct:    _rdmImpactFrac,
                 originalSlippageBps: ns.widgetCapturedTrade.originalSlippageBps ?? 50,
                 tokenScore:        ns.tokenScoreResult,
               }) ?? null;
@@ -1744,7 +1748,7 @@
               jito_tip_lamports: _feesSkip.jitoTipLamports ?? null,
               route_chosen:     _rt,
               bot_risk_score:   _rSkip?.score  ?? null,
-              token_risk_score: ns.tokenScoreResult?.score ?? null,
+              token_risk_score: ns.tokenScoreResult?.scoreRaw ?? ns.tokenScoreResult?.score ?? null,
               tx_classification: _lv2s(_rSkip?.level),
               profile:          ns.settingsProfile ?? 'unknown',
               auto_sign:        !!ns.autoAccept,
@@ -2391,7 +2395,7 @@
               jito_tip_lamports: _feesMain.jitoTipLamports ?? null,
               route_chosen:     _rtMain,
               bot_risk_score:   _rMain?.score  ?? null,
-              token_risk_score: ns.tokenScoreResult?.score ?? null,
+              token_risk_score: ns.tokenScoreResult?.scoreRaw ?? ns.tokenScoreResult?.score ?? null,
               tx_classification: _lv2s2(_rMain?.level),
               profile:          ns.settingsProfile ?? 'unknown',
               auto_sign:        !!ns.autoAccept,
